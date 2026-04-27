@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Lecture Processor</title>
+    <link rel="stylesheet" href="src/styles.css" />
+  </head>
+  <body>
+    <main id="app">
+      <section class="setup">
+        <div class="title-row">
+          <div>
+            <p class="eyebrow">Local Batch</p>
+            <h1>Lecture Processor</h1>
+          </div>
+          <button id="settingsButton" class="icon-button" title="Settings" aria-label="Settings">⚙</button>
+        </div>
+
+        <div id="dropZone" class="drop-zone">
+          <div class="drop-main">
+            <div class="folder-icon">⌁</div>
+            <div>
+              <div id="folderTitle" class="drop-title">Choose lecture folder</div>
+              <div id="folderSub" class="drop-sub">No folder selected</div>
+            </div>
+          </div>
+          <div class="drop-actions">
+            <button id="chooseFolderButton" class="secondary-button">Browse</button>
+            <button id="clearFolderButton" class="icon-button hidden" title="Clear folder" aria-label="Clear folder">×</button>
+          </div>
+        </div>
+
+        <div id="folderError" class="inline-error hidden"></div>
+
+        <div class="speed-panel">
+          <div>
+            <label>Recording Speed</label>
+            <p>Applied to entire batch</p>
+          </div>
+          <div class="segmented" role="radiogroup" aria-label="Recording speed">
+            <button class="segment active" data-speed="1x">1×</button>
+            <button class="segment" data-speed="2x">2× → 1×</button>
+          </div>
+        </div>
+
+        <div class="output-row">
+          <div>
+            <label>Output</label>
+            <div id="outputPath" class="path-text">—</div>
+          </div>
+          <button id="chooseOutputButton" class="secondary-button">Browse</button>
+        </div>
+
+        <button id="startButton" class="primary-button" disabled>Start</button>
+      </section>
+
+      <section class="activity">
+        <div class="activity-header">
+          <div>
+            <p class="eyebrow">Run</p>
+            <h2 id="runTitle">Ready</h2>
+          </div>
+          <div id="statusPill" class="status-pill idle">Idle</div>
+        </div>
+
+        <div class="progress-track">
+          <div id="progressBar" class="progress-bar"></div>
+        </div>
+
+        <div id="resultsGrid" class="results-grid">
+          <div>
+            <span id="attemptedCount">0</span>
+            <label>Attempted</label>
+          </div>
+          <div>
+            <span id="completedCount">0</span>
+            <label>Completed</label>
+          </div>
+          <div>
+            <span id="failedCount">0</span>
+            <label>Failed</label>
+          </div>
+          <div>
+            <span id="skippedCount">0</span>
+            <label>Skipped</label>
+          </div>
+        </div>
+
+        <pre id="logOutput" class="log-output">Waiting for a batch.</pre>
+
+        <div class="activity-actions">
+          <button id="openOutputButton" class="secondary-button" disabled>Open Output</button>
+        </div>
+      </section>
+
+      <dialog id="settingsDialog" class="settings-dialog">
+        <form method="dialog">
+          <div class="dialog-head">
+            <h2>Settings</h2>
+            <button class="icon-button" value="cancel" title="Close" aria-label="Close">×</button>
+          </div>
+
+          <div class="field-grid">
+            <label>
+              Audio Quality
+              <select id="audioQuality">
+                <option value="fast">Fast</option>
+                <option value="high">High</option>
+              </select>
+            </label>
+
+            <label>
+              Transcription
+              <select id="transcriptionEngine">
+                <option value="auto">Auto</option>
+                <option value="faster-whisper">faster-whisper</option>
+                <option value="openai-whisper">openai-whisper</option>
+                <option value="none">None</option>
+              </select>
+            </label>
+
+            <label>
+              Whisper Model
+              <select id="whisperModel">
+                <option value="large-v3">large-v3</option>
+                <option value="medium">medium</option>
+                <option value="small">small</option>
+              </select>
+            </label>
+
+            <label>
+              Slide Sensitivity
+              <select id="slideSensitivity">
+                <option value="low">Low</option>
+                <option value="medium" selected>Medium</option>
+                <option value="high">High</option>
+              </select>
+            </label>
+
+            <label>
+              Concurrent Files
+              <input id="concurrentFiles" type="number" min="1" max="8" value="4" />
+            </label>
+
+            <label class="checkbox-row">
+              <input id="saveNormalized" type="checkbox" checked />
+              <span>Save normalized video</span>
+            </label>
+          </div>
+
+          <div class="warning">
+            2× normalization can create half-speed output if the batch is already 1×.
+          </div>
+
+          <div class="dialog-actions">
+            <button class="primary-button" value="default">Done</button>
+          </div>
+        </form>
+      </dialog>
+    </main>
+
+    <script type="module" src="src/main.js"></script>
+  </body>
+</html>

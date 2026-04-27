@@ -1,0 +1,19 @@
+[package]
+name = "lecture-processor-app"
+version = "0.1.0"
+description = "Desktop wrapper for Lecture Processor"
+authors = ["aaramos <aaramos78@gmail.com>"]
+edition = "2021"
+
+[lib]
+name = "lecture_processor_app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.5.1", features = [] }
+
+[dependencies]
+rfd = "0.15.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = { version = "2.10.2", features = [] }

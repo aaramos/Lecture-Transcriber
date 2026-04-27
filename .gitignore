@@ -5,8 +5,10 @@ __pycache__/
 .ruff_cache/
 .venv/
 .tools/
+node_modules/
 venv/
 dist/
 build/
+src-tauri/target/
 *.egg-info/
 *_processed/

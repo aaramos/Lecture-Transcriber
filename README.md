@@ -1,8 +1,8 @@
 # Lecture Processor
 
-Local MVP for processing lecture recording folders.
+Local app for processing lecture recording folders.
 
-The first implementation is a Python CLI. It is designed to become the processing core for the desktop app described in `doc/lecture-processor-prd.html`.
+The implementation has two layers: a Python processing core and a Tauri desktop shell. The desktop app is the main user path; the CLI remains available for automation and debugging.
 
 ## What It Does
 
@@ -14,6 +14,7 @@ The first implementation is a Python CLI. It is designed to become the processin
 - Writes per-file output folders, transcripts, SRT files, slides, and processing logs.
 - Continues the batch if one file fails.
 - Prints a final attempted/completed/failed/skipped summary.
+- Provides a desktop UI for selecting folders, speed, output location, and processing settings.
 
 ## Requirements
 
@@ -51,9 +52,33 @@ For tests only, no external media tools are required:
 PYTHONPATH=src python3 -m unittest discover -s tests
 ```
 
-## Usage
+## Desktop App
 
-Launch the lightweight desktop wrapper:
+Build the desktop app:
+
+```bash
+. ./scripts/dev-env.sh
+npm install
+npm run build
+cargo tauri build
+```
+
+The verified macOS app bundle is created at:
+
+```text
+src-tauri/target/release/bundle/macos/Lecture Processor.app
+```
+
+For development:
+
+```bash
+. ./scripts/dev-env.sh
+cargo tauri dev
+```
+
+## CLI Usage
+
+Launch the lightweight Python desktop wrapper:
 
 ```bash
 lecture-processor-app
