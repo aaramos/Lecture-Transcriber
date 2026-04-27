@@ -4,7 +4,7 @@ from pathlib import Path
 
 from lecture_processor.config import AudioQuality, BatchConfig, RecordingSpeed
 from lecture_processor.models import FileStatus, MediaInfo, TranscriptResult, TranscriptSegment
-from lecture_processor.pipeline import BatchProcessor, allocate_output_dirs
+from lecture_processor.pipeline import BatchProcessor, allocate_output_dirs, normalized_video_output_path
 
 
 class FakeInspector:
@@ -122,6 +122,30 @@ class BatchProcessorTests(unittest.TestCase):
             self.assertFalse((output / "lecture" / ".normalized_work.mp4").exists())
             self.assertFalse((output / "lecture" / "normalized_video.mp4").exists())
 
+    def test_saved_normalized_video_keeps_source_lecture_name(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "Lecture 1: Intro.mov"
+            source.write_text("video", encoding="utf-8")
+            output = root / "out"
+            config = BatchConfig(
+                input_dir=root,
+                output_dir=output,
+                recording_speed=RecordingSpeed.DOUBLE,
+                confirm_normalization=True,
+            )
+
+            BatchProcessor(
+                config=config,
+                inspector=FakeInspector({"Lecture 1: Intro.mov": 120.0}),
+                normalizer=FakeNormalizer(),
+                transcriber=FakeTranscriber(),
+                slide_extractor=FakeSlideExtractor(),
+            ).run()
+
+            self.assertTrue((output / "Lecture_1_Intro" / "Lecture_1_Intro.mp4").exists())
+            self.assertFalse((output / "Lecture_1_Intro" / "normalized_video.mp4").exists())
+
     def test_failure_cleans_partial_output_and_batch_continues(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -148,8 +172,13 @@ class BatchProcessorTests(unittest.TestCase):
             self.assertEqual(summary.completed, 1)
             bad_dir = output / "bad"
             self.assertTrue((bad_dir / "processing_log.txt").exists())
-            self.assertFalse((bad_dir / "normalized_video.mp4").exists())
+            self.assertFalse((bad_dir / "bad.mp4").exists())
             self.assertFalse((bad_dir / "transcript.txt").exists())
+
+    def test_normalized_video_output_path_uses_portable_source_name(self):
+        path = normalized_video_output_path(Path("Lecture: 2.mov"), Path("/tmp/out"))
+
+        self.assertEqual(path, Path("/tmp/out") / "Lecture_2.mp4")
 
     def test_emits_batch_and_file_progress_events(self):
         with tempfile.TemporaryDirectory() as tmp:

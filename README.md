@@ -136,7 +136,7 @@ Each source file gets its own output folder:
 ```text
 OutputFolder/
 └── Lecture1/
-    ├── normalized_video.mp4
+    ├── Lecture1.mp4
     ├── transcript.txt
     ├── transcript.srt
     ├── slides/

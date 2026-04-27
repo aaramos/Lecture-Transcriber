@@ -111,7 +111,7 @@ class BatchProcessor:
             work_video = source
             normalized_duration = None
             if self.config.recording_speed is RecordingSpeed.DOUBLE:
-                destination = output_dir / "normalized_video.mp4"
+                destination = normalized_video_output_path(source, output_dir)
                 if not self.config.save_normalized_video:
                     destination = output_dir / ".normalized_work.mp4"
                     temp_normalized = destination
@@ -229,6 +229,10 @@ def allocate_output_dirs(files: List[Path], output_root: Path) -> dict:
         folder_name = base if index == 1 else f"{base}_{index}"
         allocated[path] = output_root / folder_name
     return allocated
+
+
+def normalized_video_output_path(source: Path, output_dir: Path) -> Path:
+    return output_dir / f"{safe_folder_name(source.stem)}.mp4"
 
 
 def reset_output_dir(output_dir: Path) -> None:
