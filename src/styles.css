@@ -410,11 +410,11 @@ button:disabled {
   display: grid;
   gap: 6px;
   min-height: 0;
-  overflow: auto;
+  align-content: start;
 }
 
 .active-videos {
-  max-height: 190px;
+  overflow: visible;
 }
 
 .queue-section {
@@ -422,7 +422,7 @@ button:disabled {
 }
 
 .queue-list {
-  align-content: start;
+  overflow: auto;
 }
 
 .video-placeholder,
@@ -676,4 +676,11 @@ select.invalid {
 
 .confirm-check {
   padding: 18px 0 4px;
+}
+
+@media (max-height: 760px) {
+  .active-videos {
+    max-height: clamp(120px, 24vh, 190px);
+    overflow: auto;
+  }
 }
