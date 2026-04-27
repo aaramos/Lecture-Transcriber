@@ -1969,15 +1969,15 @@ ffmpeg <span class="code-flag">-i</span> <span class="code-value">input.mov</spa
           <tr><td>Transcription</td><td>faster-whisper (preferred) or openai-whisper</td><td>MVP uses one controlled Whisper transcription queue with large-v3 loaded once. Multiple files can still be active in the pipeline while transcription jobs wait their turn.</td></tr>
           <tr><td>Slide extraction</td><td>OpenCV + imagehash</td><td>Scene change detection + dedup</td></tr>
           <tr><td>Image post-processing</td><td>Pillow</td><td>Crop, resize, export PNG</td></tr>
-          <tr><td>Concurrency</td><td>ProcessPoolExecutor (Python)</td><td><code>max_workers=n</code> (default 4) for file-level pipeline work. Normalization and slide extraction can run in parallel; MVP transcription uses a single Whisper lane unless an advanced multi-model mode is added for high-RAM machines.</td></tr>
+          <tr><td>Concurrency</td><td>ThreadPoolExecutor orchestrator + subprocess media work</td><td><code>max_workers=n</code> (default 4) for file-level pipeline work. FFmpeg jobs run as subprocesses, slide extraction can run in parallel, and MVP transcription uses a single Whisper lane unless an advanced multi-model mode is added for high-RAM machines.</td></tr>
         </tbody>
       </table>
 
       <h3>Implementation Order</h3>
       <ul class="spec-list">
         <li>Phase 1 — Python CLI with <code>--recording-speed [1x|2x]</code> flag; validate FFmpeg normalization + VFR guard on real .mov files</li>
-        <li>Phase 2 — Integrate transcription (shared large-v3 model) + slide extraction on normalized output; validate WER improvement; implement short-file skip (60s) and failure handling with partial output cleanup</li>
-        <li>Phase 3 — Add <code>--concurrent [1-8]</code> flag using <code>ProcessPoolExecutor</code>; default 4; validate on M1 Max 32GB; confirm video/slide parallelism with single-lane Whisper transcription queue under load</li>
+        <li>Phase 2 — Integrate transcription (single controlled large-v3 queue) + slide extraction on normalized output; validate WER improvement; implement short-file skip (60s) and failure handling with partial output cleanup</li>
+        <li>Phase 3 — Add <code>--concurrent [1-8]</code> flag using a file-level executor; default 4; validate on M1 Max 32GB; confirm video/slide parallelism with single-lane Whisper transcription queue under load</li>
         <li>Phase 4 — Tauri wrapper + all Settings modal controls; wire confirmation dialog, empty state, ✕ clear, keyboard shortcuts (⌘, / ⌘R / Escape)</li>
         <li>Phase 5 — Per-file completion stats (word count, slide count); failure + skipped rows on completion screen; HQ audio mode (Rubber Band)</li>
       </ul>
@@ -1999,7 +1999,7 @@ ffmpeg <span class="code-flag">-i</span> <span class="code-value">input.mov</spa
           <tr>
             <td>User normalizes 1× files (half-speed output)</td>
             <td><span class="risk-tag risk-high">High</span></td>
-            <td>Confirmation dialog required; cannot be bypassed</td>
+            <td>Explicit warning + confirmation required; future speed detection needed for a hard block</td>
           </tr>
           <tr>
             <td>atempo=0.5 at minimum boundary</td>

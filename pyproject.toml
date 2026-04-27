@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lecture-processor"
+version = "0.1.0"
+description = "Local batch processor for lecture recordings."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "Proprietary" }
+authors = [
+  { name = "aaramos", email = "aaramos78@gmail.com" }
+]
+dependencies = []
+
+[project.optional-dependencies]
+transcription = [
+  "faster-whisper>=1.0.0",
+  "openai-whisper>=20231117"
+]
+slides = [
+  "opencv-python>=4.8.0",
+  "Pillow>=10.0.0"
+]
+dev = []
+
+[project.scripts]
+lecture-processor = "lecture_processor.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
