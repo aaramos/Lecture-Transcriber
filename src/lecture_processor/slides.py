@@ -1,16 +1,99 @@
 import importlib
+import shutil
+import subprocess
+import tempfile
 from pathlib import Path
 
-from .config import SlideSensitivity
+from .config import FfmpegHwAccel, SlideBackend, SlideSensitivity
 from .errors import DependencyMissingError, ProcessingError
+from .media import _hwaccel_args, _require_command
 from .timecode import format_timestamp_for_filename
 
 
 class SlideExtractor:
-    def __init__(self, sensitivity: SlideSensitivity = SlideSensitivity.MEDIUM) -> None:
+    def __init__(
+        self,
+        sensitivity: SlideSensitivity = SlideSensitivity.MEDIUM,
+        backend: SlideBackend = SlideBackend.AUTO,
+        ffmpeg_path: str = "ffmpeg",
+        ffmpeg_hwaccel: FfmpegHwAccel = FfmpegHwAccel.AUTO,
+        apple_silicon: bool = False,
+    ) -> None:
         self.sensitivity = sensitivity
+        self.backend = backend
+        self.ffmpeg_path = ffmpeg_path
+        self.ffmpeg_hwaccel = ffmpeg_hwaccel
+        self.apple_silicon = apple_silicon
 
     def extract(self, media_path: Path, output_dir: Path, timestamp_scale: float = 1.0) -> int:
+        if self.backend is SlideBackend.OPENCV:
+            return self._extract_opencv(media_path, output_dir, timestamp_scale)
+
+        try:
+            return self._extract_ffmpeg(media_path, output_dir, timestamp_scale)
+        except (DependencyMissingError, ProcessingError):
+            if self.backend is SlideBackend.FFMPEG:
+                raise
+            return self._extract_opencv(media_path, output_dir, timestamp_scale)
+
+    def _extract_ffmpeg(self, media_path: Path, output_dir: Path, timestamp_scale: float) -> int:
+        try:
+            image_module = importlib.import_module("PIL.Image")
+            image_chops = importlib.import_module("PIL.ImageChops")
+            image_stat = importlib.import_module("PIL.ImageStat")
+        except ImportError as exc:
+            raise DependencyMissingError(
+                "Pillow is not installed. Install with: python3 -m pip install -e '.[slides]'"
+            ) from exc
+
+        ffmpeg = _require_command(self.ffmpeg_path)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        threshold = _threshold_for(self.sensitivity)
+
+        with tempfile.TemporaryDirectory(prefix="lecture-slides-") as tmp:
+            tmp_path = Path(tmp)
+            frame_pattern = tmp_path / "frame_%06d.png"
+            command = [
+                ffmpeg,
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                *_hwaccel_args(self.ffmpeg_hwaccel, self.apple_silicon),
+                "-i",
+                str(media_path),
+                "-vf",
+                "fps=1/2",
+                str(frame_pattern),
+            ]
+            completed = subprocess.run(command, capture_output=True, text=True)
+            if completed.returncode != 0:
+                raise ProcessingError(
+                    f"ffmpeg slide extraction failed for {media_path.name}: "
+                    f"{completed.stderr.strip() or completed.stdout.strip()}"
+                )
+
+            previous_frame = None
+            saved = 0
+            for sample_index, frame_path in enumerate(sorted(tmp_path.glob("frame_*.png"))):
+                frame = image_module.open(frame_path).convert("RGB")
+                should_save = previous_frame is None
+                if previous_frame is not None:
+                    diff = image_chops.difference(previous_frame, frame)
+                    means = image_stat.Stat(diff).mean
+                    should_save = (sum(means) / len(means)) >= threshold
+
+                if should_save:
+                    timestamp = (sample_index * 2.0) * timestamp_scale
+                    saved += 1
+                    filename = f"slide_{saved:04d}_{format_timestamp_for_filename(timestamp)}.png"
+                    shutil.copyfile(frame_path, output_dir / filename)
+                    previous_frame = frame.copy()
+                frame.close()
+
+        return saved
+
+    def _extract_opencv(self, media_path: Path, output_dir: Path, timestamp_scale: float) -> int:
         try:
             cv2 = importlib.import_module("cv2")
         except ImportError as exc:

@@ -17,11 +17,17 @@ dependencies = []
 [project.optional-dependencies]
 transcription = [
   "faster-whisper>=1.0.0",
-  "openai-whisper>=20231117"
+  "openai-whisper>=20231117",
+  "pywhispercpp>=1.3.0"
 ]
 slides = [
   "opencv-python>=4.8.0",
   "Pillow>=10.0.0"
+]
+apple-silicon = [
+  "pywhispercpp>=1.3.0",
+  "coremltools>=8.0",
+  "ane_transformers"
 ]
 dev = []
 

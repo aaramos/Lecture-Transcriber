@@ -23,9 +23,22 @@ class SlideSensitivity(str, Enum):
 
 class TranscriptionEngine(str, Enum):
     AUTO = "auto"
+    WHISPER_CPP = "whisper-cpp"
     FASTER_WHISPER = "faster-whisper"
     OPENAI_WHISPER = "openai-whisper"
     NONE = "none"
+
+
+class FfmpegHwAccel(str, Enum):
+    AUTO = "auto"
+    NONE = "none"
+    VIDEOTOOLBOX = "videotoolbox"
+
+
+class SlideBackend(str, Enum):
+    AUTO = "auto"
+    FFMPEG = "ffmpeg"
+    OPENCV = "opencv"
 
 
 @dataclass(frozen=True)
@@ -41,8 +54,13 @@ class BatchConfig:
     slide_sensitivity: SlideSensitivity = SlideSensitivity.MEDIUM
     transcription_engine: TranscriptionEngine = TranscriptionEngine.AUTO
     whisper_model: str = "large-v3"
+    whisper_cpp_model_dir: str = ""
+    require_whisper_cpp_coreml: bool = False
     ffmpeg_path: str = "ffmpeg"
     ffprobe_path: str = "ffprobe"
+    ffmpeg_hwaccel: FfmpegHwAccel = FfmpegHwAccel.AUTO
+    slide_backend: SlideBackend = SlideBackend.AUTO
+    apple_silicon: bool = False
 
     def validate(self) -> None:
         if not self.input_dir.exists():
@@ -53,6 +71,11 @@ class BatchConfig:
             raise LectureProcessorError("--concurrent must be between 1 and 8")
         if self.min_duration_seconds < 0:
             raise LectureProcessorError("--min-duration must be zero or greater")
+        if self.require_whisper_cpp_coreml and self.transcription_engine not in (
+            TranscriptionEngine.AUTO,
+            TranscriptionEngine.WHISPER_CPP,
+        ):
+            raise LectureProcessorError("--require-whisper-cpp-coreml requires whisper-cpp or auto transcription")
         if self.recording_speed is RecordingSpeed.DOUBLE and not self.confirm_normalization:
             raise LectureProcessorError(
                 "2x normalization can create half-speed output if the files are already 1x. "

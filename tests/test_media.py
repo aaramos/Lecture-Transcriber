@@ -3,11 +3,12 @@ import unittest
 from pathlib import Path
 from subprocess import CompletedProcess
 
-from lecture_processor.config import AudioQuality, RecordingSpeed
+from lecture_processor.config import AudioQuality, FfmpegHwAccel, RecordingSpeed
 from lecture_processor.errors import DependencyMissingError
 from lecture_processor.media import (
     MediaNormalizer,
     _audio_filter_for,
+    _hwaccel_args,
     _has_audio_stream,
     _require_command,
     ensure_media_tools,
@@ -90,6 +91,76 @@ class MediaDependencyTests(unittest.TestCase):
     def test_detects_audio_streams_from_probe_payload(self):
         self.assertTrue(_has_audio_stream({"streams": [{"codec_type": "audio"}]}))
         self.assertFalse(_has_audio_stream({"streams": [{"codec_type": "video"}]}))
+
+    def test_videotoolbox_hwaccel_is_enabled_on_apple_silicon_auto(self):
+        self.assertEqual(_hwaccel_args(FfmpegHwAccel.AUTO, apple_silicon=True), ["-hwaccel", "videotoolbox"])
+        self.assertEqual(_hwaccel_args(FfmpegHwAccel.AUTO, apple_silicon=False), [])
+        self.assertEqual(_hwaccel_args(FfmpegHwAccel.NONE, apple_silicon=True), [])
+
+    def test_normalization_command_includes_videotoolbox_when_requested(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ffmpeg = Path(tmp) / "ffmpeg"
+            ffmpeg.write_text("binary", encoding="utf-8")
+            captured = {}
+
+            def runner(command, capture_output, text):
+                captured["command"] = command
+                return CompletedProcess(command, 0, "", "")
+
+            media_info = MediaInfo(
+                path=Path("lecture.mov"),
+                duration_seconds=120.0,
+                has_audio=False,
+            )
+
+            MediaNormalizer(
+                ffmpeg_path=str(ffmpeg),
+                runner=runner,
+                ffmpeg_hwaccel=FfmpegHwAccel.VIDEOTOOLBOX,
+            ).normalize(
+                source=Path("lecture.mov"),
+                destination=Path(tmp) / "out" / "normalized_video.mp4",
+                media_info=media_info,
+                recording_speed=RecordingSpeed.DOUBLE,
+                audio_quality=AudioQuality.FAST,
+            )
+
+            command = captured["command"]
+            self.assertLess(command.index("-hwaccel"), command.index("-i"))
+            self.assertIn("videotoolbox", command)
+
+    def test_auto_videotoolbox_falls_back_to_software_decode(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ffmpeg = Path(tmp) / "ffmpeg"
+            ffmpeg.write_text("binary", encoding="utf-8")
+            commands = []
+
+            def runner(command, capture_output, text):
+                commands.append(command)
+                return CompletedProcess(command, 1 if len(commands) == 1 else 0, "", "hw failed")
+
+            media_info = MediaInfo(
+                path=Path("lecture.mov"),
+                duration_seconds=120.0,
+                has_audio=False,
+            )
+
+            MediaNormalizer(
+                ffmpeg_path=str(ffmpeg),
+                runner=runner,
+                ffmpeg_hwaccel=FfmpegHwAccel.AUTO,
+                apple_silicon=True,
+            ).normalize(
+                source=Path("lecture.mov"),
+                destination=Path(tmp) / "out" / "lecture.mp4",
+                media_info=media_info,
+                recording_speed=RecordingSpeed.DOUBLE,
+                audio_quality=AudioQuality.FAST,
+            )
+
+            self.assertEqual(len(commands), 2)
+            self.assertIn("-hwaccel", commands[0])
+            self.assertNotIn("-hwaccel", commands[1])
 
 
 if __name__ == "__main__":

@@ -1,5 +1,7 @@
 import argparse
 import json
+import platform
+import subprocess
 import sys
 import threading
 from pathlib import Path
@@ -7,7 +9,9 @@ from pathlib import Path
 from .config import (
     AudioQuality,
     BatchConfig,
+    FfmpegHwAccel,
     RecordingSpeed,
+    SlideBackend,
     SlideSensitivity,
     TranscriptionEngine,
 )
@@ -35,12 +39,17 @@ def build_parser() -> argparse.ArgumentParser:
     process.add_argument("--no-save-normalized-video", action="store_true")
     process.add_argument("--audio-quality", choices=[item.value for item in AudioQuality], default="fast")
     process.add_argument("--slide-sensitivity", choices=[item.value for item in SlideSensitivity], default="medium")
+    process.add_argument("--slide-backend", choices=[item.value for item in SlideBackend], default="auto")
     process.add_argument(
         "--transcription-engine",
         choices=[item.value for item in TranscriptionEngine],
         default="auto",
     )
     process.add_argument("--whisper-model", default="large-v3")
+    process.add_argument("--whisper-cpp-model-dir", default="")
+    process.add_argument("--require-whisper-cpp-coreml", action="store_true")
+    process.add_argument("--apple-silicon", action="store_true")
+    process.add_argument("--ffmpeg-hwaccel", choices=[item.value for item in FfmpegHwAccel], default="auto")
     process.add_argument("--ffmpeg", default="ffmpeg")
     process.add_argument("--ffprobe", default="ffprobe")
     process.add_argument("--json-events", action="store_true", help=argparse.SUPPRESS)
@@ -59,6 +68,7 @@ def main(argv=None) -> int:
 def _run_process(args) -> int:
     input_dir = args.input_dir.expanduser().resolve()
     output_dir = args.output.expanduser().resolve() if args.output else _default_output_dir(input_dir)
+    apple_silicon = args.apple_silicon or _detect_apple_silicon()
     config = BatchConfig(
         input_dir=input_dir,
         output_dir=output_dir,
@@ -69,10 +79,15 @@ def _run_process(args) -> int:
         save_normalized_video=not args.no_save_normalized_video,
         audio_quality=AudioQuality(args.audio_quality),
         slide_sensitivity=SlideSensitivity(args.slide_sensitivity),
+        slide_backend=SlideBackend(args.slide_backend),
         transcription_engine=TranscriptionEngine(args.transcription_engine),
         whisper_model=args.whisper_model,
+        whisper_cpp_model_dir=args.whisper_cpp_model_dir,
+        require_whisper_cpp_coreml=args.require_whisper_cpp_coreml,
         ffmpeg_path=args.ffmpeg,
         ffprobe_path=args.ffprobe,
+        ffmpeg_hwaccel=FfmpegHwAccel(args.ffmpeg_hwaccel),
+        apple_silicon=apple_silicon,
     )
 
     try:
@@ -82,17 +97,30 @@ def _run_process(args) -> int:
         needs_ffmpeg = (
             config.recording_speed is RecordingSpeed.DOUBLE
             or config.transcription_engine is not TranscriptionEngine.NONE
+            or config.slide_backend is not SlideBackend.OPENCV
         )
         ensure_media_tools(
             ffprobe_path=config.ffprobe_path,
             ffmpeg_path=config.ffmpeg_path,
             needs_ffmpeg=needs_ffmpeg,
         )
-        transcriber = build_transcriber(config.transcription_engine, config.whisper_model)
+        transcriber = build_transcriber(
+            config.transcription_engine,
+            config.whisper_model,
+            prefer_whisper_cpp=config.apple_silicon,
+            whisper_cpp_model_dir=config.whisper_cpp_model_dir,
+            require_whisper_cpp_coreml=config.require_whisper_cpp_coreml,
+        )
         processor = BatchProcessor(
             config=config,
             transcriber=transcriber,
-            slide_extractor=SlideExtractor(config.slide_sensitivity),
+            slide_extractor=SlideExtractor(
+                config.slide_sensitivity,
+                backend=config.slide_backend,
+                ffmpeg_path=config.ffmpeg_path,
+                ffmpeg_hwaccel=config.ffmpeg_hwaccel,
+                apple_silicon=config.apple_silicon,
+            ),
             progress_callback=_build_event_printer(args.json_events),
         )
         summary = processor.run()
@@ -115,6 +143,22 @@ def _build_event_printer(enabled: bool):
             print(f"{EVENT_PREFIX}{json.dumps(event, sort_keys=True)}", flush=True)
 
     return print_event
+
+
+def _detect_apple_silicon() -> bool:
+    if sys.platform != "darwin":
+        return False
+    if platform.machine() == "arm64":
+        return True
+    try:
+        completed = subprocess.run(
+            ["sysctl", "-n", "hw.optional.arm64"],
+            capture_output=True,
+            text=True,
+        )
+    except OSError:
+        return False
+    return completed.returncode == 0 and completed.stdout.strip() == "1"
 
 
 def _default_output_dir(input_dir: Path) -> Path:

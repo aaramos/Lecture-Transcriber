@@ -5,7 +5,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
-from .config import AudioQuality, RecordingSpeed
+from .config import AudioQuality, FfmpegHwAccel, RecordingSpeed
 from .errors import DependencyMissingError, ProcessingError
 from .models import MediaInfo
 
@@ -106,9 +106,17 @@ class MediaInspector:
 
 
 class MediaNormalizer:
-    def __init__(self, ffmpeg_path: str = "ffmpeg", runner: Callable = subprocess.run) -> None:
+    def __init__(
+        self,
+        ffmpeg_path: str = "ffmpeg",
+        runner: Callable = subprocess.run,
+        ffmpeg_hwaccel: FfmpegHwAccel = FfmpegHwAccel.AUTO,
+        apple_silicon: bool = False,
+    ) -> None:
         self.ffmpeg_path = ffmpeg_path
         self._runner = runner
+        self.ffmpeg_hwaccel = ffmpeg_hwaccel
+        self.apple_silicon = apple_silicon
 
     def normalize(
         self,
@@ -137,9 +145,11 @@ class MediaNormalizer:
         if audio_filter:
             filter_complex = f"{filter_complex};[0:a:0]{audio_filter}[a]"
 
+        hwaccel_args = _hwaccel_args(self.ffmpeg_hwaccel, self.apple_silicon)
         command = [
             ffmpeg,
             "-y",
+            *hwaccel_args,
             "-i",
             str(source),
             "-filter_complex",
@@ -164,6 +174,34 @@ class MediaNormalizer:
             str(destination),
         ])
         completed = self._runner(command, capture_output=True, text=True)
+        if completed.returncode != 0 and hwaccel_args and self.ffmpeg_hwaccel is FfmpegHwAccel.AUTO:
+            fallback_command = [
+                ffmpeg,
+                "-y",
+                "-i",
+                str(source),
+                "-filter_complex",
+                filter_complex,
+                *maps,
+                "-c:v",
+                "libx264",
+                "-preset",
+                "medium",
+                "-crf",
+                "23",
+                "-pix_fmt",
+                "yuv420p",
+            ]
+            if audio_filter:
+                fallback_command.extend(["-c:a", "aac"])
+            else:
+                fallback_command.append("-an")
+            fallback_command.extend([
+                "-movflags",
+                "+faststart",
+                str(destination),
+            ])
+            completed = self._runner(fallback_command, capture_output=True, text=True)
         if completed.returncode != 0:
             raise ProcessingError(
                 f"ffmpeg normalization failed for {source.name}: "
@@ -215,3 +253,13 @@ def _filter_available(ffmpeg_path: str, filter_name: str) -> bool:
     if completed.returncode != 0:
         return False
     return any(line.split()[1:2] == [filter_name] for line in completed.stdout.splitlines())
+
+
+def _hwaccel_args(ffmpeg_hwaccel: FfmpegHwAccel, apple_silicon: bool) -> list:
+    if ffmpeg_hwaccel is FfmpegHwAccel.NONE:
+        return []
+    if ffmpeg_hwaccel is FfmpegHwAccel.VIDEOTOOLBOX or (
+        ffmpeg_hwaccel is FfmpegHwAccel.AUTO and apple_silicon
+    ):
+        return ["-hwaccel", "videotoolbox"]
+    return []

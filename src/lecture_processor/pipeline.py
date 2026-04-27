@@ -26,11 +26,21 @@ class BatchProcessor:
     ) -> None:
         self.config = config
         self.inspector = inspector or MediaInspector(config.ffprobe_path)
-        self.normalizer = normalizer or MediaNormalizer(config.ffmpeg_path)
+        self.normalizer = normalizer or MediaNormalizer(
+            config.ffmpeg_path,
+            ffmpeg_hwaccel=config.ffmpeg_hwaccel,
+            apple_silicon=config.apple_silicon,
+        )
         if transcriber is None:
             raise LectureProcessorError("BatchProcessor requires a transcriber")
         self.transcriber = transcriber
-        self.slide_extractor = slide_extractor or SlideExtractor(config.slide_sensitivity)
+        self.slide_extractor = slide_extractor or SlideExtractor(
+            config.slide_sensitivity,
+            backend=config.slide_backend,
+            ffmpeg_path=config.ffmpeg_path,
+            ffmpeg_hwaccel=config.ffmpeg_hwaccel,
+            apple_silicon=config.apple_silicon,
+        )
         self.progress_callback = progress_callback
 
     def run(self) -> BatchSummary:

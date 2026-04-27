@@ -39,6 +39,17 @@ python3 -m pip install -e .
 python3 -m pip install -e ".[transcription,slides]"
 ```
 
+Apple Silicon acceleration adds one more optional setup step:
+
+```bash
+. ./scripts/dev-env.sh
+scripts/setup-whisper-cpp-coreml.sh large-v3
+export LECTURE_PROCESSOR_WHISPER_CPP_MODEL_DIR="$PWD/.models/whisper-cpp"
+export LECTURE_PROCESSOR_REQUIRE_WHISPER_CPP_COREML=1
+```
+
+The CoreML setup script builds `pywhispercpp` with CoreML support, downloads the matching `ggml-*.bin` model, and generates the matching `*-encoder.mlmodelc` encoder bundle. Keep the `.bin` file and `.mlmodelc` folder together in the same model directory.
+
 FFmpeg is installed locally in `.tools/darwin_arm64`; the app auto-discovers that path when system `ffmpeg` and `ffprobe` are not available.
 
 Without installing, you can run the module from the repo with:
@@ -115,10 +126,31 @@ lecture-processor process /path/to/lectures \
   --concurrent 4 \
   --whisper-model large-v3 \
   --transcription-engine auto \
+  --ffmpeg-hwaccel auto \
+  --slide-backend auto \
   --slide-sensitivity medium
 ```
 
 `--audio-quality high` uses FFmpeg's `rubberband` filter when the installed FFmpeg build includes it. The bundled local FFmpeg does not, so the processor automatically falls back to `atempo` instead of failing the batch.
+
+## Performance Backends
+
+On Apple Silicon, the Tauri shell detects the platform and passes `--apple-silicon` to the Python processor. That makes `auto` mode prefer `whisper.cpp` through `pywhispercpp` when it is installed, use FFmpeg VideoToolbox hardware decode for normalization, and use FFmpeg for slide-frame extraction instead of OpenCV.
+
+Useful speed controls:
+
+- `--transcription-engine whisper-cpp` forces the whisper.cpp backend.
+- `--require-whisper-cpp-coreml` fails fast unless `pywhispercpp` reports CoreML support.
+- `--ffmpeg-hwaccel auto` uses VideoToolbox on Apple Silicon and falls back to software decode if hardware decode is not accepted for a file.
+- `--slide-backend ffmpeg` forces FFmpeg frame sampling; `auto` falls back to OpenCV if FFmpeg frame extraction is unavailable.
+- `--concurrent N` controls how many files are processed at once. The processor still uses `ThreadPoolExecutor`; switch to `ProcessPoolExecutor` only after benchmarking with the installed CoreML whisper.cpp model because process workers would each need their own model/runtime state.
+
+Optional Pillow source rebuild:
+
+```bash
+. ./scripts/dev-env.sh
+scripts/rebuild-pillow-source.sh
+```
 
 If you want to test video normalization and slide extraction before installing Whisper, disable transcription explicitly:
 

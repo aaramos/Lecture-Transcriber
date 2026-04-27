@@ -153,6 +153,26 @@ fn run_process_batch(
         "--json-events".to_string(),
     ];
 
+    if is_apple_silicon() {
+        args.push("--apple-silicon".to_string());
+        args.push("--slide-backend".to_string());
+        args.push("ffmpeg".to_string());
+    }
+
+    if let Ok(model_dir) = env::var("LECTURE_PROCESSOR_WHISPER_CPP_MODEL_DIR") {
+        if !model_dir.trim().is_empty() {
+            args.push("--whisper-cpp-model-dir".to_string());
+            args.push(model_dir);
+        }
+    }
+
+    if env::var("LECTURE_PROCESSOR_REQUIRE_WHISPER_CPP_COREML")
+        .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+    {
+        args.push("--require-whisper-cpp-coreml".to_string());
+    }
+
     if request.confirm_normalization {
         args.push("--confirm-normalization".to_string());
     }
@@ -259,6 +279,24 @@ fn platform_open_command(path: &str) -> Command {
         let mut command = Command::new("xdg-open");
         command.arg(path);
         command
+    }
+}
+
+fn is_apple_silicon() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        Command::new("sysctl")
+            .args(["-n", "hw.optional.arm64"])
+            .output()
+            .map(|output| {
+                output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "1"
+            })
+            .unwrap_or(false)
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        false
     }
 }
 

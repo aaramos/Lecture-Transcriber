@@ -5,6 +5,7 @@ __pycache__/
 .ruff_cache/
 .venv/
 .tools/
+.models/
 node_modules/
 venv/
 dist/
