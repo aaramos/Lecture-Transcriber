@@ -120,6 +120,13 @@ h2 {
   font-weight: 700;
 }
 
+.progress-percent {
+  color: var(--text);
+  font-size: 30px;
+  font-weight: 900;
+  line-height: 1;
+}
+
 .eyebrow,
 label,
 .results-grid label {
@@ -343,23 +350,9 @@ button:disabled {
   transition: width 0.22s ease;
 }
 
-.progress-bar.indeterminate {
-  width: 36%;
-  animation: indeterminate 1s infinite alternate ease-in-out;
-}
-
-@keyframes indeterminate {
-  from {
-    margin-left: 0;
-  }
-  to {
-    margin-left: 64%;
-  }
-}
-
 .results-grid {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 8px;
 }
 
@@ -373,79 +366,177 @@ button:disabled {
 .results-grid span {
   display: block;
   margin-bottom: 4px;
-  font-size: 26px;
+  font-size: 23px;
   font-weight: 800;
 }
 
-.file-list {
+.video-section {
+  display: grid;
+  min-height: 0;
+  gap: 8px;
+}
+
+.video-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.video-section-head h3 {
+  margin: 0;
+  font-size: 13px;
+}
+
+.video-section-head span {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.active-videos,
+.queue-list {
   display: grid;
   gap: 6px;
-  max-height: 130px;
+  min-height: 0;
   overflow: auto;
 }
 
-.file-placeholder,
-.file-row {
+.active-videos {
+  max-height: 190px;
+}
+
+.queue-section {
+  min-height: 0;
+}
+
+.queue-list {
+  align-content: start;
+}
+
+.video-placeholder,
+.active-video-row,
+.queue-video-row {
   border: 1px solid var(--line);
   border-radius: 6px;
-  padding: 9px 10px;
   background: var(--panel-soft);
   font-size: 12px;
 }
 
-.file-placeholder {
+.video-placeholder {
+  padding: 11px 12px;
   color: var(--muted);
 }
 
-.file-row {
+.active-video-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 10px;
+  grid-template-columns: minmax(0, 1fr) 108px 96px 42px;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
 }
 
-.file-row.completed {
-  border-color: rgba(112, 185, 141, 0.4);
-}
-
-.file-row.failed {
-  border-color: rgba(214, 103, 95, 0.45);
-}
-
-.file-row.preparing,
-.file-row.running {
+.active-video-row.preparing,
+.active-video-row.running {
   border-color: rgba(222, 118, 83, 0.45);
 }
 
-.file-row.skipped {
+.queue-video-row {
+  display: grid;
+  grid-template-columns: 10px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 10px;
+}
+
+.queue-video-row.completed {
+  border-color: rgba(112, 185, 141, 0.4);
+}
+
+.queue-video-row.failed {
+  border-color: rgba(214, 103, 95, 0.45);
+}
+
+.queue-video-row.skipped {
   border-color: rgba(215, 173, 87, 0.45);
 }
 
-.file-name,
-.file-detail {
+.queue-video-row.queued {
+  border-color: rgba(170, 163, 154, 0.24);
+}
+
+.video-status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: var(--muted);
+}
+
+.queue-video-row.completed .video-status-dot {
+  background: var(--good);
+}
+
+.queue-video-row.failed .video-status-dot {
+  background: var(--bad);
+}
+
+.queue-video-row.skipped .video-status-dot {
+  background: var(--warn);
+}
+
+.video-name,
+.video-stage,
+.video-detail,
+.queue-status {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.file-name {
+.video-name {
   font-weight: 700;
 }
 
-.file-detail {
+.video-stage,
+.video-detail,
+.queue-status {
   color: var(--muted);
 }
 
-.log-output {
-  min-height: 0;
-  overflow: auto;
-  margin: 0;
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  padding: 12px;
-  background: #111;
-  color: #d8d4ca;
-  font: 12px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  white-space: pre-wrap;
+.video-bar-track {
+  display: block;
+  overflow: hidden;
+  height: 6px;
+  border-radius: 999px;
+  background: #363636;
+}
+
+.video-bar {
+  display: block;
+  width: 0;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent);
+  transition: width 0.22s ease;
+}
+
+.video-percent {
+  text-align: right;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+  font-weight: 800;
+}
+
+.queue-detail {
+  grid-column: 2 / -1;
+  margin-top: -2px;
+  color: var(--muted);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .activity-actions {

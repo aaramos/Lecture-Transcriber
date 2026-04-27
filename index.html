@@ -67,6 +67,7 @@
             <div id="runMeta" class="run-meta">Select a folder to begin.</div>
           </div>
           <div class="status-stack">
+            <div id="progressPercent" class="progress-percent">0%</div>
             <div id="statusPill" class="status-pill idle">Idle</div>
             <div id="elapsedTime" class="elapsed-time">00:00</div>
           </div>
@@ -78,12 +79,16 @@
 
         <div id="resultsGrid" class="results-grid">
           <div>
-            <span id="attemptedCount">0</span>
-            <label>Attempted</label>
-          </div>
-          <div>
             <span id="completedCount">0</span>
             <label>Completed</label>
+          </div>
+          <div>
+            <span id="processingCount">0</span>
+            <label>Processing</label>
+          </div>
+          <div>
+            <span id="waitingCount">0</span>
+            <label>Waiting</label>
           </div>
           <div>
             <span id="failedCount">0</span>
@@ -95,11 +100,25 @@
           </div>
         </div>
 
-        <div id="fileList" class="file-list">
-          <div class="file-placeholder">No files running.</div>
+        <div class="video-section">
+          <div class="video-section-head">
+            <h3>Active Videos</h3>
+            <span id="activeSummary">No videos processing</span>
+          </div>
+          <div id="activeVideos" class="active-videos">
+            <div class="video-placeholder">No videos processing.</div>
+          </div>
         </div>
 
-        <pre id="logOutput" class="log-output">Waiting for a batch.</pre>
+        <div class="video-section queue-section">
+          <div class="video-section-head">
+            <h3>Video Queue</h3>
+            <span id="queueSummary">No videos queued</span>
+          </div>
+          <div id="queueList" class="queue-list">
+            <div class="video-placeholder">Choose a folder to see videos.</div>
+          </div>
+        </div>
 
         <div class="activity-actions">
           <button id="openOutputButton" class="secondary-button" disabled>Open Output</button>

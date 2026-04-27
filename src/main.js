@@ -4,6 +4,27 @@ if (!invoke) {
   throw new Error("Tauri API is not available. Start the app with `cargo tauri dev`.");
 }
 
+const STEP_LABELS = {
+  Probe: "Checking video",
+  Normalize: "Normalizing",
+  Transcribe: "Transcribing",
+  Slides: "Extracting slides",
+};
+
+const STEP_START_PROGRESS = {
+  Probe: 8,
+  Normalize: 22,
+  Transcribe: 48,
+  Slides: 82,
+};
+
+const STEP_DONE_PROGRESS = {
+  Probe: 18,
+  Normalize: 42,
+  Transcribe: 78,
+  Slides: 96,
+};
+
 const state = {
   inputDir: "",
   outputDir: "",
@@ -17,6 +38,7 @@ const state = {
   runStartedAt: 0,
   elapsedTimer: null,
   files: new Map(),
+  fileOrder: [],
 };
 
 const elements = {
@@ -38,13 +60,17 @@ const elements = {
   outputPath: document.querySelector("#outputPath"),
   runTitle: document.querySelector("#runTitle"),
   runMeta: document.querySelector("#runMeta"),
+  progressPercent: document.querySelector("#progressPercent"),
   statusPill: document.querySelector("#statusPill"),
   elapsedTime: document.querySelector("#elapsedTime"),
   progressBar: document.querySelector("#progressBar"),
-  logOutput: document.querySelector("#logOutput"),
-  fileList: document.querySelector("#fileList"),
-  attemptedCount: document.querySelector("#attemptedCount"),
+  activeVideos: document.querySelector("#activeVideos"),
+  queueList: document.querySelector("#queueList"),
+  activeSummary: document.querySelector("#activeSummary"),
+  queueSummary: document.querySelector("#queueSummary"),
   completedCount: document.querySelector("#completedCount"),
+  processingCount: document.querySelector("#processingCount"),
+  waitingCount: document.querySelector("#waitingCount"),
   failedCount: document.querySelector("#failedCount"),
   skippedCount: document.querySelector("#skippedCount"),
   audioQuality: document.querySelector("#audioQuality"),
@@ -128,10 +154,14 @@ async function scanFolder() {
     const scan = await invoke("scan_folder", { inputDir: state.inputDir });
     state.fileCount = scan.movCount;
     state.fileNames = scan.movFiles || [];
+    state.files.clear();
+    state.fileOrder = [];
     setFolderError(scan.movCount === 0 ? "No .mov files found. Try a different folder." : "");
   } catch (error) {
     state.fileCount = 0;
     state.fileNames = [];
+    state.files.clear();
+    state.fileOrder = [];
     setFolderError(String(error));
   }
 }
@@ -141,6 +171,8 @@ function clearFolder() {
   state.outputDir = "";
   state.fileCount = 0;
   state.fileNames = [];
+  state.files.clear();
+  state.fileOrder = [];
   setFolderError("");
   render();
 }
@@ -158,9 +190,8 @@ async function startBatch() {
 
   resetResults();
   setRunning(true);
-  elements.logOutput.textContent = "Starting processor...\n";
   primeQueuedFiles(concurrentFiles);
-  renderFileList();
+  renderVideoDashboard();
   await waitForPaint();
 
   const request = {
@@ -179,19 +210,21 @@ async function startBatch() {
 
   try {
     const result = await invoke("process_batch", { request });
-    const logText = [result.stdout, result.stderr].filter(Boolean).join("\n\n").trim();
     state.lastOutputDir = result.outputDir;
-    appendLog(logText || "Batch finished.");
     elements.runTitle.textContent = result.exitCode === 0 ? "Batch finished" : "Batch finished with issues";
     elements.statusPill.textContent = result.exitCode === 0 ? "Complete" : "Review";
     elements.statusPill.className = result.exitCode === 0 ? "status-pill complete" : "status-pill warning";
-    renderSummary(logText);
+    if (result.exitCode === 0) {
+      elements.runMeta.textContent = "All videos finished. Open the output folder for transcripts, videos, and slides.";
+    } else {
+      elements.runMeta.textContent = "Some videos need review. Open the output folder for processing logs.";
+    }
     elements.openOutputButton.disabled = false;
   } catch (error) {
     elements.runTitle.textContent = "Batch failed";
     elements.statusPill.textContent = "Failed";
     elements.statusPill.className = "status-pill failed";
-    appendLog(String(error));
+    elements.runMeta.textContent = String(error);
   } finally {
     setRunning(false);
   }
@@ -203,7 +236,7 @@ async function openOutput() {
   try {
     await invoke("open_path", { path });
   } catch (error) {
-    appendLog(`Could not open output folder: ${error}`);
+    elements.runMeta.textContent = `Could not open output folder: ${error}`;
   }
 }
 
@@ -218,9 +251,10 @@ function render() {
   elements.startButton.disabled = state.running || !hasFolder || state.fileCount === 0;
   if (!state.running) {
     elements.runMeta.textContent = hasFolder
-      ? `${state.fileCount} .mov file${state.fileCount === 1 ? "" : "s"} ready`
+      ? `${state.fileCount} video${state.fileCount === 1 ? "" : "s"} ready`
       : "Select a folder to begin.";
   }
+  renderVideoDashboard();
   renderNormalizationWarning();
 }
 
@@ -232,14 +266,13 @@ function setRunning(running) {
   elements.chooseOutputButton.disabled = running;
   elements.progressBar.classList.toggle("running", running);
   if (running) {
-    elements.runTitle.textContent = "Starting processor...";
+    elements.runTitle.textContent = `Preparing ${state.fileCount} video${state.fileCount === 1 ? "" : "s"}...`;
     elements.statusPill.textContent = "Running";
     elements.statusPill.className = "status-pill running";
     elements.runMeta.textContent = runDescription();
     setProgress(0, 0);
     startElapsedTimer();
   } else {
-    elements.progressBar.classList.remove("indeterminate");
     stopElapsedTimer();
   }
 }
@@ -250,25 +283,18 @@ function setFolderError(message) {
 }
 
 function resetResults() {
-  elements.attemptedCount.textContent = "0";
   elements.completedCount.textContent = "0";
+  elements.processingCount.textContent = "0";
+  elements.waitingCount.textContent = String(state.fileCount || 0);
   elements.failedCount.textContent = "0";
   elements.skippedCount.textContent = "0";
   elements.openOutputButton.disabled = true;
   state.progressTotal = 0;
   state.progressDone = 0;
+  state.files.clear();
+  state.fileOrder = [];
   setProgress(0, 0);
-}
-
-function renderSummary(stdout) {
-  const countFor = (label) => {
-    const match = stdout.match(new RegExp(`${label}:\\s+(\\d+)`));
-    return match ? match[1] : "0";
-  };
-  elements.attemptedCount.textContent = countFor("Attempted");
-  elements.completedCount.textContent = countFor("Completed");
-  elements.failedCount.textContent = countFor("Failed");
-  elements.skippedCount.textContent = countFor("Skipped");
+  renderVideoDashboard();
 }
 
 function confirmNormalization() {
@@ -292,7 +318,7 @@ function validateSettings() {
   if (!valid) {
     showDialog(elements.settingsDialog);
     elements.concurrentFiles.focus();
-    appendLog("Concurrent files must be between 1 and 8.");
+    elements.runMeta.textContent = "Concurrent files must be between 1 and 8.";
     return null;
   }
   return value;
@@ -305,65 +331,69 @@ function handleProcessorEvent(event) {
     state.progressTotal = Number(event.attempted || 0);
     state.progressDone = 0;
     setProgress(0, state.progressTotal);
-    elements.progressBar.classList.remove("indeterminate");
-    elements.runTitle.textContent = "Processing batch";
+    elements.runTitle.textContent = `Processing ${basename(state.inputDir)}`;
     elements.runMeta.textContent = runDescription();
-    updateCounts({ attempted: state.progressTotal });
-    appendLog(`Found ${state.progressTotal} file${state.progressTotal === 1 ? "" : "s"}.`);
+    renderVideoDashboard();
   } else if (event.kind === "file_started") {
-    updateFile(event.source, { status: "running", detail: "Starting" });
-    appendLog(`${event.source}: starting`);
+    updateFile(event.source, {
+      status: "running",
+      stage: "Preparing",
+      detail: "Preparing video",
+      progress: 5,
+    });
   } else if (event.kind === "step_started") {
-    updateFile(event.source, { status: "running", detail: event.step });
+    updateFile(event.source, {
+      status: "running",
+      stage: STEP_LABELS[event.step] || event.step,
+      detail: "Working",
+      progress: STEP_START_PROGRESS[event.step] || 12,
+    });
   } else if (event.kind === "step_finished") {
-    updateFile(event.source, { detail: `${event.step} done (${event.elapsed_seconds}s)` });
+    updateFile(event.source, {
+      stage: `${STEP_LABELS[event.step] || event.step} complete`,
+      detail: `${Number(event.elapsed_seconds || 0).toFixed(1)}s`,
+      progress: STEP_DONE_PROGRESS[event.step] || 20,
+    });
   } else if (event.kind === "file_finished") {
     state.progressDone = Number(event.attempted || state.progressDone + 1);
+    const previous = state.files.get(event.source) || {};
+    const failedStage = previous.stage ? `Failed during ${previous.stage.toLowerCase()}` : "Failed";
     updateFile(event.source, {
       status: event.status,
-      detail: event.status === "completed" ? `${event.word_count} words, ${event.slide_count} slides` : event.message,
+      stage: statusLabel(event.status),
+      detail: fileFinishedDetail(event, failedStage),
+      progress: 100,
     });
-    updateCounts({
-      completed: event.completed,
-      failed: event.failed,
-      skipped: event.skipped,
-    });
-    setProgress(state.progressDone, state.progressTotal);
-    appendLog(`${event.source}: ${event.status}`);
   } else if (event.kind === "batch_finished") {
-    updateCounts(event);
     setProgress(Number(event.attempted || state.progressDone), Number(event.attempted || state.progressTotal));
-    elements.progressBar.classList.remove("indeterminate");
+    renderVideoDashboard();
   }
 }
 
 function updateFile(source, patch) {
   if (!source) return;
-  const previous = state.files.get(source) || { status: "queued", detail: "Queued" };
+  if (!state.fileOrder.includes(source)) {
+    state.fileOrder.push(source);
+  }
+  const previous = state.files.get(source) || {
+    status: "queued",
+    stage: "Waiting",
+    detail: "Waiting",
+    progress: 0,
+  };
   state.files.set(source, { ...previous, ...patch });
-  renderFileList();
+  renderVideoDashboard();
 }
 
-function renderFileList() {
-  if (state.files.size === 0) {
-    elements.fileList.innerHTML = `<div class="file-placeholder">${
-      state.running ? "Waiting for processor events." : "No files running."
-    }</div>`;
-    return;
-  }
+function renderVideoDashboard() {
+  const entries = dashboardEntries();
+  const activeEntries = entries.filter(([_name, file]) => isActiveStatus(file.status));
+  const queueEntries = entries.filter(([_name, file]) => !isActiveStatus(file.status));
 
-  elements.fileList.innerHTML = [...state.files.entries()]
-    .map(([name, file]) => {
-      const status = escapeHtml(file.status || "queued");
-      const detail = escapeHtml(file.detail || "");
-      return `
-        <div class="file-row ${status}">
-          <span class="file-name">${escapeHtml(name)}</span>
-          <span class="file-detail">${detail}</span>
-        </div>
-      `;
-    })
-    .join("");
+  renderCounts(entries);
+  renderOverallProgress(entries);
+  renderActiveVideos(activeEntries);
+  renderQueue(queueEntries);
 }
 
 function primeQueuedFiles(concurrentFiles) {
@@ -372,44 +402,176 @@ function primeQueuedFiles(concurrentFiles) {
     ? state.fileNames
     : Array.from({ length: state.fileCount }, (_value, index) => `File ${index + 1}`);
 
+  state.fileOrder = names;
   names.forEach((name, index) => {
     state.files.set(name, {
       status: index < concurrentFiles ? "preparing" : "queued",
-      detail: index < concurrentFiles ? "Preparing" : "Waiting",
+      stage: index < concurrentFiles ? "Preparing" : "Waiting",
+      detail: index < concurrentFiles ? "Preparing video" : "Waiting",
+      progress: index < concurrentFiles ? 3 : 0,
     });
   });
 
   state.progressTotal = names.length;
-  updateCounts({ attempted: names.length, completed: 0, failed: 0, skipped: 0 });
-  elements.progressBar.classList.add("indeterminate");
-  setProgress(0, names.length);
-  appendLog(
-    `Processing has started. ${names.length} file${names.length === 1 ? "" : "s"} queued, ${concurrentFiles} at a time.`
-  );
+  elements.runMeta.textContent = `Processing up to ${Math.min(concurrentFiles, names.length)} video${
+    Math.min(concurrentFiles, names.length) === 1 ? "" : "s"
+  } at once.`;
+  renderVideoDashboard();
 }
 
-function updateCounts(event) {
-  if (event.attempted !== undefined) elements.attemptedCount.textContent = String(event.attempted);
-  if (event.completed !== undefined) elements.completedCount.textContent = String(event.completed);
-  if (event.failed !== undefined) elements.failedCount.textContent = String(event.failed);
-  if (event.skipped !== undefined) elements.skippedCount.textContent = String(event.skipped);
+function dashboardEntries() {
+  if (state.fileOrder.length > 0) {
+    return state.fileOrder.map((name) => [
+      name,
+      state.files.get(name) || {
+        status: "queued",
+        stage: "Waiting",
+        detail: "Waiting",
+        progress: 0,
+      },
+    ]);
+  }
+
+  if (state.fileNames.length > 0) {
+    return state.fileNames.map((name) => [
+      name,
+      {
+        status: "queued",
+        stage: "Ready",
+        detail: "Ready",
+        progress: 0,
+      },
+    ]);
+  }
+
+  return [];
+}
+
+function renderCounts(entries) {
+  const completed = entries.filter(([_name, file]) => file.status === "completed").length;
+  const processing = entries.filter(([_name, file]) => isActiveStatus(file.status)).length;
+  const failed = entries.filter(([_name, file]) => file.status === "failed").length;
+  const skipped = entries.filter(([_name, file]) => file.status === "skipped").length;
+  const waiting = entries.filter(([_name, file]) => file.status === "queued").length;
+
+  elements.completedCount.textContent = String(completed);
+  elements.processingCount.textContent = String(processing);
+  elements.waitingCount.textContent = String(waiting);
+  elements.failedCount.textContent = String(failed);
+  elements.skippedCount.textContent = String(skipped);
+}
+
+function renderOverallProgress(entries) {
+  const total = state.progressTotal || entries.length || state.fileCount || 0;
+  const knownProgress = entries.reduce((sum, [_name, file]) => sum + Number(file.progress || 0), 0);
+  const percent = total > 0 ? Math.round(knownProgress / total) : 0;
+  setProgressPercent(percent);
+}
+
+function renderActiveVideos(entries) {
+  elements.activeSummary.textContent =
+    entries.length === 0
+      ? state.running
+        ? "Waiting for active videos"
+        : "No videos processing"
+      : `${entries.length} processing`;
+
+  if (entries.length === 0) {
+    elements.activeVideos.innerHTML = `<div class="video-placeholder">${
+      state.running ? "Waiting for the next video to start." : "No videos processing."
+    }</div>`;
+    return;
+  }
+
+  elements.activeVideos.innerHTML = entries
+    .map(([name, file]) => {
+      const percent = clampPercent(file.progress || 0);
+      const status = escapeHtml(file.status || "running");
+      return `
+        <div class="active-video-row ${status}">
+          <span class="video-name">${escapeHtml(name)}</span>
+          <span class="video-stage">${escapeHtml(file.stage || "Working")}</span>
+          <span class="video-bar-track" aria-hidden="true">
+            <span class="video-bar" style="width: ${percent}%"></span>
+          </span>
+          <span class="video-percent">${percent}%</span>
+        </div>
+      `;
+    })
+    .join("");
+}
+
+function renderQueue(entries) {
+  const waiting = entries.filter(([_name, file]) => file.status === "queued").length;
+  const finished = entries.length - waiting;
+  elements.queueSummary.textContent =
+    entries.length === 0 ? "No videos queued" : `${finished} finished · ${waiting} waiting`;
+
+  if (entries.length === 0) {
+    elements.queueList.innerHTML = `<div class="video-placeholder">${
+      state.fileNames.length ? "All listed videos are active." : "Choose a folder to see videos."
+    }</div>`;
+    return;
+  }
+
+  elements.queueList.innerHTML = entries
+    .map(([name, file]) => {
+      const status = escapeHtml(file.status || "queued");
+      const detail = file.detail && file.detail !== statusLabel(file.status) ? file.detail : "";
+      return `
+        <div class="queue-video-row ${status}">
+          <span class="video-status-dot" aria-hidden="true"></span>
+          <span class="video-name">${escapeHtml(name)}</span>
+          <span class="queue-status">${escapeHtml(statusLabel(file.status))}</span>
+          ${detail ? `<span class="queue-detail">${escapeHtml(detail)}</span>` : ""}
+        </div>
+      `;
+    })
+    .join("");
 }
 
 function setProgress(done, total) {
-  if (elements.progressBar.classList.contains("indeterminate")) {
-    elements.progressBar.style.width = "36%";
-    return;
-  }
   const percent = total > 0 ? Math.round((done / total) * 100) : 0;
-  elements.progressBar.style.width = `${Math.min(100, Math.max(0, percent))}%`;
+  setProgressPercent(percent);
 }
 
-function appendLog(line) {
-  if (!line) return;
-  const current = elements.logOutput.textContent;
-  const prefix = current === "Waiting for a batch." ? "" : current.replace(/\s*$/, "\n");
-  elements.logOutput.textContent = `${prefix}${line}`;
-  elements.logOutput.scrollTop = elements.logOutput.scrollHeight;
+function setProgressPercent(percent) {
+  const value = clampPercent(percent);
+  elements.progressBar.style.width = `${value}%`;
+  elements.progressPercent.textContent = `${value}%`;
+}
+
+function fileFinishedDetail(event, failedStage) {
+  if (event.status === "completed") {
+    const words = Number(event.word_count || 0).toLocaleString();
+    const slides = Number(event.slide_count || 0).toLocaleString();
+    return `${words} words, ${slides} slides`;
+  }
+  if (event.status === "failed") {
+    return event.message ? `${failedStage}: ${event.message}` : failedStage;
+  }
+  if (event.status === "skipped") {
+    return event.message || "Skipped";
+  }
+  return event.message || statusLabel(event.status);
+}
+
+function isActiveStatus(status) {
+  return status === "preparing" || status === "running";
+}
+
+function statusLabel(status) {
+  if (status === "completed") return "Complete";
+  if (status === "failed") return "Failed";
+  if (status === "skipped") return "Skipped";
+  if (status === "preparing") return "Preparing";
+  if (status === "running") return "Processing";
+  if (status === "queued") return state.running ? "Waiting" : "Ready";
+  return "Ready";
+}
+
+function clampPercent(value) {
+  return Math.min(100, Math.max(0, Math.round(Number(value) || 0)));
 }
 
 function renderNormalizationWarning() {
@@ -454,7 +616,7 @@ function showDialog(dialog) {
 function runDescription() {
   const speed = state.recordingSpeed === "2x" ? "2x to 1x" : "1x";
   const concurrent = Number.parseInt(elements.concurrentFiles.value, 10) || 1;
-  return `${state.fileCount} file${state.fileCount === 1 ? "" : "s"} · ${concurrent} at a time · ${speed}`;
+  return `${state.fileCount} video${state.fileCount === 1 ? "" : "s"} · ${concurrent} at a time · ${speed}`;
 }
 
 function startElapsedTimer() {
