@@ -151,6 +151,33 @@ class BatchProcessorTests(unittest.TestCase):
             self.assertFalse((bad_dir / "normalized_video.mp4").exists())
             self.assertFalse((bad_dir / "transcript.txt").exists())
 
+    def test_emits_batch_and_file_progress_events(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "lecture.mov"
+            source.write_text("video", encoding="utf-8")
+            output = root / "out"
+            events = []
+            config = BatchConfig(input_dir=root, output_dir=output)
+
+            BatchProcessor(
+                config=config,
+                inspector=FakeInspector({"lecture.mov": 120.0}),
+                normalizer=FakeNormalizer(),
+                transcriber=FakeTranscriber(),
+                slide_extractor=FakeSlideExtractor(),
+                progress_callback=events.append,
+            ).run()
+
+            kinds = [event["kind"] for event in events]
+            self.assertIn("batch_started", kinds)
+            self.assertIn("file_started", kinds)
+            self.assertIn("step_started", kinds)
+            self.assertIn("file_finished", kinds)
+            self.assertEqual(events[-1]["kind"], "batch_finished")
+            finished = [event for event in events if event["kind"] == "file_finished"][0]
+            self.assertEqual(finished["status"], "completed")
+
 
 if __name__ == "__main__":
     unittest.main()

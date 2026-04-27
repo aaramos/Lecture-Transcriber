@@ -3,7 +3,7 @@ import shutil
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import List, Optional
+from typing import Callable, Dict, List, Optional
 
 from .config import BatchConfig, RecordingSpeed
 from .errors import LectureProcessorError
@@ -22,6 +22,7 @@ class BatchProcessor:
         normalizer: Optional[MediaNormalizer] = None,
         transcriber: Optional[Transcriber] = None,
         slide_extractor: Optional[SlideExtractor] = None,
+        progress_callback: Optional[Callable[[Dict], None]] = None,
     ) -> None:
         self.config = config
         self.inspector = inspector or MediaInspector(config.ffprobe_path)
@@ -30,6 +31,7 @@ class BatchProcessor:
             raise LectureProcessorError("BatchProcessor requires a transcriber")
         self.transcriber = transcriber
         self.slide_extractor = slide_extractor or SlideExtractor(config.slide_sensitivity)
+        self.progress_callback = progress_callback
 
     def run(self) -> BatchSummary:
         self.config.validate()
@@ -39,11 +41,25 @@ class BatchProcessor:
 
         self.config.output_dir.mkdir(parents=True, exist_ok=True)
         output_dirs = allocate_output_dirs(files, self.config.output_dir)
+        self._emit("batch_started", attempted=len(files), output_dir=str(self.config.output_dir))
         results: List[FileResult] = []
         with ThreadPoolExecutor(max_workers=self.config.concurrent_files) as executor:
             futures = [executor.submit(self._process_file, path, output_dirs[path]) for path in files]
             for future in as_completed(futures):
-                results.append(future.result())
+                result = future.result()
+                results.append(result)
+                self._emit(
+                    "file_finished",
+                    source=result.source.name,
+                    status=result.status.value,
+                    message=result.message,
+                    completed=sum(1 for item in results if item.status is FileStatus.COMPLETED),
+                    failed=sum(1 for item in results if item.status is FileStatus.FAILED),
+                    skipped=sum(1 for item in results if item.status is FileStatus.SKIPPED),
+                    attempted=len(results),
+                    word_count=result.word_count,
+                    slide_count=result.slide_count,
+                )
 
         results.sort(key=lambda item: item.source.name.lower())
         summary = BatchSummary(
@@ -54,10 +70,17 @@ class BatchProcessor:
             results=results,
         )
         write_batch_summary(self.config.output_dir, summary)
+        self._emit(
+            "batch_finished",
+            attempted=summary.attempted,
+            completed=summary.completed,
+            failed=summary.failed,
+            skipped=summary.skipped,
+        )
         return summary
 
     def _process_file(self, source: Path, output_dir: Path) -> FileResult:
-        reset_output_dir(output_dir)
+        self._emit("file_started", source=source.name)
         started = time.monotonic()
         log_lines = [
             f"File:     {source.name}",
@@ -68,7 +91,8 @@ class BatchProcessor:
         step_state = {"current": "Probe"}
 
         try:
-            media_info = self._time_step("Probe", log_lines, step_state, lambda: self.inspector.probe(source))
+            reset_output_dir(output_dir)
+            media_info = self._time_step("Probe", source, log_lines, step_state, lambda: self.inspector.probe(source))
             if media_info.duration_seconds < self.config.min_duration_seconds:
                 message = (
                     f"File too short ({media_info.duration_seconds:.0f}s < "
@@ -93,6 +117,7 @@ class BatchProcessor:
                     temp_normalized = destination
                 work_video = self._time_step(
                     "Normalize",
+                    source,
                     log_lines,
                     step_state,
                     lambda: self.normalizer.normalize(
@@ -107,6 +132,7 @@ class BatchProcessor:
 
             transcript = self._time_step(
                 "Transcribe",
+                source,
                 log_lines,
                 step_state,
                 lambda: self.transcriber.transcribe(work_video),
@@ -118,6 +144,7 @@ class BatchProcessor:
             slides_dir = output_dir / "slides"
             slide_count = self._time_step(
                 "Slides",
+                source,
                 log_lines,
                 step_state,
                 lambda: self.slide_extractor.extract(
@@ -160,13 +187,24 @@ class BatchProcessor:
                 message=message,
             )
 
-    def _time_step(self, name: str, log_lines: List[str], step_state, operation):
+    def _time_step(self, name: str, source: Path, log_lines: List[str], step_state, operation):
         step_state["current"] = name
+        self._emit("step_started", source=source.name, step=name)
         started = time.monotonic()
         result = operation()
         elapsed = time.monotonic() - started
         log_lines.append(f"{name:<10} OK  {elapsed:.1f}s")
+        self._emit("step_finished", source=source.name, step=name, elapsed_seconds=round(elapsed, 1))
         return result
+
+    def _emit(self, kind: str, **payload) -> None:
+        if not self.progress_callback:
+            return
+        event = {"kind": kind, **payload}
+        try:
+            self.progress_callback(event)
+        except Exception:
+            pass
 
 
 def discover_mov_files(folder: Path) -> List[Path]:

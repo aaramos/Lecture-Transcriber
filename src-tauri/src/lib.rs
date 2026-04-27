@@ -1,7 +1,13 @@
 use serde::{Deserialize, Serialize};
 use std::env;
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
+use std::thread;
+use tauri::Emitter;
+
+const EVENT_PREFIX: &str = "__LECTURE_PROCESSOR_EVENT__ ";
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -76,8 +82,8 @@ fn scan_folder(input_dir: String) -> Result<FolderScan, String> {
 
 #[tauri::command]
 fn open_path(path: String) -> Result<(), String> {
-    let status = Command::new("open")
-        .arg(path)
+    let mut command = platform_open_command(&path);
+    let status = command
         .status()
         .map_err(|error| format!("Could not open output folder: {error}"))?;
     if !status.success() {
@@ -87,9 +93,18 @@ fn open_path(path: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn process_batch(request: ProcessRequest) -> Result<ProcessResponse, String> {
+fn process_batch(
+    app: tauri::AppHandle,
+    request: ProcessRequest,
+) -> Result<ProcessResponse, String> {
     if request.recording_speed == "2x" && !request.confirm_normalization {
         return Err("2x normalization requires confirmation.".to_string());
+    }
+    if request.concurrent_files == 0 || request.concurrent_files > 8 {
+        return Err("Concurrent files must be between 1 and 8.".to_string());
+    }
+    if request.output_dir.trim().is_empty() {
+        return Err("Choose an output folder before starting.".to_string());
     }
 
     let project_root = find_project_root()?;
@@ -120,6 +135,7 @@ fn process_batch(request: ProcessRequest) -> Result<ProcessResponse, String> {
         request.slide_sensitivity.clone(),
         "--min-duration".to_string(),
         request.min_duration.to_string(),
+        "--json-events".to_string(),
     ];
 
     if request.confirm_normalization {
@@ -131,19 +147,104 @@ fn process_batch(request: ProcessRequest) -> Result<ProcessResponse, String> {
     }
 
     let path = tool_path(&project_root);
-    let output = Command::new(cli)
+    let mut child = Command::new(cli)
         .args(args)
         .current_dir(&project_root)
         .env("PATH", path)
-        .output()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|error| format!("Could not start processor: {error}"))?;
 
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "Could not capture processor output.".to_string())?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| "Could not capture processor errors.".to_string())?;
+
+    let stdout_buffer = Arc::new(Mutex::new(String::new()));
+    let stderr_buffer = Arc::new(Mutex::new(String::new()));
+
+    let stdout_handle = {
+        let buffer = Arc::clone(&stdout_buffer);
+        let app_handle = app.clone();
+        thread::spawn(move || {
+            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                if let Some(raw_event) = line.strip_prefix(EVENT_PREFIX) {
+                    match serde_json::from_str::<serde_json::Value>(raw_event) {
+                        Ok(payload) => {
+                            let _ = app_handle.emit("processor-event", payload);
+                        }
+                        Err(_) => append_line(&buffer, &line),
+                    }
+                } else {
+                    append_line(&buffer, &line);
+                }
+            }
+        })
+    };
+
+    let stderr_handle = {
+        let buffer = Arc::clone(&stderr_buffer);
+        thread::spawn(move || {
+            for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                append_line(&buffer, &line);
+            }
+        })
+    };
+
+    let status = child
+        .wait()
+        .map_err(|error| format!("Processor failed while running: {error}"))?;
+    let _ = stdout_handle.join();
+    let _ = stderr_handle.join();
+    let stdout_text = stdout_buffer
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .clone();
+    let stderr_text = stderr_buffer
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .clone();
+
     Ok(ProcessResponse {
-        exit_code: output.status.code().unwrap_or(1),
-        stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-        stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+        exit_code: status.code().unwrap_or(1),
+        stdout: stdout_text,
+        stderr: stderr_text,
         output_dir: request.output_dir,
     })
+}
+
+fn append_line(buffer: &Arc<Mutex<String>>, line: &str) {
+    let mut value = buffer.lock().unwrap_or_else(|error| error.into_inner());
+    value.push_str(line);
+    value.push('\n');
+}
+
+fn platform_open_command(path: &str) -> Command {
+    #[cfg(target_os = "macos")]
+    {
+        let mut command = Command::new("open");
+        command.arg(path);
+        command
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let mut command = Command::new("cmd");
+        command.args(["/C", "start", "", path]);
+        command
+    }
+
+    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+    {
+        let mut command = Command::new("xdg-open");
+        command.arg(path);
+        command
+    }
 }
 
 fn find_project_root() -> Result<PathBuf, String> {

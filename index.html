@@ -17,7 +17,7 @@
           <button id="settingsButton" class="icon-button" title="Settings" aria-label="Settings">⚙</button>
         </div>
 
-        <div id="dropZone" class="drop-zone">
+        <div id="dropZone" class="drop-zone" role="button" tabindex="0" aria-label="Choose lecture folder">
           <div class="drop-main">
             <div class="folder-icon">⌁</div>
             <div>
@@ -42,6 +42,10 @@
             <button class="segment active" data-speed="1x">1×</button>
             <button class="segment" data-speed="2x">2× → 1×</button>
           </div>
+        </div>
+
+        <div id="normalizationWarning" class="inline-warning hidden">
+          Only choose 2× → 1× when every file in the batch was recorded at 2× speed.
         </div>
 
         <div class="output-row">
@@ -85,6 +89,10 @@
             <span id="skippedCount">0</span>
             <label>Skipped</label>
           </div>
+        </div>
+
+        <div id="fileList" class="file-list">
+          <div class="file-placeholder">No files running.</div>
         </div>
 
         <pre id="logOutput" class="log-output">Waiting for a batch.</pre>
@@ -141,6 +149,7 @@
             <label>
               Concurrent Files
               <input id="concurrentFiles" type="number" min="1" max="8" value="4" />
+              <span class="field-help">Use 1–2 on smaller laptops, 4 by default, 6–8 on high-memory workstations.</span>
             </label>
 
             <label class="checkbox-row">
@@ -155,6 +164,30 @@
 
           <div class="dialog-actions">
             <button class="primary-button" value="default">Done</button>
+          </div>
+        </form>
+      </dialog>
+
+      <dialog id="confirmDialog" class="confirm-dialog">
+        <form method="dialog">
+          <div class="dialog-head">
+            <h2>Confirm 2× Normalization</h2>
+            <button class="icon-button" value="cancel" title="Close" aria-label="Close">×</button>
+          </div>
+
+          <p class="confirm-copy">
+            This will slow the entire batch from 2× to 1×. If any selected file is already normal speed,
+            the output for that file will play at half speed.
+          </p>
+
+          <label class="checkbox-row confirm-check">
+            <input id="confirmCheckbox" type="checkbox" />
+            <span>I confirm every eligible file in this batch was recorded at 2× speed.</span>
+          </label>
+
+          <div class="dialog-actions">
+            <button class="secondary-button" value="cancel">Cancel</button>
+            <button id="confirmContinue" class="primary-button" value="confirm" disabled>Continue</button>
           </div>
         </form>
       </dialog>

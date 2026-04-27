@@ -14,7 +14,8 @@ The implementation has two layers: a Python processing core and a Tauri desktop 
 - Writes per-file output folders, transcripts, SRT files, slides, and processing logs.
 - Continues the batch if one file fails.
 - Prints a final attempted/completed/failed/skipped summary.
-- Provides a desktop UI for selecting folders, speed, output location, and processing settings.
+- Provides a desktop UI for selecting or dropping folders, speed, output location, and processing settings.
+- Streams live per-file progress from the Python processor into the desktop app.
 
 ## Requirements
 
@@ -75,6 +76,12 @@ For development:
 . ./scripts/dev-env.sh
 cargo tauri dev
 ```
+
+Useful desktop shortcuts:
+
+- `Command+,` opens Settings.
+- `Command+R` starts the selected batch.
+- `Escape` clears the current folder when no dialog is open.
 
 ## CLI Usage
 

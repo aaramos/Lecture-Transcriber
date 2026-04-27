@@ -1,5 +1,7 @@
 import argparse
+import json
 import sys
+import threading
 from pathlib import Path
 
 from .config import (
@@ -15,6 +17,8 @@ from .models import BatchSummary, FileStatus
 from .pipeline import BatchProcessor, discover_mov_files
 from .slides import SlideExtractor
 from .transcription import build_transcriber
+
+EVENT_PREFIX = "__LECTURE_PROCESSOR_EVENT__ "
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -39,6 +43,7 @@ def build_parser() -> argparse.ArgumentParser:
     process.add_argument("--whisper-model", default="large-v3")
     process.add_argument("--ffmpeg", default="ffmpeg")
     process.add_argument("--ffprobe", default="ffprobe")
+    process.add_argument("--json-events", action="store_true", help=argparse.SUPPRESS)
     return parser
 
 
@@ -74,16 +79,21 @@ def _run_process(args) -> int:
         config.validate()
         if not discover_mov_files(config.input_dir):
             raise LectureProcessorError("No .mov files found. Try a different folder.")
-        transcriber = build_transcriber(config.transcription_engine, config.whisper_model)
+        needs_ffmpeg = (
+            config.recording_speed is RecordingSpeed.DOUBLE
+            or config.transcription_engine is not TranscriptionEngine.NONE
+        )
         ensure_media_tools(
             ffprobe_path=config.ffprobe_path,
             ffmpeg_path=config.ffmpeg_path,
-            needs_ffmpeg=config.recording_speed is RecordingSpeed.DOUBLE,
+            needs_ffmpeg=needs_ffmpeg,
         )
+        transcriber = build_transcriber(config.transcription_engine, config.whisper_model)
         processor = BatchProcessor(
             config=config,
             transcriber=transcriber,
             slide_extractor=SlideExtractor(config.slide_sensitivity),
+            progress_callback=_build_event_printer(args.json_events),
         )
         summary = processor.run()
     except LectureProcessorError as exc:
@@ -92,6 +102,19 @@ def _run_process(args) -> int:
 
     print(_format_summary(summary, output_dir))
     return 1 if summary.failed else 0
+
+
+def _build_event_printer(enabled: bool):
+    if not enabled:
+        return None
+
+    lock = threading.Lock()
+
+    def print_event(event) -> None:
+        with lock:
+            print(f"{EVENT_PREFIX}{json.dumps(event, sort_keys=True)}", flush=True)
+
+    return print_event
 
 
 def _default_output_dir(input_dir: Path) -> Path:
