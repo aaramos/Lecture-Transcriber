@@ -182,12 +182,11 @@ class BatchProcessor:
                 message="Complete",
             )
         except Exception as exc:
-            cleanup_partial_output(output_dir)
             output_dir.mkdir(parents=True, exist_ok=True)
             step = step_state["current"]
             message = str(exc)
             log_lines.append(f"{step}  ERROR: {message}")
-            log_lines.append("Partial output cleaned. File skipped.")
+            log_lines.append("Partial output preserved for review. File marked failed.")
             write_processing_log(output_dir, log_lines)
             return FileResult(
                 source=source,
@@ -249,11 +248,6 @@ def reset_output_dir(output_dir: Path) -> None:
     if output_dir.exists():
         shutil.rmtree(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-
-
-def cleanup_partial_output(output_dir: Path) -> None:
-    if output_dir.exists():
-        shutil.rmtree(output_dir)
 
 
 def write_batch_summary(output_dir: Path, summary: BatchSummary) -> None:

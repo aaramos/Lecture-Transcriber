@@ -146,7 +146,7 @@ class BatchProcessorTests(unittest.TestCase):
             self.assertTrue((output / "Lecture_1_Intro" / "Lecture_1_Intro.mp4").exists())
             self.assertFalse((output / "Lecture_1_Intro" / "normalized_video.mp4").exists())
 
-    def test_failure_cleans_partial_output_and_batch_continues(self):
+    def test_failure_preserves_partial_output_and_batch_continues(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             for name in ["bad.mov", "good.mov"]:
@@ -172,8 +172,10 @@ class BatchProcessorTests(unittest.TestCase):
             self.assertEqual(summary.completed, 1)
             bad_dir = output / "bad"
             self.assertTrue((bad_dir / "processing_log.txt").exists())
-            self.assertFalse((bad_dir / "bad.mp4").exists())
+            self.assertTrue((bad_dir / "bad.mp4").exists())
             self.assertFalse((bad_dir / "transcript.txt").exists())
+            log = (bad_dir / "processing_log.txt").read_text(encoding="utf-8")
+            self.assertIn("Partial output preserved for review", log)
 
     def test_normalized_video_output_path_uses_portable_source_name(self):
         path = normalized_video_output_path(Path("Lecture: 2.mov"), Path("/tmp/out"))
