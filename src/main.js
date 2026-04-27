@@ -25,12 +25,23 @@ const STEP_DONE_PROGRESS = {
   Slides: 96,
 };
 
+const SETTINGS_STORAGE_KEY = "lectureProcessor.settings.v1";
+const DEFAULT_SETTINGS = Object.freeze({
+  recordingSpeed: "1x",
+  audioQuality: "fast",
+  transcriptionEngine: "auto",
+  whisperModel: "large-v3",
+  slideSensitivity: "medium",
+  concurrentFiles: 4,
+  saveNormalized: true,
+});
+
 const state = {
   inputDir: "",
   outputDir: "",
   fileCount: 0,
   fileNames: [],
-  recordingSpeed: "1x",
+  recordingSpeed: DEFAULT_SETTINGS.recordingSpeed,
   running: false,
   cancelRequested: false,
   processorStarted: false,
@@ -39,6 +50,7 @@ const state = {
   progressDone: 0,
   runStartedAt: 0,
   elapsedTimer: null,
+  finishedFileReports: 0,
   files: new Map(),
   fileOrder: [],
 };
@@ -83,10 +95,12 @@ const elements = {
   slideSensitivity: document.querySelector("#slideSensitivity"),
   concurrentFiles: document.querySelector("#concurrentFiles"),
   saveNormalized: document.querySelector("#saveNormalized"),
+  restoreDefaultsButton: document.querySelector("#restoreDefaultsButton"),
   speedSegments: [...document.querySelectorAll(".segment")],
 };
 
 window.__TAURI__?.event?.listen?.("processor-event", (event) => handleProcessorEvent(event.payload));
+loadPersistedSettings();
 setupDragAndDrop();
 
 document.addEventListener("keydown", (event) => {
@@ -120,15 +134,30 @@ elements.startButton.addEventListener("click", startBatch);
 elements.cancelRunButton.addEventListener("click", cancelBatch);
 elements.openOutputButton.addEventListener("click", openOutput);
 elements.settingsButton.addEventListener("click", () => showDialog(elements.settingsDialog));
+elements.restoreDefaultsButton.addEventListener("click", restoreDefaultSettings);
 elements.confirmCheckbox.addEventListener("change", () => {
   elements.confirmContinue.disabled = !elements.confirmCheckbox.checked;
 });
-elements.concurrentFiles.addEventListener("input", validateSettings);
+elements.concurrentFiles.addEventListener("input", () => {
+  validateSettings({ showDialogOnError: false });
+  saveCurrentSettings();
+});
+
+[
+  elements.audioQuality,
+  elements.transcriptionEngine,
+  elements.whisperModel,
+  elements.slideSensitivity,
+  elements.saveNormalized,
+].forEach((element) => {
+  element.addEventListener("change", saveCurrentSettings);
+});
 
 elements.speedSegments.forEach((button) => {
   button.addEventListener("click", () => {
     state.recordingSpeed = button.dataset.speed;
     elements.speedSegments.forEach((item) => item.classList.toggle("active", item === button));
+    saveCurrentSettings();
     renderNormalizationWarning();
   });
 });
@@ -217,30 +246,16 @@ async function startBatch() {
     state.processorStarted = true;
     renderRunControls();
     const result = await invoke("process_batch", { request });
-    state.lastOutputDir = result.outputDir;
-    if (result.cancelled) {
-      markRemainingVideosCanceled();
-      elements.runTitle.textContent = "Batch canceled";
-      elements.statusPill.textContent = "Canceled";
-      elements.statusPill.className = "status-pill warning";
-      elements.runMeta.textContent = "Processing was stopped. Completed files remain in the output folder.";
-    } else if (result.exitCode === 0) {
-      elements.runTitle.textContent = "Batch finished";
-      elements.statusPill.textContent = "Complete";
-      elements.statusPill.className = "status-pill complete";
-      elements.runMeta.textContent = "All videos finished. Open the output folder for transcripts, videos, and slides.";
-    } else {
-      elements.runTitle.textContent = "Batch finished with issues";
-      elements.statusPill.textContent = "Review";
-      elements.statusPill.className = "status-pill warning";
-      elements.runMeta.textContent = "Some videos need review. Open the output folder for processing logs.";
-    }
-    elements.openOutputButton.disabled = false;
+    applyProcessorResult(result);
   } catch (error) {
+    state.lastOutputDir = state.outputDir;
+    markUnfinishedVideosFailed("Processor stopped before reporting this video complete.");
+    renderVideoDashboard();
     elements.runTitle.textContent = "Batch failed";
     elements.statusPill.textContent = "Failed";
     elements.statusPill.className = "status-pill failed";
-    elements.runMeta.textContent = String(error);
+    elements.runMeta.textContent = `${String(error)}. Open the output folder for batch_error.txt.`;
+    elements.openOutputButton.disabled = !state.outputDir;
   } finally {
     state.cancelRequested = false;
     state.processorStarted = false;
@@ -284,6 +299,68 @@ async function openOutput() {
   } catch (error) {
     elements.runMeta.textContent = `Could not open output folder: ${error}`;
   }
+}
+
+function applyProcessorResult(result) {
+  state.lastOutputDir = result.outputDir || state.outputDir;
+
+  let unfinished = 0;
+  if (result.cancelled) {
+    unfinished = markRemainingVideosCanceled();
+  } else {
+    unfinished = markUnfinishedVideosFailed("Processor ended before reporting this video complete.");
+  }
+
+  renderVideoDashboard();
+  const counts = countDashboardEntries(dashboardEntries());
+  const exitCode = Number(result.exitCode || 0);
+  const hasFailures = counts.failed > 0 || exitCode !== 0;
+  const hasSkips = counts.skipped > 0;
+  const failedBeforeFileResults = exitCode !== 0 && state.finishedFileReports === 0;
+  const allReported =
+    counts.processing === 0 &&
+    counts.waiting === 0 &&
+    counts.canceled === 0 &&
+    counts.failed === 0 &&
+    counts.completed + counts.skipped === (state.progressTotal || state.fileCount || counts.total);
+
+  if (result.cancelled) {
+    elements.runTitle.textContent = "Batch canceled";
+    elements.statusPill.textContent = "Canceled";
+    elements.statusPill.className = "status-pill warning";
+    elements.runMeta.textContent = "Processing was stopped. Completed files remain in the output folder.";
+  } else if (exitCode === 0 && allReported && !hasSkips) {
+    elements.runTitle.textContent = "Batch finished";
+    elements.statusPill.textContent = "Complete";
+    elements.statusPill.className = "status-pill complete";
+    elements.runMeta.textContent = "All videos finished. Open the output folder for transcripts, videos, and slides.";
+  } else {
+    elements.runTitle.textContent = failedBeforeFileResults
+      ? "Batch failed"
+      : hasFailures
+        ? "Batch finished with issues"
+        : "Batch finished with skips";
+    elements.statusPill.textContent = failedBeforeFileResults ? "Failed" : hasFailures ? "Review" : "Complete";
+    elements.statusPill.className = failedBeforeFileResults
+      ? "status-pill failed"
+      : hasFailures
+        ? "status-pill warning"
+        : "status-pill complete";
+    elements.runMeta.textContent = finalRunSummary(counts, unfinished, exitCode);
+  }
+
+  elements.openOutputButton.disabled = !state.lastOutputDir;
+}
+
+function finalRunSummary(counts, unfinished, exitCode) {
+  const parts = [];
+  if (counts.completed) parts.push(`${counts.completed} complete`);
+  if (counts.failed) parts.push(`${counts.failed} failed`);
+  if (counts.skipped) parts.push(`${counts.skipped} skipped`);
+  if (counts.canceled) parts.push(`${counts.canceled} canceled`);
+  if (unfinished) parts.push(`${unfinished} did not report a final result`);
+  if (exitCode !== 0 && counts.failed === 0) parts.push(`processor exited with code ${exitCode}`);
+  return `${parts.join(" · ") || "Run needs review"}. Open the output folder for batch_summary.txt or batch_error.txt.`;
 }
 
 function render() {
@@ -342,6 +419,7 @@ function resetResults() {
   state.progressDone = 0;
   state.cancelRequested = false;
   state.processorStarted = false;
+  state.finishedFileReports = 0;
   state.files.clear();
   state.fileOrder = [];
   setProgress(0, 0);
@@ -362,12 +440,15 @@ function confirmNormalization() {
   });
 }
 
-function validateSettings() {
+function validateSettings(options = {}) {
+  const { showDialogOnError = true } = options;
   const value = Number.parseInt(elements.concurrentFiles.value, 10);
   const valid = Number.isInteger(value) && value >= 1 && value <= 8;
   elements.concurrentFiles.classList.toggle("invalid", !valid);
   if (!valid) {
-    showDialog(elements.settingsDialog);
+    if (showDialogOnError) {
+      showDialog(elements.settingsDialog);
+    }
     elements.concurrentFiles.focus();
     elements.runMeta.textContent = "Concurrent files must be between 1 and 8.";
     return null;
@@ -408,6 +489,7 @@ function handleProcessorEvent(event) {
       progress: STEP_DONE_PROGRESS[event.step] || 20,
     });
   } else if (event.kind === "file_finished") {
+    state.finishedFileReports += 1;
     state.progressDone = Number(event.attempted || state.progressDone + 1);
     const previous = state.files.get(event.source) || {};
     const failedStage = previous.stage ? `Failed during ${previous.stage.toLowerCase()}` : "Failed";
@@ -420,6 +502,14 @@ function handleProcessorEvent(event) {
   } else if (event.kind === "batch_finished") {
     setProgress(Number(event.attempted || state.progressDone), Number(event.attempted || state.progressTotal));
     renderVideoDashboard();
+  } else if (event.kind === "batch_failed") {
+    state.lastOutputDir = event.output_dir || state.outputDir;
+    markUnfinishedVideosFailed(event.message || "Processor stopped before reporting this video complete.");
+    elements.runTitle.textContent = "Batch failed";
+    elements.statusPill.textContent = "Failed";
+    elements.statusPill.className = "status-pill failed";
+    elements.runMeta.textContent = `${event.message || "The processor stopped early."} Open the output folder for batch_error.txt.`;
+    elements.openOutputButton.disabled = !state.lastOutputDir;
   }
 }
 
@@ -501,12 +591,7 @@ function dashboardEntries() {
 }
 
 function renderCounts(entries) {
-  const completed = entries.filter(([_name, file]) => file.status === "completed").length;
-  const processing = entries.filter(([_name, file]) => isActiveStatus(file.status)).length;
-  const failed = entries.filter(([_name, file]) => file.status === "failed").length;
-  const skipped = entries.filter(([_name, file]) => file.status === "skipped").length;
-  const canceled = entries.filter(([_name, file]) => file.status === "canceled").length;
-  const waiting = entries.filter(([_name, file]) => file.status === "queued").length;
+  const { completed, processing, failed, skipped, canceled, waiting } = countDashboardEntries(entries);
 
   elements.completedCount.textContent = String(completed);
   elements.processingCount.textContent = String(processing);
@@ -514,6 +599,18 @@ function renderCounts(entries) {
   elements.failedCount.textContent = String(failed);
   elements.skippedCount.textContent = String(skipped);
   elements.canceledCount.textContent = String(canceled);
+}
+
+function countDashboardEntries(entries) {
+  return {
+    total: entries.length,
+    completed: entries.filter(([_name, file]) => file.status === "completed").length,
+    processing: entries.filter(([_name, file]) => isActiveStatus(file.status)).length,
+    failed: entries.filter(([_name, file]) => file.status === "failed").length,
+    skipped: entries.filter(([_name, file]) => file.status === "skipped").length,
+    canceled: entries.filter(([_name, file]) => file.status === "canceled").length,
+    waiting: entries.filter(([_name, file]) => file.status === "queued").length,
+  };
 }
 
 function renderOverallProgress(entries) {
@@ -659,17 +756,42 @@ function updateActiveVideosForCancel() {
 }
 
 function markRemainingVideosCanceled() {
-  for (const [name, file] of state.files.entries()) {
+  let changed = 0;
+  for (const [name, file] of dashboardEntries()) {
     if (isActiveStatus(file.status) || file.status === "queued") {
       state.files.set(name, {
         ...file,
         status: "canceled",
         stage: "Canceled",
         detail: "Stopped by user",
+        progress: 100,
       });
+      changed += 1;
     }
   }
   renderVideoDashboard();
+  return changed;
+}
+
+function markUnfinishedVideosFailed(detail) {
+  let changed = 0;
+  for (const [name, file] of dashboardEntries()) {
+    if (isActiveStatus(file.status) || file.status === "queued") {
+      if (!state.fileOrder.includes(name)) {
+        state.fileOrder.push(name);
+      }
+      state.files.set(name, {
+        ...file,
+        status: "failed",
+        stage: "Not completed",
+        detail,
+        progress: 100,
+      });
+      changed += 1;
+    }
+  }
+  renderVideoDashboard();
+  return changed;
 }
 
 function queueSummaryText(summary) {
@@ -681,6 +803,74 @@ function queueSummaryText(summary) {
   if (summary.skipped) parts.push(`${summary.skipped} skipped`);
   if (summary.waiting) parts.push(`${summary.waiting} waiting`);
   return parts.length ? parts.join(" · ") : "All videos active";
+}
+
+function loadPersistedSettings() {
+  let stored = {};
+  try {
+    stored = JSON.parse(window.localStorage.getItem(SETTINGS_STORAGE_KEY) || "{}");
+  } catch {
+    stored = {};
+  }
+  applySettings({ ...DEFAULT_SETTINGS, ...stored });
+}
+
+function restoreDefaultSettings() {
+  applySettings(DEFAULT_SETTINGS);
+  saveCurrentSettings();
+  validateSettings({ showDialogOnError: false });
+  render();
+}
+
+function applySettings(settings) {
+  state.recordingSpeed = ["1x", "2x"].includes(settings.recordingSpeed)
+    ? settings.recordingSpeed
+    : DEFAULT_SETTINGS.recordingSpeed;
+  setSelectValue(elements.audioQuality, settings.audioQuality, DEFAULT_SETTINGS.audioQuality);
+  setSelectValue(elements.transcriptionEngine, settings.transcriptionEngine, DEFAULT_SETTINGS.transcriptionEngine);
+  setSelectValue(elements.whisperModel, settings.whisperModel, DEFAULT_SETTINGS.whisperModel);
+  setSelectValue(elements.slideSensitivity, settings.slideSensitivity, DEFAULT_SETTINGS.slideSensitivity);
+  elements.concurrentFiles.value = String(validConcurrentFiles(settings.concurrentFiles));
+  elements.saveNormalized.checked = Boolean(settings.saveNormalized);
+  syncSpeedSegments();
+  renderNormalizationWarning();
+}
+
+function saveCurrentSettings() {
+  const concurrentFiles = Number.parseInt(elements.concurrentFiles.value, 10);
+  if (!Number.isInteger(concurrentFiles) || concurrentFiles < 1 || concurrentFiles > 8) return;
+
+  const settings = {
+    recordingSpeed: state.recordingSpeed,
+    audioQuality: elements.audioQuality.value,
+    transcriptionEngine: elements.transcriptionEngine.value,
+    whisperModel: elements.whisperModel.value,
+    slideSensitivity: elements.slideSensitivity.value,
+    concurrentFiles,
+    saveNormalized: elements.saveNormalized.checked,
+  };
+
+  try {
+    window.localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(settings));
+  } catch {
+    // Settings persistence is helpful, not required for processing.
+  }
+}
+
+function syncSpeedSegments() {
+  elements.speedSegments.forEach((button) => {
+    button.classList.toggle("active", button.dataset.speed === state.recordingSpeed);
+  });
+}
+
+function setSelectValue(select, value, fallback) {
+  const optionValues = [...select.options].map((option) => option.value);
+  select.value = optionValues.includes(value) ? value : fallback;
+}
+
+function validConcurrentFiles(value) {
+  const parsed = Number.parseInt(value, 10);
+  return Number.isInteger(parsed) && parsed >= 1 && parsed <= 8 ? parsed : DEFAULT_SETTINGS.concurrentFiles;
 }
 
 function renderNormalizationWarning() {

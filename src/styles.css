@@ -578,6 +578,27 @@ button:disabled {
   padding: 18px;
 }
 
+.settings-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 14px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 10px 12px;
+  background: var(--panel-soft);
+}
+
+.settings-toolbar span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.settings-toolbar .secondary-button {
+  min-width: 132px;
+}
+
 .field-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

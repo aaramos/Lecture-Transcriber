@@ -4,6 +4,7 @@ import platform
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 
 from .config import (
@@ -69,6 +70,7 @@ def _run_process(args) -> int:
     input_dir = args.input_dir.expanduser().resolve()
     output_dir = args.output.expanduser().resolve() if args.output else _default_output_dir(input_dir)
     apple_silicon = args.apple_silicon or _detect_apple_silicon()
+    event_printer = _build_event_printer(args.json_events)
     config = BatchConfig(
         input_dir=input_dir,
         output_dir=output_dir,
@@ -121,12 +123,22 @@ def _run_process(args) -> int:
                 ffmpeg_hwaccel=config.ffmpeg_hwaccel,
                 apple_silicon=config.apple_silicon,
             ),
-            progress_callback=_build_event_printer(args.json_events),
+            progress_callback=event_printer,
         )
         summary = processor.run()
     except LectureProcessorError as exc:
+        _write_run_error(output_dir, str(exc))
+        if event_printer:
+            event_printer({"kind": "batch_failed", "message": str(exc), "output_dir": str(output_dir)})
         print(f"Error: {exc}", file=sys.stderr)
         return 2
+    except Exception as exc:
+        message = f"Unexpected processor error: {exc}"
+        _write_run_error(output_dir, message)
+        if event_printer:
+            event_printer({"kind": "batch_failed", "message": message, "output_dir": str(output_dir)})
+        print(f"Error: {message}", file=sys.stderr)
+        return 1
 
     print(_format_summary(summary, output_dir))
     return 1 if summary.failed else 0
@@ -163,6 +175,43 @@ def _detect_apple_silicon() -> bool:
 
 def _default_output_dir(input_dir: Path) -> Path:
     return input_dir.parent / f"{input_dir.name}_processed"
+
+
+def _write_run_error(output_dir: Path, message: str) -> None:
+    try:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        (output_dir / "batch_error.txt").write_text(
+            "\n".join(
+                [
+                    "Batch failed before all video logs were available.",
+                    f"Time: {time.strftime('%Y-%m-%d %H:%M:%S')}",
+                    f"Environment: {platform.platform()}",
+                    "",
+                    "Error:",
+                    message,
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        (output_dir / "batch_summary.txt").write_text(
+            "\n".join(
+                [
+                    "Batch summary",
+                    "Attempted: 0",
+                    "Completed: 0",
+                    "Failed:    1",
+                    "Skipped:   0",
+                    "",
+                    "Run failed before file processing completed:",
+                    f"- {message}",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+    except OSError:
+        pass
 
 
 def _format_summary(summary: BatchSummary, output_dir: Path) -> str:
