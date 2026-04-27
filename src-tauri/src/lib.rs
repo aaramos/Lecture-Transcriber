@@ -257,11 +257,13 @@ fn run_process_batch(
         args.push("ffmpeg".to_string());
     }
 
-    if let Ok(model_dir) = env::var("LECTURE_PROCESSOR_WHISPER_CPP_MODEL_DIR") {
-        if !model_dir.trim().is_empty() {
-            args.push("--whisper-cpp-model-dir".to_string());
-            args.push(model_dir);
-        }
+    let whisper_cpp_model_dir = env::var("LECTURE_PROCESSOR_WHISPER_CPP_MODEL_DIR")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| default_whisper_cpp_model_dir(&project_root, &request.whisper_model));
+    if let Some(model_dir) = whisper_cpp_model_dir {
+        args.push("--whisper-cpp-model-dir".to_string());
+        args.push(model_dir);
     }
 
     if env::var("LECTURE_PROCESSOR_REQUIRE_WHISPER_CPP_COREML")
@@ -287,6 +289,10 @@ fn run_process_batch(
         .env("PATH", path)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+
+    if env::var_os("PYWHISPERCPP_FLASH_ATTN").is_none() {
+        command.env("PYWHISPERCPP_FLASH_ATTN", "0");
+    }
 
     #[cfg(unix)]
     command.process_group(0);
@@ -496,6 +502,25 @@ fn find_project_root() -> Result<PathBuf, String> {
     }
 
     Err("Could not locate the Lecture Processor project root.".to_string())
+}
+
+fn default_whisper_cpp_model_dir(project_root: &Path, model_name: &str) -> Option<String> {
+    let model_dir = project_root.join(".models/whisper-cpp");
+    if !model_dir.is_dir() {
+        return None;
+    }
+
+    let model_file = if model_name.ends_with(".bin") {
+        model_dir.join(model_name)
+    } else {
+        model_dir.join(format!("ggml-{model_name}.bin"))
+    };
+
+    if model_file.exists() {
+        Some(model_dir.to_string_lossy().to_string())
+    } else {
+        None
+    }
 }
 
 fn tool_path(project_root: &Path) -> String {

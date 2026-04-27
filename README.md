@@ -44,11 +44,9 @@ Apple Silicon acceleration adds one more optional setup step:
 ```bash
 . ./scripts/dev-env.sh
 scripts/setup-whisper-cpp-coreml.sh large-v3
-export LECTURE_PROCESSOR_WHISPER_CPP_MODEL_DIR="$PWD/.models/whisper-cpp"
-export LECTURE_PROCESSOR_REQUIRE_WHISPER_CPP_COREML=1
 ```
 
-The CoreML setup script builds `pywhispercpp` with CoreML support, downloads the matching `ggml-*.bin` model, and generates the matching `*-encoder.mlmodelc` encoder bundle. Keep the `.bin` file and `.mlmodelc` folder together in the same model directory.
+The CoreML setup script builds `pywhispercpp` with CoreML support, downloads the matching `ggml-*.bin` model, and generates the matching `*-encoder.mlmodelc` encoder bundle. Keep the `.bin` file and `.mlmodelc` folder together in the same model directory. The desktop app automatically uses `.models/whisper-cpp` when the selected Whisper model is present there, and it disables whisper.cpp flash attention by default because that path can crash inside Metal on Apple Silicon.
 
 FFmpeg is installed locally in `.tools/darwin_arm64`; the app auto-discovers that path when system `ffmpeg` and `ffprobe` are not available.
 
