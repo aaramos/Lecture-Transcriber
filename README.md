@@ -118,6 +118,8 @@ lecture-processor process /path/to/lectures \
   --slide-sensitivity medium
 ```
 
+`--audio-quality high` uses FFmpeg's `rubberband` filter when the installed FFmpeg build includes it. The bundled local FFmpeg does not, so the processor automatically falls back to `atempo` instead of failing the batch.
+
 If you want to test video normalization and slide extraction before installing Whisper, disable transcription explicitly:
 
 ```bash

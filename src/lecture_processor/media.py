@@ -1,8 +1,9 @@
 import json
 import shutil
 import subprocess
+from functools import lru_cache
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 from .config import AudioQuality, RecordingSpeed
 from .errors import DependencyMissingError, ProcessingError
@@ -85,6 +86,7 @@ class MediaInspector:
         payload = json.loads(completed.stdout)
         duration = _extract_duration(payload)
         video_stream = _first_video_stream(payload)
+        has_audio = _has_audio_stream(payload)
         avg_frame_rate = _parse_fraction(video_stream.get("avg_frame_rate"))
         real_frame_rate = _parse_fraction(video_stream.get("r_frame_rate"))
         is_vfr = bool(
@@ -99,12 +101,14 @@ class MediaInspector:
             avg_frame_rate=avg_frame_rate,
             real_frame_rate=real_frame_rate,
             is_vfr=is_vfr,
+            has_audio=has_audio,
         )
 
 
 class MediaNormalizer:
-    def __init__(self, ffmpeg_path: str = "ffmpeg") -> None:
+    def __init__(self, ffmpeg_path: str = "ffmpeg", runner: Callable = subprocess.run) -> None:
         self.ffmpeg_path = ffmpeg_path
+        self._runner = runner
 
     def normalize(
         self,
@@ -123,10 +127,15 @@ class MediaNormalizer:
         if media_info.is_vfr:
             video_filter = f"fps={media_info.intended_frame_rate:.3f},setpts=2.0*PTS"
 
-        if audio_quality is AudioQuality.HIGH:
-            audio_filter = "rubberband=tempo=0.5"
-        else:
-            audio_filter = "atempo=0.5"
+        maps = ["-map", "[v]"]
+        audio_filter = None
+        if media_info.has_audio:
+            audio_filter = _audio_filter_for(ffmpeg, audio_quality)
+            maps.extend(["-map", "[a]"])
+
+        filter_complex = f"[0:v:0]{video_filter}[v]"
+        if audio_filter:
+            filter_complex = f"{filter_complex};[0:a:0]{audio_filter}[a]"
 
         command = [
             ffmpeg,
@@ -134,20 +143,27 @@ class MediaNormalizer:
             "-i",
             str(source),
             "-filter_complex",
-            f"[0:v]{video_filter}[v];[0:a]{audio_filter}[a]",
-            "-map",
-            "[v]",
-            "-map",
-            "[a]",
+            filter_complex,
+            *maps,
             "-c:v",
             "libx264",
             "-preset",
             "medium",
             "-crf",
             "23",
-            str(destination),
+            "-pix_fmt",
+            "yuv420p",
         ]
-        completed = subprocess.run(command, capture_output=True, text=True)
+        if audio_filter:
+            command.extend(["-c:a", "aac"])
+        else:
+            command.append("-an")
+        command.extend([
+            "-movflags",
+            "+faststart",
+            str(destination),
+        ])
+        completed = self._runner(command, capture_output=True, text=True)
         if completed.returncode != 0:
             raise ProcessingError(
                 f"ffmpeg normalization failed for {source.name}: "
@@ -172,3 +188,30 @@ def _first_video_stream(payload: Dict[str, Any]) -> Dict[str, Any]:
         if stream.get("codec_type") == "video":
             return stream
     raise ProcessingError("No video stream found")
+
+
+def _has_audio_stream(payload: Dict[str, Any]) -> bool:
+    return any(stream.get("codec_type") == "audio" for stream in payload.get("streams", []))
+
+
+def _audio_filter_for(
+    ffmpeg_path: str,
+    audio_quality: AudioQuality,
+    filter_available: Callable[[str, str], bool] = None,
+) -> str:
+    checker = filter_available or _filter_available
+    if audio_quality is AudioQuality.HIGH and checker(ffmpeg_path, "rubberband"):
+        return "rubberband=tempo=0.5"
+    return "atempo=0.5"
+
+
+@lru_cache(maxsize=None)
+def _filter_available(ffmpeg_path: str, filter_name: str) -> bool:
+    completed = subprocess.run(
+        [ffmpeg_path, "-hide_banner", "-filters"],
+        capture_output=True,
+        text=True,
+    )
+    if completed.returncode != 0:
+        return False
+    return any(line.split()[1:2] == [filter_name] for line in completed.stdout.splitlines())

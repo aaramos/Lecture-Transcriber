@@ -17,6 +17,7 @@ class MediaInfo:
     avg_frame_rate: float = 0.0
     real_frame_rate: float = 0.0
     is_vfr: bool = False
+    has_audio: bool = True
 
     @property
     def intended_frame_rate(self) -> float:
