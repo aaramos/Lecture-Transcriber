@@ -7,7 +7,21 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use tauri::Emitter;
 
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
+
 const EVENT_PREFIX: &str = "__LECTURE_PROCESSOR_EVENT__ ";
+
+#[derive(Clone)]
+struct ActiveProcess {
+    pid: u32,
+    cancelled: bool,
+}
+
+#[derive(Default)]
+struct AppState {
+    active_process: Arc<Mutex<Option<ActiveProcess>>>,
+}
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -39,6 +53,14 @@ struct ProcessResponse {
     stdout: String,
     stderr: String,
     output_dir: String,
+    cancelled: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CancelResponse {
+    cancelled: bool,
+    message: String,
 }
 
 #[tauri::command]
@@ -101,15 +123,60 @@ fn open_path(path: String) -> Result<(), String> {
 #[tauri::command]
 async fn process_batch(
     app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
     request: ProcessRequest,
 ) -> Result<ProcessResponse, String> {
-    tauri::async_runtime::spawn_blocking(move || run_process_batch(app, request))
+    let active_process = Arc::clone(&state.active_process);
+    tauri::async_runtime::spawn_blocking(move || run_process_batch(app, active_process, request))
         .await
         .map_err(|error| format!("Processor task failed: {error}"))?
 }
 
+#[tauri::command]
+fn cancel_batch(state: tauri::State<'_, AppState>) -> Result<CancelResponse, String> {
+    let process_to_cancel = {
+        let mut active = state
+            .active_process
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some(process) = active.as_mut() {
+            let previous_cancelled = process.cancelled;
+            process.cancelled = true;
+            Some((process.pid, previous_cancelled))
+        } else {
+            None
+        }
+    };
+
+    let Some((pid, previous_cancelled)) = process_to_cancel else {
+        return Ok(CancelResponse {
+            cancelled: false,
+            message: "No batch is currently running.".to_string(),
+        });
+    };
+
+    if let Err(error) = terminate_process_tree(pid) {
+        let mut active = state
+            .active_process
+            .lock()
+            .unwrap_or_else(|lock_error| lock_error.into_inner());
+        if let Some(process) = active.as_mut() {
+            if process.pid == pid {
+                process.cancelled = previous_cancelled;
+            }
+        }
+        return Err(error);
+    }
+
+    Ok(CancelResponse {
+        cancelled: true,
+        message: "Cancellation requested.".to_string(),
+    })
+}
+
 fn run_process_batch(
     app: tauri::AppHandle,
+    active_process: Arc<Mutex<Option<ActiveProcess>>>,
     request: ProcessRequest,
 ) -> Result<ProcessResponse, String> {
     if request.recording_speed == "2x" && !request.confirm_normalization {
@@ -120,6 +187,13 @@ fn run_process_batch(
     }
     if request.output_dir.trim().is_empty() {
         return Err("Choose an output folder before starting.".to_string());
+    }
+    if active_process
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .is_some()
+    {
+        return Err("A batch is already running.".to_string());
     }
 
     let project_root = find_project_root()?;
@@ -182,14 +256,31 @@ fn run_process_batch(
     }
 
     let path = tool_path(&project_root);
-    let mut child = Command::new(cli)
+    let mut command = Command::new(cli);
+    command
         .args(args)
         .current_dir(&project_root)
         .env("PATH", path)
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    #[cfg(unix)]
+    command.process_group(0);
+
+    let mut child = command
         .spawn()
         .map_err(|error| format!("Could not start processor: {error}"))?;
+    let child_pid = child.id();
+
+    {
+        let mut active = active_process
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        *active = Some(ActiveProcess {
+            pid: child_pid,
+            cancelled: false,
+        });
+    }
 
     let stdout = child
         .stdout
@@ -231,9 +322,14 @@ fn run_process_batch(
         })
     };
 
-    let status = child
-        .wait()
-        .map_err(|error| format!("Processor failed while running: {error}"))?;
+    let status = match child.wait() {
+        Ok(status) => status,
+        Err(error) => {
+            clear_active_process(&active_process, child_pid);
+            return Err(format!("Processor failed while running: {error}"));
+        }
+    };
+    let cancelled = clear_active_process(&active_process, child_pid);
     let _ = stdout_handle.join();
     let _ = stderr_handle.join();
     let stdout_text = stdout_buffer
@@ -246,11 +342,60 @@ fn run_process_batch(
         .clone();
 
     Ok(ProcessResponse {
-        exit_code: status.code().unwrap_or(1),
+        exit_code: if cancelled {
+            130
+        } else {
+            status.code().unwrap_or(1)
+        },
         stdout: stdout_text,
         stderr: stderr_text,
         output_dir: request.output_dir,
+        cancelled,
     })
+}
+
+fn clear_active_process(active_process: &Arc<Mutex<Option<ActiveProcess>>>, pid: u32) -> bool {
+    let mut active = active_process
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    if active.as_ref().map(|process| process.pid) != Some(pid) {
+        return false;
+    }
+    active
+        .take()
+        .map(|process| process.cancelled)
+        .unwrap_or(false)
+}
+
+#[cfg(unix)]
+fn terminate_process_tree(pid: u32) -> Result<(), String> {
+    let process_group = format!("-{pid}");
+    let status = Command::new("kill")
+        .args(["-TERM", &process_group])
+        .status()
+        .map_err(|error| format!("Could not request cancellation: {error}"))?;
+    if status.success() {
+        return Ok(());
+    }
+    Err("Could not request cancellation for the running batch.".to_string())
+}
+
+#[cfg(windows)]
+fn terminate_process_tree(pid: u32) -> Result<(), String> {
+    let pid = pid.to_string();
+    let status = Command::new("taskkill")
+        .args(["/PID", &pid, "/T", "/F"])
+        .status()
+        .map_err(|error| format!("Could not request cancellation: {error}"))?;
+    if status.success() {
+        return Ok(());
+    }
+    Err("Could not request cancellation for the running batch.".to_string())
+}
+
+#[cfg(not(any(unix, windows)))]
+fn terminate_process_tree(_pid: u32) -> Result<(), String> {
+    Err("Cancellation is not supported on this platform yet.".to_string())
 }
 
 fn append_line(buffer: &Arc<Mutex<String>>, line: &str) {
@@ -346,12 +491,14 @@ fn tool_path(project_root: &Path) -> String {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![
             choose_folder,
             default_output_dir,
             scan_folder,
             open_path,
-            process_batch
+            process_batch,
+            cancel_batch
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

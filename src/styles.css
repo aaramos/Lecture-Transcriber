@@ -240,6 +240,7 @@ label,
 
 .primary-button,
 .secondary-button,
+.danger-button,
 .icon-button {
   min-height: 38px;
   border-radius: 6px;
@@ -258,6 +259,14 @@ label,
   border: 1px solid var(--line);
   background: transparent;
   color: var(--text);
+}
+
+.danger-button {
+  min-width: 104px;
+  border: 1px solid rgba(214, 103, 95, 0.5);
+  background: rgba(214, 103, 95, 0.12);
+  color: #f0b0aa;
+  font-weight: 700;
 }
 
 .icon-button {
@@ -352,7 +361,7 @@ button:disabled {
 
 .results-grid {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(6, minmax(0, 1fr));
   gap: 8px;
 }
 
@@ -463,6 +472,10 @@ button:disabled {
   border-color: rgba(215, 173, 87, 0.45);
 }
 
+.queue-video-row.canceled {
+  border-color: rgba(215, 173, 87, 0.45);
+}
+
 .queue-video-row.queued {
   border-color: rgba(170, 163, 154, 0.24);
 }
@@ -483,6 +496,10 @@ button:disabled {
 }
 
 .queue-video-row.skipped .video-status-dot {
+  background: var(--warn);
+}
+
+.queue-video-row.canceled .video-status-dot {
   background: var(--warn);
 }
 
@@ -540,6 +557,7 @@ button:disabled {
 }
 
 .activity-actions {
+  gap: 10px;
   justify-content: flex-end;
 }
 

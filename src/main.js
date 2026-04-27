@@ -32,6 +32,8 @@ const state = {
   fileNames: [],
   recordingSpeed: "1x",
   running: false,
+  cancelRequested: false,
+  processorStarted: false,
   lastOutputDir: "",
   progressTotal: 0,
   progressDone: 0,
@@ -47,6 +49,7 @@ const elements = {
   clearFolderButton: document.querySelector("#clearFolderButton"),
   chooseOutputButton: document.querySelector("#chooseOutputButton"),
   startButton: document.querySelector("#startButton"),
+  cancelRunButton: document.querySelector("#cancelRunButton"),
   openOutputButton: document.querySelector("#openOutputButton"),
   settingsButton: document.querySelector("#settingsButton"),
   settingsDialog: document.querySelector("#settingsDialog"),
@@ -73,6 +76,7 @@ const elements = {
   waitingCount: document.querySelector("#waitingCount"),
   failedCount: document.querySelector("#failedCount"),
   skippedCount: document.querySelector("#skippedCount"),
+  canceledCount: document.querySelector("#canceledCount"),
   audioQuality: document.querySelector("#audioQuality"),
   transcriptionEngine: document.querySelector("#transcriptionEngine"),
   whisperModel: document.querySelector("#whisperModel"),
@@ -113,6 +117,7 @@ elements.chooseFolderButton.addEventListener("click", chooseInputFolder);
 elements.chooseOutputButton.addEventListener("click", chooseOutputFolder);
 elements.clearFolderButton.addEventListener("click", clearFolder);
 elements.startButton.addEventListener("click", startBatch);
+elements.cancelRunButton.addEventListener("click", cancelBatch);
 elements.openOutputButton.addEventListener("click", openOutput);
 elements.settingsButton.addEventListener("click", () => showDialog(elements.settingsDialog));
 elements.confirmCheckbox.addEventListener("change", () => {
@@ -209,14 +214,25 @@ async function startBatch() {
   };
 
   try {
+    state.processorStarted = true;
+    renderRunControls();
     const result = await invoke("process_batch", { request });
     state.lastOutputDir = result.outputDir;
-    elements.runTitle.textContent = result.exitCode === 0 ? "Batch finished" : "Batch finished with issues";
-    elements.statusPill.textContent = result.exitCode === 0 ? "Complete" : "Review";
-    elements.statusPill.className = result.exitCode === 0 ? "status-pill complete" : "status-pill warning";
-    if (result.exitCode === 0) {
+    if (result.cancelled) {
+      markRemainingVideosCanceled();
+      elements.runTitle.textContent = "Batch canceled";
+      elements.statusPill.textContent = "Canceled";
+      elements.statusPill.className = "status-pill warning";
+      elements.runMeta.textContent = "Processing was stopped. Completed files remain in the output folder.";
+    } else if (result.exitCode === 0) {
+      elements.runTitle.textContent = "Batch finished";
+      elements.statusPill.textContent = "Complete";
+      elements.statusPill.className = "status-pill complete";
       elements.runMeta.textContent = "All videos finished. Open the output folder for transcripts, videos, and slides.";
     } else {
+      elements.runTitle.textContent = "Batch finished with issues";
+      elements.statusPill.textContent = "Review";
+      elements.statusPill.className = "status-pill warning";
       elements.runMeta.textContent = "Some videos need review. Open the output folder for processing logs.";
     }
     elements.openOutputButton.disabled = false;
@@ -226,7 +242,37 @@ async function startBatch() {
     elements.statusPill.className = "status-pill failed";
     elements.runMeta.textContent = String(error);
   } finally {
+    state.cancelRequested = false;
+    state.processorStarted = false;
     setRunning(false);
+  }
+}
+
+async function cancelBatch() {
+  if (!state.running || state.cancelRequested || !state.processorStarted) return;
+
+  state.cancelRequested = true;
+  renderRunControls();
+  elements.runTitle.textContent = "Canceling batch...";
+  elements.statusPill.textContent = "Canceling";
+  elements.statusPill.className = "status-pill warning";
+  elements.runMeta.textContent = "Stopping active video processing.";
+  updateActiveVideosForCancel();
+
+  try {
+    const result = await invoke("cancel_batch");
+    if (!result.cancelled) {
+      state.cancelRequested = false;
+      elements.runMeta.textContent = result.message || "No active batch was found to cancel.";
+      renderRunControls();
+    }
+  } catch (error) {
+    state.cancelRequested = false;
+    elements.runTitle.textContent = "Processing batch";
+    elements.statusPill.textContent = "Running";
+    elements.statusPill.className = "status-pill running";
+    elements.runMeta.textContent = `Could not cancel batch: ${error}`;
+    renderRunControls();
   }
 }
 
@@ -265,6 +311,7 @@ function setRunning(running) {
   elements.clearFolderButton.disabled = running;
   elements.chooseOutputButton.disabled = running;
   elements.progressBar.classList.toggle("running", running);
+  renderRunControls();
   if (running) {
     elements.runTitle.textContent = `Preparing ${state.fileCount} video${state.fileCount === 1 ? "" : "s"}...`;
     elements.statusPill.textContent = "Running";
@@ -275,6 +322,7 @@ function setRunning(running) {
   } else {
     stopElapsedTimer();
   }
+  renderVideoDashboard();
 }
 
 function setFolderError(message) {
@@ -288,9 +336,12 @@ function resetResults() {
   elements.waitingCount.textContent = String(state.fileCount || 0);
   elements.failedCount.textContent = "0";
   elements.skippedCount.textContent = "0";
+  elements.canceledCount.textContent = "0";
   elements.openOutputButton.disabled = true;
   state.progressTotal = 0;
   state.progressDone = 0;
+  state.cancelRequested = false;
+  state.processorStarted = false;
   state.files.clear();
   state.fileOrder = [];
   setProgress(0, 0);
@@ -328,11 +379,13 @@ function handleProcessorEvent(event) {
   if (!event || typeof event !== "object") return;
 
   if (event.kind === "batch_started") {
+    state.processorStarted = true;
     state.progressTotal = Number(event.attempted || 0);
     state.progressDone = 0;
     setProgress(0, state.progressTotal);
     elements.runTitle.textContent = `Processing ${basename(state.inputDir)}`;
     elements.runMeta.textContent = runDescription();
+    renderRunControls();
     renderVideoDashboard();
   } else if (event.kind === "file_started") {
     updateFile(event.source, {
@@ -452,6 +505,7 @@ function renderCounts(entries) {
   const processing = entries.filter(([_name, file]) => isActiveStatus(file.status)).length;
   const failed = entries.filter(([_name, file]) => file.status === "failed").length;
   const skipped = entries.filter(([_name, file]) => file.status === "skipped").length;
+  const canceled = entries.filter(([_name, file]) => file.status === "canceled").length;
   const waiting = entries.filter(([_name, file]) => file.status === "queued").length;
 
   elements.completedCount.textContent = String(completed);
@@ -459,6 +513,7 @@ function renderCounts(entries) {
   elements.waitingCount.textContent = String(waiting);
   elements.failedCount.textContent = String(failed);
   elements.skippedCount.textContent = String(skipped);
+  elements.canceledCount.textContent = String(canceled);
 }
 
 function renderOverallProgress(entries) {
@@ -503,9 +558,18 @@ function renderActiveVideos(entries) {
 
 function renderQueue(entries) {
   const waiting = entries.filter(([_name, file]) => file.status === "queued").length;
-  const finished = entries.length - waiting;
-  elements.queueSummary.textContent =
-    entries.length === 0 ? "No videos queued" : `${finished} finished · ${waiting} waiting`;
+  const completed = entries.filter(([_name, file]) => file.status === "completed").length;
+  const canceled = entries.filter(([_name, file]) => file.status === "canceled").length;
+  const failed = entries.filter(([_name, file]) => file.status === "failed").length;
+  const skipped = entries.filter(([_name, file]) => file.status === "skipped").length;
+  elements.queueSummary.textContent = queueSummaryText({
+    entries: entries.length,
+    completed,
+    canceled,
+    failed,
+    skipped,
+    waiting,
+  });
 
   if (entries.length === 0) {
     elements.queueList.innerHTML = `<div class="video-placeholder">${
@@ -564,6 +628,7 @@ function statusLabel(status) {
   if (status === "completed") return "Complete";
   if (status === "failed") return "Failed";
   if (status === "skipped") return "Skipped";
+  if (status === "canceled") return "Canceled";
   if (status === "preparing") return "Preparing";
   if (status === "running") return "Processing";
   if (status === "queued") return state.running ? "Waiting" : "Ready";
@@ -572,6 +637,50 @@ function statusLabel(status) {
 
 function clampPercent(value) {
   return Math.min(100, Math.max(0, Math.round(Number(value) || 0)));
+}
+
+function renderRunControls() {
+  elements.cancelRunButton.classList.toggle("hidden", !state.running);
+  elements.cancelRunButton.disabled = !state.running || !state.processorStarted || state.cancelRequested;
+  elements.cancelRunButton.textContent = state.cancelRequested ? "Canceling..." : "Cancel Run";
+}
+
+function updateActiveVideosForCancel() {
+  for (const [name, file] of state.files.entries()) {
+    if (isActiveStatus(file.status)) {
+      state.files.set(name, {
+        ...file,
+        stage: "Canceling",
+        detail: "Stopping",
+      });
+    }
+  }
+  renderVideoDashboard();
+}
+
+function markRemainingVideosCanceled() {
+  for (const [name, file] of state.files.entries()) {
+    if (isActiveStatus(file.status) || file.status === "queued") {
+      state.files.set(name, {
+        ...file,
+        status: "canceled",
+        stage: "Canceled",
+        detail: "Stopped by user",
+      });
+    }
+  }
+  renderVideoDashboard();
+}
+
+function queueSummaryText(summary) {
+  if (summary.entries === 0) return "No videos queued";
+  const parts = [];
+  if (summary.completed) parts.push(`${summary.completed} complete`);
+  if (summary.canceled) parts.push(`${summary.canceled} canceled`);
+  if (summary.failed) parts.push(`${summary.failed} failed`);
+  if (summary.skipped) parts.push(`${summary.skipped} skipped`);
+  if (summary.waiting) parts.push(`${summary.waiting} waiting`);
+  return parts.length ? parts.join(" · ") : "All videos active";
 }
 
 function renderNormalizationWarning() {
