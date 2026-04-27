@@ -20,10 +20,26 @@ def _require_command(command: str) -> str:
         if Path(command).exists():
             return command
         raise DependencyMissingError(f"Required command not found: {command}")
+    local = _local_tool_candidate(command)
+    if local:
+        return str(local)
     resolved = shutil.which(command)
     if not resolved:
         raise DependencyMissingError(f"Required command not found on PATH: {command}")
     return resolved
+
+
+def _local_tool_candidate(command: str) -> Optional[Path]:
+    if command not in {"ffmpeg", "ffprobe"}:
+        return None
+
+    search_roots = [Path.cwd(), Path(__file__).resolve()]
+    for root in search_roots:
+        for parent in [root, *root.parents]:
+            candidate = parent / ".tools" / "darwin_arm64" / command
+            if candidate.exists():
+                return candidate
+    return None
 
 
 def _parse_fraction(value: Optional[str]) -> float:

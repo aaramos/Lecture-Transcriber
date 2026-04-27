@@ -17,18 +17,27 @@ The first implementation is a Python CLI. It is designed to become the processin
 
 ## Requirements
 
-System tools:
+Local dependency bootstrap has been completed for this workspace. In a new terminal, load the project-local tools with:
 
 ```bash
-brew install ffmpeg
+. ./scripts/dev-env.sh
 ```
 
-Optional Python dependencies:
+That puts these local tools on your shell path:
+
+- Python virtual environment: `.venv`
+- FFmpeg/ffprobe: `.tools/darwin_arm64`
+- Rust/Cargo/Tauri CLI: `.tools/cargo`
+- npm via the Codex Node binary: `.tools/npm`
+
+The Python environment can be recreated with:
 
 ```bash
 python3 -m pip install -e .
 python3 -m pip install -e ".[transcription,slides]"
 ```
+
+FFmpeg is installed locally in `.tools/darwin_arm64`; the app auto-discovers that path when system `ffmpeg` and `ffprobe` are not available.
 
 Without installing, you can run the module from the repo with:
 
