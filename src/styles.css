@@ -83,6 +83,10 @@ button {
   justify-content: space-between;
 }
 
+.activity-header {
+  align-items: flex-start;
+}
+
 h1,
 h2,
 p {
@@ -96,6 +100,24 @@ h1 {
 
 h2 {
   font-size: 18px;
+}
+
+.run-meta,
+.elapsed-time {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.status-stack {
+  display: grid;
+  justify-items: end;
+  gap: 4px;
+}
+
+.elapsed-time {
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
 }
 
 .eyebrow,
@@ -321,6 +343,20 @@ button:disabled {
   transition: width 0.22s ease;
 }
 
+.progress-bar.indeterminate {
+  width: 36%;
+  animation: indeterminate 1s infinite alternate ease-in-out;
+}
+
+@keyframes indeterminate {
+  from {
+    margin-left: 0;
+  }
+  to {
+    margin-left: 64%;
+  }
+}
+
 .results-grid {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
@@ -373,6 +409,11 @@ button:disabled {
 
 .file-row.failed {
   border-color: rgba(214, 103, 95, 0.45);
+}
+
+.file-row.preparing,
+.file-row.running {
+  border-color: rgba(222, 118, 83, 0.45);
 }
 
 .file-row.skipped {

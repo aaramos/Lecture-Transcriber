@@ -8,11 +8,14 @@ const state = {
   inputDir: "",
   outputDir: "",
   fileCount: 0,
+  fileNames: [],
   recordingSpeed: "1x",
   running: false,
   lastOutputDir: "",
   progressTotal: 0,
   progressDone: 0,
+  runStartedAt: 0,
+  elapsedTimer: null,
   files: new Map(),
 };
 
@@ -34,7 +37,9 @@ const elements = {
   folderError: document.querySelector("#folderError"),
   outputPath: document.querySelector("#outputPath"),
   runTitle: document.querySelector("#runTitle"),
+  runMeta: document.querySelector("#runMeta"),
   statusPill: document.querySelector("#statusPill"),
+  elapsedTime: document.querySelector("#elapsedTime"),
   progressBar: document.querySelector("#progressBar"),
   logOutput: document.querySelector("#logOutput"),
   fileList: document.querySelector("#fileList"),
@@ -122,9 +127,11 @@ async function scanFolder() {
   try {
     const scan = await invoke("scan_folder", { inputDir: state.inputDir });
     state.fileCount = scan.movCount;
+    state.fileNames = scan.movFiles || [];
     setFolderError(scan.movCount === 0 ? "No .mov files found. Try a different folder." : "");
   } catch (error) {
     state.fileCount = 0;
+    state.fileNames = [];
     setFolderError(String(error));
   }
 }
@@ -133,6 +140,7 @@ function clearFolder() {
   state.inputDir = "";
   state.outputDir = "";
   state.fileCount = 0;
+  state.fileNames = [];
   setFolderError("");
   render();
 }
@@ -148,11 +156,12 @@ async function startBatch() {
   const concurrentFiles = validateSettings();
   if (!concurrentFiles) return;
 
-  setRunning(true);
   resetResults();
-  state.files.clear();
+  setRunning(true);
+  elements.logOutput.textContent = "Starting processor...\n";
+  primeQueuedFiles(concurrentFiles);
   renderFileList();
-  elements.logOutput.textContent = "Processing batch...\n";
+  await waitForPaint();
 
   const request = {
     inputDir: state.inputDir,
@@ -207,6 +216,11 @@ function render() {
   elements.outputPath.textContent = state.outputDir || "-";
   elements.clearFolderButton.classList.toggle("hidden", !hasFolder);
   elements.startButton.disabled = state.running || !hasFolder || state.fileCount === 0;
+  if (!state.running) {
+    elements.runMeta.textContent = hasFolder
+      ? `${state.fileCount} .mov file${state.fileCount === 1 ? "" : "s"} ready`
+      : "Select a folder to begin.";
+  }
   renderNormalizationWarning();
 }
 
@@ -218,10 +232,15 @@ function setRunning(running) {
   elements.chooseOutputButton.disabled = running;
   elements.progressBar.classList.toggle("running", running);
   if (running) {
-    elements.runTitle.textContent = "Processing";
+    elements.runTitle.textContent = "Starting processor...";
     elements.statusPill.textContent = "Running";
     elements.statusPill.className = "status-pill running";
+    elements.runMeta.textContent = runDescription();
     setProgress(0, 0);
+    startElapsedTimer();
+  } else {
+    elements.progressBar.classList.remove("indeterminate");
+    stopElapsedTimer();
   }
 }
 
@@ -286,6 +305,10 @@ function handleProcessorEvent(event) {
     state.progressTotal = Number(event.attempted || 0);
     state.progressDone = 0;
     setProgress(0, state.progressTotal);
+    elements.progressBar.classList.remove("indeterminate");
+    elements.runTitle.textContent = "Processing batch";
+    elements.runMeta.textContent = runDescription();
+    updateCounts({ attempted: state.progressTotal });
     appendLog(`Found ${state.progressTotal} file${state.progressTotal === 1 ? "" : "s"}.`);
   } else if (event.kind === "file_started") {
     updateFile(event.source, { status: "running", detail: "Starting" });
@@ -300,12 +323,17 @@ function handleProcessorEvent(event) {
       status: event.status,
       detail: event.status === "completed" ? `${event.word_count} words, ${event.slide_count} slides` : event.message,
     });
-    updateCounts(event);
+    updateCounts({
+      completed: event.completed,
+      failed: event.failed,
+      skipped: event.skipped,
+    });
     setProgress(state.progressDone, state.progressTotal);
     appendLog(`${event.source}: ${event.status}`);
   } else if (event.kind === "batch_finished") {
     updateCounts(event);
     setProgress(Number(event.attempted || state.progressDone), Number(event.attempted || state.progressTotal));
+    elements.progressBar.classList.remove("indeterminate");
   }
 }
 
@@ -338,6 +366,28 @@ function renderFileList() {
     .join("");
 }
 
+function primeQueuedFiles(concurrentFiles) {
+  state.files.clear();
+  const names = state.fileNames.length
+    ? state.fileNames
+    : Array.from({ length: state.fileCount }, (_value, index) => `File ${index + 1}`);
+
+  names.forEach((name, index) => {
+    state.files.set(name, {
+      status: index < concurrentFiles ? "preparing" : "queued",
+      detail: index < concurrentFiles ? "Preparing" : "Waiting",
+    });
+  });
+
+  state.progressTotal = names.length;
+  updateCounts({ attempted: names.length, completed: 0, failed: 0, skipped: 0 });
+  elements.progressBar.classList.add("indeterminate");
+  setProgress(0, names.length);
+  appendLog(
+    `Processing has started. ${names.length} file${names.length === 1 ? "" : "s"} queued, ${concurrentFiles} at a time.`
+  );
+}
+
 function updateCounts(event) {
   if (event.attempted !== undefined) elements.attemptedCount.textContent = String(event.attempted);
   if (event.completed !== undefined) elements.completedCount.textContent = String(event.completed);
@@ -346,6 +396,10 @@ function updateCounts(event) {
 }
 
 function setProgress(done, total) {
+  if (elements.progressBar.classList.contains("indeterminate")) {
+    elements.progressBar.style.width = "36%";
+    return;
+  }
   const percent = total > 0 ? Math.round((done / total) * 100) : 0;
   elements.progressBar.style.width = `${Math.min(100, Math.max(0, percent))}%`;
 }
@@ -395,6 +449,43 @@ function setupDragAndDrop() {
 
 function showDialog(dialog) {
   if (!dialog.open) dialog.showModal();
+}
+
+function runDescription() {
+  const speed = state.recordingSpeed === "2x" ? "2x to 1x" : "1x";
+  const concurrent = Number.parseInt(elements.concurrentFiles.value, 10) || 1;
+  return `${state.fileCount} file${state.fileCount === 1 ? "" : "s"} · ${concurrent} at a time · ${speed}`;
+}
+
+function startElapsedTimer() {
+  stopElapsedTimer();
+  state.runStartedAt = Date.now();
+  updateElapsedTime();
+  state.elapsedTimer = window.setInterval(updateElapsedTime, 1000);
+}
+
+function stopElapsedTimer() {
+  if (state.elapsedTimer) {
+    window.clearInterval(state.elapsedTimer);
+    state.elapsedTimer = null;
+  }
+}
+
+function updateElapsedTime() {
+  if (!state.runStartedAt) {
+    elements.elapsedTime.textContent = "00:00";
+    return;
+  }
+  const elapsedSeconds = Math.floor((Date.now() - state.runStartedAt) / 1000);
+  const minutes = String(Math.floor(elapsedSeconds / 60)).padStart(2, "0");
+  const seconds = String(elapsedSeconds % 60).padStart(2, "0");
+  elements.elapsedTime.textContent = `${minutes}:${seconds}`;
+}
+
+function waitForPaint() {
+  return new Promise((resolve) => {
+    window.requestAnimationFrame(() => window.requestAnimationFrame(resolve));
+  });
 }
 
 function basename(path) {

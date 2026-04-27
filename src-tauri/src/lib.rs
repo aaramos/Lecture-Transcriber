@@ -13,6 +13,7 @@ const EVENT_PREFIX: &str = "__LECTURE_PROCESSOR_EVENT__ ";
 #[serde(rename_all = "camelCase")]
 struct FolderScan {
     mov_count: usize,
+    mov_files: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -65,7 +66,7 @@ fn default_output_dir(input_dir: String) -> Result<String, String> {
 fn scan_folder(input_dir: String) -> Result<FolderScan, String> {
     let entries =
         std::fs::read_dir(&input_dir).map_err(|error| format!("Could not read folder: {error}"))?;
-    let mov_count = entries
+    let mut mov_files = entries
         .filter_map(Result::ok)
         .filter(|entry| entry.path().is_file())
         .filter(|entry| {
@@ -76,8 +77,13 @@ fn scan_folder(input_dir: String) -> Result<FolderScan, String> {
                 .map(|extension| extension.eq_ignore_ascii_case("mov"))
                 .unwrap_or(false)
         })
-        .count();
-    Ok(FolderScan { mov_count })
+        .filter_map(|entry| entry.file_name().to_str().map(|value| value.to_string()))
+        .collect::<Vec<_>>();
+    mov_files.sort_by_key(|value| value.to_lowercase());
+    Ok(FolderScan {
+        mov_count: mov_files.len(),
+        mov_files,
+    })
 }
 
 #[tauri::command]
@@ -93,7 +99,16 @@ fn open_path(path: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn process_batch(
+async fn process_batch(
+    app: tauri::AppHandle,
+    request: ProcessRequest,
+) -> Result<ProcessResponse, String> {
+    tauri::async_runtime::spawn_blocking(move || run_process_batch(app, request))
+        .await
+        .map_err(|error| format!("Processor task failed: {error}"))?
+}
+
+fn run_process_batch(
     app: tauri::AppHandle,
     request: ProcessRequest,
 ) -> Result<ProcessResponse, String> {
