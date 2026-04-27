@@ -26,6 +26,7 @@ const STEP_DONE_PROGRESS = {
 };
 
 const SETTINGS_STORAGE_KEY = "lectureProcessor.settings.v1";
+const LAST_OUTPUT_STORAGE_KEY = "lectureProcessor.lastOutputDir.v1";
 const DEFAULT_SETTINGS = Object.freeze({
   recordingSpeed: "1x",
   audioQuality: "fast",
@@ -101,6 +102,7 @@ const elements = {
 
 window.__TAURI__?.event?.listen?.("processor-event", (event) => handleProcessorEvent(event.payload));
 loadPersistedSettings();
+cleanupTempFilesAtLaunch();
 setupDragAndDrop();
 
 document.addEventListener("keydown", (event) => {
@@ -172,6 +174,7 @@ async function selectInputFolder(folder) {
   if (!folder) return;
   state.inputDir = folder;
   state.outputDir = await invoke("default_output_dir", { inputDir: folder });
+  rememberOutputDir(state.outputDir);
   await scanFolder();
   render();
 }
@@ -180,6 +183,7 @@ async function chooseOutputFolder() {
   const folder = await invoke("choose_folder");
   if (!folder) return;
   state.outputDir = folder;
+  rememberOutputDir(state.outputDir);
   render();
 }
 
@@ -241,6 +245,7 @@ async function startBatch() {
     slideSensitivity: elements.slideSensitivity.value,
     minDuration: 60,
   };
+  rememberOutputDir(request.outputDir);
 
   try {
     state.processorStarted = true;
@@ -303,6 +308,7 @@ async function openOutput() {
 
 function applyProcessorResult(result) {
   state.lastOutputDir = result.outputDir || state.outputDir;
+  rememberOutputDir(state.lastOutputDir);
 
   let unfinished = 0;
   if (result.cancelled) {
@@ -854,6 +860,24 @@ function saveCurrentSettings() {
     window.localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(settings));
   } catch {
     // Settings persistence is helpful, not required for processing.
+  }
+}
+
+async function cleanupTempFilesAtLaunch() {
+  try {
+    const outputDir = window.localStorage.getItem(LAST_OUTPUT_STORAGE_KEY) || null;
+    await invoke("cleanup_temp_files", { outputDir });
+  } catch {
+    // Temp cleanup is opportunistic; batch startup performs the same sweep.
+  }
+}
+
+function rememberOutputDir(path) {
+  if (!path) return;
+  try {
+    window.localStorage.setItem(LAST_OUTPUT_STORAGE_KEY, path);
+  } catch {
+    // Remembering the last output folder is only used for launch cleanup.
   }
 }
 

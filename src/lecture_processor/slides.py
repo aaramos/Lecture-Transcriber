@@ -1,4 +1,5 @@
 import importlib
+import os
 import shutil
 import subprocess
 import tempfile
@@ -50,7 +51,7 @@ class SlideExtractor:
         output_dir.mkdir(parents=True, exist_ok=True)
         threshold = _threshold_for(self.sensitivity)
 
-        with tempfile.TemporaryDirectory(prefix="lecture-slides-") as tmp:
+        with tempfile.TemporaryDirectory(prefix=f"lecture-slides-{os.getpid()}-") as tmp:
             tmp_path = Path(tmp)
             frame_pattern = tmp_path / "frame_%06d.png"
             command = [
@@ -75,21 +76,35 @@ class SlideExtractor:
 
             previous_frame = None
             saved = 0
-            for sample_index, frame_path in enumerate(sorted(tmp_path.glob("frame_*.png"))):
-                frame = image_module.open(frame_path).convert("RGB")
-                should_save = previous_frame is None
-                if previous_frame is not None:
-                    diff = image_chops.difference(previous_frame, frame)
-                    means = image_stat.Stat(diff).mean
-                    should_save = (sum(means) / len(means)) >= threshold
+            try:
+                for sample_index, frame_path in enumerate(sorted(tmp_path.glob("frame_*.png"))):
+                    frame = None
+                    try:
+                        frame = image_module.open(frame_path).convert("RGB")
+                        should_save = previous_frame is None
+                        if previous_frame is not None:
+                            diff = image_chops.difference(previous_frame, frame)
+                            means = image_stat.Stat(diff).mean
+                            should_save = (sum(means) / len(means)) >= threshold
 
-                if should_save:
-                    timestamp = (sample_index * 2.0) * timestamp_scale
-                    saved += 1
-                    filename = f"slide_{saved:04d}_{format_timestamp_for_filename(timestamp)}.png"
-                    shutil.copyfile(frame_path, output_dir / filename)
-                    previous_frame = frame.copy()
-                frame.close()
+                        if should_save:
+                            timestamp = (sample_index * 2.0) * timestamp_scale
+                            saved += 1
+                            filename = f"slide_{saved:04d}_{format_timestamp_for_filename(timestamp)}.png"
+                            shutil.copyfile(frame_path, output_dir / filename)
+                            if previous_frame is not None:
+                                previous_frame.close()
+                            previous_frame = frame.copy()
+                    finally:
+                        if frame is not None:
+                            frame.close()
+                        try:
+                            frame_path.unlink()
+                        except FileNotFoundError:
+                            pass
+            finally:
+                if previous_frame is not None:
+                    previous_frame.close()
 
         return saved
 

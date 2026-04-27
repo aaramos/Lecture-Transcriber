@@ -4,7 +4,7 @@ from pathlib import Path
 from subprocess import CompletedProcess
 
 from lecture_processor.config import AudioQuality, FfmpegHwAccel, RecordingSpeed
-from lecture_processor.errors import DependencyMissingError
+from lecture_processor.errors import DependencyMissingError, ProcessingError
 from lecture_processor.media import (
     MediaNormalizer,
     _audio_filter_for,
@@ -68,6 +68,7 @@ class MediaDependencyTests(unittest.TestCase):
 
             def runner(command, capture_output, text):
                 captured["command"] = command
+                Path(command[-1]).write_text("video", encoding="utf-8")
                 return CompletedProcess(command, 0, "", "")
 
             media_info = MediaInfo(
@@ -87,6 +88,8 @@ class MediaDependencyTests(unittest.TestCase):
             command = captured["command"]
             self.assertIn("-an", command)
             self.assertNotIn("[a]", command)
+            self.assertTrue((Path(tmp) / "out" / "normalized_video.mp4").exists())
+            self.assertFalse((Path(tmp) / "out" / ".normalized_video.mp4.ffmpeg.tmp").exists())
 
     def test_detects_audio_streams_from_probe_payload(self):
         self.assertTrue(_has_audio_stream({"streams": [{"codec_type": "audio"}]}))
@@ -105,6 +108,7 @@ class MediaDependencyTests(unittest.TestCase):
 
             def runner(command, capture_output, text):
                 captured["command"] = command
+                Path(command[-1]).write_text("video", encoding="utf-8")
                 return CompletedProcess(command, 0, "", "")
 
             media_info = MediaInfo(
@@ -137,7 +141,11 @@ class MediaDependencyTests(unittest.TestCase):
 
             def runner(command, capture_output, text):
                 commands.append(command)
-                return CompletedProcess(command, 1 if len(commands) == 1 else 0, "", "hw failed")
+                if len(commands) == 1:
+                    Path(command[-1]).write_text("partial", encoding="utf-8")
+                    return CompletedProcess(command, 1, "", "hw failed")
+                Path(command[-1]).write_text("video", encoding="utf-8")
+                return CompletedProcess(command, 0, "", "")
 
             media_info = MediaInfo(
                 path=Path("lecture.mov"),
@@ -161,6 +169,40 @@ class MediaDependencyTests(unittest.TestCase):
             self.assertEqual(len(commands), 2)
             self.assertIn("-hwaccel", commands[0])
             self.assertNotIn("-hwaccel", commands[1])
+            self.assertEqual((Path(tmp) / "out" / "lecture.mp4").read_text(encoding="utf-8"), "video")
+            self.assertFalse((Path(tmp) / "out" / ".lecture.mp4.ffmpeg.tmp").exists())
+
+    def test_normalization_removes_temp_output_after_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ffmpeg = Path(tmp) / "ffmpeg"
+            ffmpeg.write_text("binary", encoding="utf-8")
+
+            def runner(command, capture_output, text):
+                Path(command[-1]).write_text("partial", encoding="utf-8")
+                return CompletedProcess(command, 1, "", "failed")
+
+            media_info = MediaInfo(
+                path=Path("lecture.mov"),
+                duration_seconds=120.0,
+                has_audio=False,
+            )
+            destination = Path(tmp) / "out" / "lecture.mp4"
+
+            with self.assertRaises(ProcessingError):
+                MediaNormalizer(
+                    ffmpeg_path=str(ffmpeg),
+                    runner=runner,
+                    ffmpeg_hwaccel=FfmpegHwAccel.NONE,
+                ).normalize(
+                    source=Path("lecture.mov"),
+                    destination=destination,
+                    media_info=media_info,
+                    recording_speed=RecordingSpeed.DOUBLE,
+                    audio_quality=AudioQuality.FAST,
+                )
+
+            self.assertFalse(destination.exists())
+            self.assertFalse((destination.parent / ".lecture.mp4.ffmpeg.tmp").exists())
 
 
 if __name__ == "__main__":

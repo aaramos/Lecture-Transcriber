@@ -21,7 +21,9 @@ from .media import ensure_media_tools
 from .models import BatchSummary, FileStatus
 from .pipeline import BatchProcessor, discover_mov_files
 from .slides import SlideExtractor
+from .temp_cleanup import cleanup_slide_temp_dirs
 from .transcription import build_transcriber
+from .writers import write_text_atomic
 
 EVENT_PREFIX = "__LECTURE_PROCESSOR_EVENT__ "
 
@@ -71,6 +73,7 @@ def _run_process(args) -> int:
     output_dir = args.output.expanduser().resolve() if args.output else _default_output_dir(input_dir)
     apple_silicon = args.apple_silicon or _detect_apple_silicon()
     event_printer = _build_event_printer(args.json_events)
+    cleanup_slide_temp_dirs()
     config = BatchConfig(
         input_dir=input_dir,
         output_dir=output_dir,
@@ -180,7 +183,8 @@ def _default_output_dir(input_dir: Path) -> Path:
 def _write_run_error(output_dir: Path, message: str) -> None:
     try:
         output_dir.mkdir(parents=True, exist_ok=True)
-        (output_dir / "batch_error.txt").write_text(
+        write_text_atomic(
+            output_dir / "batch_error.txt",
             "\n".join(
                 [
                     "Batch failed before all video logs were available.",
@@ -192,9 +196,9 @@ def _write_run_error(output_dir: Path, message: str) -> None:
                     "",
                 ]
             ),
-            encoding="utf-8",
         )
-        (output_dir / "batch_summary.txt").write_text(
+        write_text_atomic(
+            output_dir / "batch_summary.txt",
             "\n".join(
                 [
                     "Batch summary",
@@ -208,7 +212,6 @@ def _write_run_error(output_dir: Path, message: str) -> None:
                     "",
                 ]
             ),
-            encoding="utf-8",
         )
     except OSError:
         pass

@@ -13,8 +13,9 @@ from .errors import LectureProcessorError
 from .media import MediaInspector, MediaNormalizer
 from .models import BatchSummary, FileResult, FileStatus, TranscriptResult
 from .slides import SlideExtractor
+from .temp_cleanup import cleanup_processor_temp_files, remove_temp_path
 from .transcription import Transcriber
-from .writers import write_processing_log, write_transcript
+from .writers import write_processing_log, write_text_atomic, write_transcript
 
 OUTPUT_LOCK_FILE = ".lecture_processor.lock"
 
@@ -55,6 +56,7 @@ class BatchProcessor:
             raise LectureProcessorError("No .mov files found. Try a different folder.")
 
         with output_dir_lock(self.config.output_dir):
+            cleanup_processor_temp_files(self.config.output_dir)
             output_dirs = allocate_output_dirs(files, self.config.output_dir)
             self._emit("batch_started", attempted=len(files), output_dir=str(self.config.output_dir))
             results: List[FileResult] = []
@@ -170,8 +172,9 @@ class BatchProcessor:
             )
             log_lines[-1] = f"{log_lines[-1]} ({slide_count} slides extracted)"
 
-            if temp_normalized and temp_normalized.exists():
-                temp_normalized.unlink()
+            if temp_normalized:
+                remove_temp_path(temp_normalized)
+                temp_normalized = None
 
             elapsed = time.monotonic() - started
             log_lines.append(f"Complete in {elapsed:.1f}s")
@@ -200,6 +203,9 @@ class BatchProcessor:
                 failure_step=step,
                 message=message,
             )
+        finally:
+            if temp_normalized:
+                remove_temp_path(temp_normalized)
 
     def _time_step(self, name: str, source: Path, log_lines: List[str], step_state, operation):
         step_state["current"] = name
@@ -333,7 +339,7 @@ def write_batch_summary(output_dir: Path, summary: BatchSummary) -> None:
         elif result.status is FileStatus.FAILED and result.failure_step:
             detail = f"{result.failure_step}: {result.message}"
         lines.append(f"- {result.source.name}: {status} - {detail}")
-    (output_dir / "batch_summary.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    write_text_atomic(output_dir / "batch_summary.txt", "\n".join(lines) + "\n")
 
 
 def _scale_transcript(transcript: TranscriptResult, scale: float) -> TranscriptResult:

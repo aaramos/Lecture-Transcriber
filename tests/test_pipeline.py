@@ -125,6 +125,32 @@ class BatchProcessorTests(unittest.TestCase):
             self.assertFalse((output / "lecture" / ".normalized_work.mp4").exists())
             self.assertFalse((output / "lecture" / "normalized_video.mp4").exists())
 
+    def test_temp_normalized_video_is_removed_after_downstream_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "lecture.mov"
+            source.write_text("video", encoding="utf-8")
+            output = root / "out"
+            config = BatchConfig(
+                input_dir=root,
+                output_dir=output,
+                recording_speed=RecordingSpeed.DOUBLE,
+                confirm_normalization=True,
+                save_normalized_video=False,
+            )
+
+            summary = BatchProcessor(
+                config=config,
+                inspector=FakeInspector({"lecture.mov": 120.0}),
+                normalizer=FakeNormalizer(),
+                transcriber=FakeTranscriber(fail_for={"lecture"}),
+                slide_extractor=FakeSlideExtractor(),
+            ).run()
+
+            self.assertEqual(summary.failed, 1)
+            self.assertFalse((output / "lecture" / ".normalized_work.mp4").exists())
+            self.assertTrue((output / "lecture" / "processing_log.txt").exists())
+
     def test_saved_normalized_video_keeps_source_lecture_name(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -179,6 +205,31 @@ class BatchProcessorTests(unittest.TestCase):
             self.assertFalse((bad_dir / "transcript.txt").exists())
             log = (bad_dir / "processing_log.txt").read_text(encoding="utf-8")
             self.assertIn("Partial output preserved for review", log)
+
+    def test_startup_cleanup_removes_stale_temp_files_in_output_folder(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "lecture.mov"
+            source.write_text("video", encoding="utf-8")
+            output = root / "out"
+            orphan = output / "old-run"
+            orphan.mkdir(parents=True)
+            (orphan / ".normalized_work.mp4").write_text("temporary", encoding="utf-8")
+            (orphan / ".transcript.txt.tmp").write_text("temporary", encoding="utf-8")
+            (orphan / ".lecture.mp4.ffmpeg.tmp").write_text("temporary", encoding="utf-8")
+            config = BatchConfig(input_dir=root, output_dir=output)
+
+            BatchProcessor(
+                config=config,
+                inspector=FakeInspector({"lecture.mov": 120.0}),
+                normalizer=FakeNormalizer(),
+                transcriber=FakeTranscriber(),
+                slide_extractor=FakeSlideExtractor(),
+            ).run()
+
+            self.assertFalse((orphan / ".normalized_work.mp4").exists())
+            self.assertFalse((orphan / ".transcript.txt.tmp").exists())
+            self.assertFalse((orphan / ".lecture.mp4.ffmpeg.tmp").exists())
 
     def test_output_lock_blocks_second_batch_using_same_folder(self):
         with tempfile.TemporaryDirectory() as tmp:

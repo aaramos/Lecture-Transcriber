@@ -11,6 +11,17 @@ use tauri::Emitter;
 use std::os::unix::process::CommandExt;
 
 const EVENT_PREFIX: &str = "__LECTURE_PROCESSOR_EVENT__ ";
+const SLIDE_TEMP_PREFIX: &str = "lecture-slides-";
+const OUTPUT_LOCK_FILE: &str = ".lecture_processor.lock";
+const NORMALIZED_WORK_FILE: &str = ".normalized_work.mp4";
+const FFMPEG_TEMP_SUFFIX: &str = ".ffmpeg.tmp";
+const ATOMIC_TEMP_FILES: [&str; 5] = [
+    ".batch_error.txt.tmp",
+    ".batch_summary.txt.tmp",
+    ".processing_log.txt.tmp",
+    ".transcript.srt.tmp",
+    ".transcript.txt.tmp",
+];
 
 #[derive(Clone)]
 struct ActiveProcess {
@@ -61,6 +72,12 @@ struct ProcessResponse {
 struct CancelResponse {
     cancelled: bool,
     message: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CleanupTempResponse {
+    deleted: usize,
 }
 
 #[tauri::command]
@@ -118,6 +135,13 @@ fn open_path(path: String) -> Result<(), String> {
         return Err("Could not open output folder.".to_string());
     }
     Ok(())
+}
+
+#[tauri::command]
+fn cleanup_temp_files(output_dir: Option<String>) -> Result<CleanupTempResponse, String> {
+    Ok(CleanupTempResponse {
+        deleted: cleanup_temp_files_impl(output_dir.as_deref().map(Path::new)),
+    })
 }
 
 #[tauri::command]
@@ -488,15 +512,154 @@ fn tool_path(project_root: &Path) -> String {
         .to_string()
 }
 
+fn cleanup_temp_files_impl(output_dir: Option<&Path>) -> usize {
+    let mut deleted = cleanup_slide_temp_dirs();
+    if let Some(path) = output_dir {
+        deleted += cleanup_output_temp_files(path);
+    }
+    deleted
+}
+
+fn cleanup_slide_temp_dirs() -> usize {
+    let temp_dir = env::temp_dir();
+    let Ok(entries) = std::fs::read_dir(temp_dir) else {
+        return 0;
+    };
+
+    entries
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .file_type()
+                .map(|file_type| file_type.is_dir())
+                .unwrap_or(false)
+        })
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_str()
+                .map(|name| name.starts_with(SLIDE_TEMP_PREFIX))
+                .unwrap_or(false)
+        })
+        .filter(|entry| {
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else {
+                return true;
+            };
+            slide_temp_pid(name)
+                .map(|pid| !pid_is_running(pid))
+                .unwrap_or(true)
+        })
+        .map(|entry| remove_temp_path(&entry.path()))
+        .sum()
+}
+
+fn cleanup_output_temp_files(output_dir: &Path) -> usize {
+    if !output_dir.exists() {
+        return 0;
+    }
+
+    let mut deleted = cleanup_output_temp_files_recursive(output_dir);
+    let lock_path = output_dir.join(OUTPUT_LOCK_FILE);
+    if lock_path.exists() && !lock_owner_is_running(&lock_path) {
+        deleted += remove_temp_path(&lock_path);
+    }
+    deleted
+}
+
+fn cleanup_output_temp_files_recursive(folder: &Path) -> usize {
+    let Ok(entries) = std::fs::read_dir(folder) else {
+        return 0;
+    };
+
+    let mut deleted = 0;
+    for entry in entries.filter_map(Result::ok) {
+        let path = entry.path();
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if file_type.is_dir() {
+            deleted += cleanup_output_temp_files_recursive(&path);
+        } else if file_type.is_file() && is_output_temp_file(&path) {
+            deleted += remove_temp_path(&path);
+        }
+    }
+    deleted
+}
+
+fn is_output_temp_file(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+        return false;
+    };
+    name == NORMALIZED_WORK_FILE
+        || name.ends_with(FFMPEG_TEMP_SUFFIX)
+        || ATOMIC_TEMP_FILES.contains(&name)
+}
+
+fn remove_temp_path(path: &Path) -> usize {
+    let result = if path.is_dir() {
+        std::fs::remove_dir_all(path)
+    } else {
+        std::fs::remove_file(path)
+    };
+    if result.is_ok() {
+        1
+    } else {
+        0
+    }
+}
+
+fn lock_owner_is_running(lock_path: &Path) -> bool {
+    let Ok(text) = std::fs::read_to_string(lock_path) else {
+        return false;
+    };
+    let Ok(payload) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return false;
+    };
+    payload
+        .get("pid")
+        .and_then(|value| value.as_u64())
+        .and_then(|pid| u32::try_from(pid).ok())
+        .map(pid_is_running)
+        .unwrap_or(false)
+}
+
+fn slide_temp_pid(name: &str) -> Option<u32> {
+    name.strip_prefix(SLIDE_TEMP_PREFIX)?
+        .split_once("-")?
+        .0
+        .parse()
+        .ok()
+}
+
+#[cfg(unix)]
+fn pid_is_running(pid: u32) -> bool {
+    Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+#[cfg(not(unix))]
+fn pid_is_running(_pid: u32) -> bool {
+    false
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .manage(AppState::default())
+        .setup(|_app| {
+            let _ = cleanup_temp_files_impl(None);
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             choose_folder,
             default_output_dir,
             scan_folder,
             open_path,
+            cleanup_temp_files,
             process_batch,
             cancel_batch
         ])

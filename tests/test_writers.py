@@ -19,6 +19,8 @@ class WriterTests(unittest.TestCase):
 
             self.assertEqual((output_dir / "transcript.txt").read_text(encoding="utf-8"), "hello lecture\n")
             self.assertTrue((output_dir / "transcript.srt").exists())
+            self.assertFalse((output_dir / ".transcript.txt.tmp").exists())
+            self.assertFalse((output_dir / ".transcript.srt.tmp").exists())
 
     def test_processing_log_writer_replaces_existing_file(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -28,6 +30,7 @@ class WriterTests(unittest.TestCase):
             write_processing_log(output_dir, ["new"])
 
             self.assertEqual((output_dir / "processing_log.txt").read_text(encoding="utf-8"), "new\n")
+            self.assertFalse((output_dir / ".processing_log.txt.tmp").exists())
 
 
 if __name__ == "__main__":
