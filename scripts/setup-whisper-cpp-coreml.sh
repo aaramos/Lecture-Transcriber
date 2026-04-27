@@ -25,6 +25,7 @@ ln -sfn "$PYTHON" "$PYTHON_CMAKE"
 "$PYTHON" -m pip install --upgrade \
   pip \
   setuptools \
+  setuptools-scm \
   wheel \
   build \
   cmake \
@@ -98,6 +99,7 @@ PY
 PATH="$PYTHON_DIR:$PATH" \
 WHISPER_COREML=1 \
 WHISPER_COREML_ALLOW_FALLBACK=1 \
+SETUPTOOLS_SCM_PRETEND_VERSION_FOR_PYWHISPERCPP=1.4.2.dev2+coreml \
 CMAKE_ARGS="-DPython_EXECUTABLE=$PYTHON_CMAKE -DPython_FIND_STRATEGY=LOCATION" \
 "$PYTHON" -m pip install --force-reinstall --no-build-isolation --no-cache-dir --no-deps .
 
@@ -117,6 +119,8 @@ COREML_MODEL="ggml-$MODEL-encoder.mlmodelc"
 cp "models/$GGML_MODEL" "$MODEL_DIR/$GGML_MODEL"
 rm -rf "$MODEL_DIR/$COREML_MODEL"
 cp -R "models/$COREML_MODEL" "$MODEL_DIR/$COREML_MODEL"
+
+"$PYTHON" -m pip uninstall -y ane-transformers >/dev/null 2>&1 || true
 
 "$PYTHON" - <<'PY'
 from pywhispercpp.model import Model
