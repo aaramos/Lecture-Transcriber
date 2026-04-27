@@ -1,8 +1,11 @@
+import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
 
 from lecture_processor.config import AudioQuality, BatchConfig, RecordingSpeed
+from lecture_processor.errors import LectureProcessorError
 from lecture_processor.models import FileStatus, MediaInfo, TranscriptResult, TranscriptSegment
 from lecture_processor.pipeline import BatchProcessor, allocate_output_dirs, normalized_video_output_path
 
@@ -176,6 +179,48 @@ class BatchProcessorTests(unittest.TestCase):
             self.assertFalse((bad_dir / "transcript.txt").exists())
             log = (bad_dir / "processing_log.txt").read_text(encoding="utf-8")
             self.assertIn("Partial output preserved for review", log)
+
+    def test_output_lock_blocks_second_batch_using_same_folder(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "lecture.mov"
+            source.write_text("video", encoding="utf-8")
+            output = root / "out"
+            output.mkdir()
+            (output / ".lecture_processor.lock").write_text(json.dumps({"pid": os.getpid()}), encoding="utf-8")
+            config = BatchConfig(input_dir=root, output_dir=output)
+
+            with self.assertRaises(LectureProcessorError) as error:
+                BatchProcessor(
+                    config=config,
+                    inspector=FakeInspector({"lecture.mov": 120.0}),
+                    normalizer=FakeNormalizer(),
+                    transcriber=FakeTranscriber(),
+                    slide_extractor=FakeSlideExtractor(),
+                ).run()
+
+            self.assertIn("already being processed", str(error.exception))
+
+    def test_output_lock_replaces_stale_lock_and_clears_after_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "lecture.mov"
+            source.write_text("video", encoding="utf-8")
+            output = root / "out"
+            output.mkdir()
+            (output / ".lecture_processor.lock").write_text(json.dumps({"pid": -1}), encoding="utf-8")
+            config = BatchConfig(input_dir=root, output_dir=output)
+
+            summary = BatchProcessor(
+                config=config,
+                inspector=FakeInspector({"lecture.mov": 120.0}),
+                normalizer=FakeNormalizer(),
+                transcriber=FakeTranscriber(),
+                slide_extractor=FakeSlideExtractor(),
+            ).run()
+
+            self.assertEqual(summary.completed, 1)
+            self.assertFalse((output / ".lecture_processor.lock").exists())
 
     def test_normalized_video_output_path_uses_portable_source_name(self):
         path = normalized_video_output_path(Path("Lecture: 2.mov"), Path("/tmp/out"))

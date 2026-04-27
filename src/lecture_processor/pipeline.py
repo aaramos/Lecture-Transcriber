@@ -1,9 +1,12 @@
+import json
+import os
 import re
 import shutil
 import time
+from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, Iterator, List, Optional
 
 from .config import BatchConfig, RecordingSpeed
 from .errors import LectureProcessorError
@@ -12,6 +15,8 @@ from .models import BatchSummary, FileResult, FileStatus, TranscriptResult
 from .slides import SlideExtractor
 from .transcription import Transcriber
 from .writers import write_processing_log, write_transcript
+
+OUTPUT_LOCK_FILE = ".lecture_processor.lock"
 
 
 class BatchProcessor:
@@ -49,45 +54,45 @@ class BatchProcessor:
         if not files:
             raise LectureProcessorError("No .mov files found. Try a different folder.")
 
-        self.config.output_dir.mkdir(parents=True, exist_ok=True)
-        output_dirs = allocate_output_dirs(files, self.config.output_dir)
-        self._emit("batch_started", attempted=len(files), output_dir=str(self.config.output_dir))
-        results: List[FileResult] = []
-        with ThreadPoolExecutor(max_workers=self.config.concurrent_files) as executor:
-            futures = [executor.submit(self._process_file, path, output_dirs[path]) for path in files]
-            for future in as_completed(futures):
-                result = future.result()
-                results.append(result)
-                self._emit(
-                    "file_finished",
-                    source=result.source.name,
-                    status=result.status.value,
-                    message=result.message,
-                    completed=sum(1 for item in results if item.status is FileStatus.COMPLETED),
-                    failed=sum(1 for item in results if item.status is FileStatus.FAILED),
-                    skipped=sum(1 for item in results if item.status is FileStatus.SKIPPED),
-                    attempted=len(results),
-                    word_count=result.word_count,
-                    slide_count=result.slide_count,
-                )
+        with output_dir_lock(self.config.output_dir):
+            output_dirs = allocate_output_dirs(files, self.config.output_dir)
+            self._emit("batch_started", attempted=len(files), output_dir=str(self.config.output_dir))
+            results: List[FileResult] = []
+            with ThreadPoolExecutor(max_workers=self.config.concurrent_files) as executor:
+                futures = [executor.submit(self._process_file, path, output_dirs[path]) for path in files]
+                for future in as_completed(futures):
+                    result = future.result()
+                    results.append(result)
+                    self._emit(
+                        "file_finished",
+                        source=result.source.name,
+                        status=result.status.value,
+                        message=result.message,
+                        completed=sum(1 for item in results if item.status is FileStatus.COMPLETED),
+                        failed=sum(1 for item in results if item.status is FileStatus.FAILED),
+                        skipped=sum(1 for item in results if item.status is FileStatus.SKIPPED),
+                        attempted=len(results),
+                        word_count=result.word_count,
+                        slide_count=result.slide_count,
+                    )
 
-        results.sort(key=lambda item: item.source.name.lower())
-        summary = BatchSummary(
-            attempted=len(results),
-            completed=sum(1 for item in results if item.status is FileStatus.COMPLETED),
-            failed=sum(1 for item in results if item.status is FileStatus.FAILED),
-            skipped=sum(1 for item in results if item.status is FileStatus.SKIPPED),
-            results=results,
-        )
-        write_batch_summary(self.config.output_dir, summary)
-        self._emit(
-            "batch_finished",
-            attempted=summary.attempted,
-            completed=summary.completed,
-            failed=summary.failed,
-            skipped=summary.skipped,
-        )
-        return summary
+            results.sort(key=lambda item: item.source.name.lower())
+            summary = BatchSummary(
+                attempted=len(results),
+                completed=sum(1 for item in results if item.status is FileStatus.COMPLETED),
+                failed=sum(1 for item in results if item.status is FileStatus.FAILED),
+                skipped=sum(1 for item in results if item.status is FileStatus.SKIPPED),
+                results=results,
+            )
+            write_batch_summary(self.config.output_dir, summary)
+            self._emit(
+                "batch_finished",
+                attempted=summary.attempted,
+                completed=summary.completed,
+                failed=summary.failed,
+                skipped=summary.skipped,
+            )
+            return summary
 
     def _process_file(self, source: Path, output_dir: Path) -> FileResult:
         self._emit("file_started", source=source.name)
@@ -248,6 +253,66 @@ def reset_output_dir(output_dir: Path) -> None:
     if output_dir.exists():
         shutil.rmtree(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+
+
+@contextmanager
+def output_dir_lock(output_dir: Path) -> Iterator[None]:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = output_dir / OUTPUT_LOCK_FILE
+
+    while True:
+        try:
+            fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            lock_info = _read_output_lock(lock_path)
+            pid = _lock_pid(lock_info)
+            if _pid_is_running(pid):
+                raise LectureProcessorError(
+                    "This output folder is already being processed. Wait for the current batch to finish, "
+                    "cancel it, or choose a different output folder."
+                )
+            try:
+                lock_path.unlink()
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                raise LectureProcessorError(f"Could not clear a stale output-folder lock: {exc}") from exc
+            continue
+        break
+
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as lock_file:
+            json.dump({"pid": os.getpid(), "created_at": time.time()}, lock_file)
+        yield
+    finally:
+        try:
+            lock_path.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _read_output_lock(lock_path: Path) -> Dict:
+    try:
+        return json.loads(lock_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _lock_pid(lock_info: Dict) -> Optional[int]:
+    pid = lock_info.get("pid")
+    return pid if isinstance(pid, int) and pid > 0 else None
+
+
+def _pid_is_running(pid: Optional[int]) -> bool:
+    if pid is None:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
 
 
 def write_batch_summary(output_dir: Path, summary: BatchSummary) -> None:
