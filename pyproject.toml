@@ -27,6 +27,7 @@ dev = []
 
 [project.scripts]
 lecture-processor = "lecture_processor.cli:main"
+lecture-processor-app = "lecture_processor.gui:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

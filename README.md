@@ -44,6 +44,14 @@ PYTHONPATH=src python3 -m unittest discover -s tests
 
 ## Usage
 
+Launch the lightweight desktop wrapper:
+
+```bash
+lecture-processor-app
+```
+
+Or run the processing core directly from the command line.
+
 For normal-speed recordings:
 
 ```bash
