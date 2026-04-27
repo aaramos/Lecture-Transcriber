@@ -1,3 +1,4 @@
+import os
 import unittest
 from unittest import mock
 
@@ -7,6 +8,7 @@ from lecture_processor.transcription import (
     NullTranscriber,
     _whisper_cpp_segment_times,
     build_transcriber,
+    configure_whisper_cpp_runtime_env,
 )
 
 
@@ -54,6 +56,24 @@ class TranscriptionTests(unittest.TestCase):
             )
 
         self.assertIsInstance(transcriber._transcriber, NullTranscriber)
+
+    def test_whisper_cpp_runtime_defaults_disable_unstable_metal_decoder(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            configure_whisper_cpp_runtime_env()
+
+            self.assertEqual(os.environ["PYWHISPERCPP_USE_GPU"], "0")
+            self.assertEqual(os.environ["PYWHISPERCPP_FLASH_ATTN"], "0")
+
+    def test_whisper_cpp_runtime_preserves_explicit_overrides(self):
+        with mock.patch.dict(
+            os.environ,
+            {"PYWHISPERCPP_USE_GPU": "1", "PYWHISPERCPP_FLASH_ATTN": "1"},
+            clear=True,
+        ):
+            configure_whisper_cpp_runtime_env()
+
+            self.assertEqual(os.environ["PYWHISPERCPP_USE_GPU"], "1")
+            self.assertEqual(os.environ["PYWHISPERCPP_FLASH_ATTN"], "1")
 
 
 if __name__ == "__main__":

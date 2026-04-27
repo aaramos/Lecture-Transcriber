@@ -86,12 +86,20 @@ bool env_flag(const char * name, bool default_value) {
 }
 """,
     )
+patched_init = """struct whisper_context_params params = whisper_context_default_params();
+    params.use_gpu = env_flag("PYWHISPERCPP_USE_GPU", false);
+    params.flash_attn = env_flag("PYWHISPERCPP_FLASH_ATTN", false);
+    struct whisper_context * ctx = whisper_init_from_file_with_params(path_model, params);"""
 main_text = main_text.replace(
-    "struct whisper_context * ctx = whisper_init_from_file(path_model);",
     """struct whisper_context_params params = whisper_context_default_params();
     params.use_gpu = env_flag("PYWHISPERCPP_USE_GPU", true);
     params.flash_attn = env_flag("PYWHISPERCPP_FLASH_ATTN", false);
     struct whisper_context * ctx = whisper_init_from_file_with_params(path_model, params);""",
+    patched_init,
+)
+main_text = main_text.replace(
+    "struct whisper_context * ctx = whisper_init_from_file(path_model);",
+    patched_init,
 )
 main.write_text(main_text)
 PY

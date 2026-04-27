@@ -293,6 +293,9 @@ fn run_process_batch(
     if env::var_os("PYWHISPERCPP_FLASH_ATTN").is_none() {
         command.env("PYWHISPERCPP_FLASH_ATTN", "0");
     }
+    if env::var_os("PYWHISPERCPP_USE_GPU").is_none() {
+        command.env("PYWHISPERCPP_USE_GPU", "0");
+    }
 
     #[cfg(unix)]
     command.process_group(0);

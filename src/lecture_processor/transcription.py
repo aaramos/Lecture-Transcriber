@@ -1,4 +1,5 @@
 import importlib
+import os
 import threading
 from pathlib import Path
 from typing import Optional, Protocol
@@ -88,6 +89,7 @@ class WhisperCppTranscriber:
         require_coreml: bool = False,
         n_threads: Optional[int] = None,
     ) -> None:
+        configure_whisper_cpp_runtime_env()
         module = importlib.import_module("pywhispercpp.model")
         if require_coreml:
             system_info = str(module.Model.system_info())
@@ -191,6 +193,11 @@ def build_transcriber(
         "No Whisper transcription engine is installed. Install optional dependencies or "
         "use --transcription-engine none for media-only smoke tests."
     )
+
+
+def configure_whisper_cpp_runtime_env() -> None:
+    os.environ.setdefault("PYWHISPERCPP_USE_GPU", "0")
+    os.environ.setdefault("PYWHISPERCPP_FLASH_ATTN", "0")
 
 
 def _whisper_cpp_segment_times(segment) -> tuple:
