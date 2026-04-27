@@ -12,9 +12,13 @@ from .temp_cleanup import remove_temp_path
 
 
 def ensure_media_tools(ffprobe_path: str, ffmpeg_path: str, needs_ffmpeg: bool) -> None:
-    _require_command(ffprobe_path)
+    resolve_media_tool(ffprobe_path)
     if needs_ffmpeg:
-        _require_command(ffmpeg_path)
+        resolve_media_tool(ffmpeg_path)
+
+
+def resolve_media_tool(command: str) -> str:
+    return _require_command(command)
 
 
 def _require_command(command: str) -> str:
@@ -174,6 +178,8 @@ class MediaNormalizer:
             command.extend([
                 "-movflags",
                 "+faststart",
+                "-f",
+                "mp4",
                 str(output_path),
             ])
             return command

@@ -1,3 +1,5 @@
+import shutil
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -88,6 +90,7 @@ class MediaDependencyTests(unittest.TestCase):
             command = captured["command"]
             self.assertIn("-an", command)
             self.assertNotIn("[a]", command)
+            self.assertEqual(command[-3:-1], ["-f", "mp4"])
             self.assertTrue((Path(tmp) / "out" / "normalized_video.mp4").exists())
             self.assertFalse((Path(tmp) / "out" / ".normalized_video.mp4.ffmpeg.tmp").exists())
 
@@ -202,6 +205,56 @@ class MediaDependencyTests(unittest.TestCase):
                 )
 
             self.assertFalse(destination.exists())
+            self.assertFalse((destination.parent / ".lecture.mp4.ffmpeg.tmp").exists())
+
+    def test_real_ffmpeg_normalization_accepts_hidden_temp_output(self):
+        ffmpeg = shutil.which("ffmpeg") or str(_require_command("ffmpeg"))
+        ffprobe = shutil.which("ffprobe") or str(_require_command("ffprobe"))
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "source.mov"
+            destination = root / "out" / "lecture.mp4"
+            create = subprocess.run(
+                [
+                    ffmpeg,
+                    "-y",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "testsrc2=size=160x90:rate=10:duration=0.5",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "sine=frequency=1000:duration=0.5",
+                    "-c:v",
+                    "libx264",
+                    "-pix_fmt",
+                    "yuv420p",
+                    "-c:a",
+                    "aac",
+                    str(source),
+                ],
+                capture_output=True,
+                text=True,
+            )
+            if create.returncode != 0:
+                self.skipTest(f"Could not create ffmpeg fixture: {create.stderr}")
+
+            from lecture_processor.media import MediaInspector
+
+            media_info = MediaInspector(ffprobe_path=ffprobe).probe(source)
+            MediaNormalizer(
+                ffmpeg_path=ffmpeg,
+                ffmpeg_hwaccel=FfmpegHwAccel.NONE,
+            ).normalize(
+                source=source,
+                destination=destination,
+                media_info=media_info,
+                recording_speed=RecordingSpeed.DOUBLE,
+                audio_quality=AudioQuality.FAST,
+            )
+
+            self.assertTrue(destination.exists())
             self.assertFalse((destination.parent / ".lecture.mp4.ffmpeg.tmp").exists())
 
 

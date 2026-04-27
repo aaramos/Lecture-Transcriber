@@ -1,11 +1,12 @@
 import io
 import json
+import os
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
-from lecture_processor.cli import EVENT_PREFIX, _build_event_printer, main
+from lecture_processor.cli import EVENT_PREFIX, _build_event_printer, _prepend_tool_parent_to_path, main
 
 
 class CliTests(unittest.TestCase):
@@ -55,6 +56,21 @@ class CliTests(unittest.TestCase):
         payload = json.loads(line.removeprefix(EVENT_PREFIX))
         self.assertEqual(payload["kind"], "batch_started")
         self.assertEqual(payload["attempted"], 2)
+
+    def test_prepend_tool_parent_to_path_supports_internal_ffmpeg_users(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tool = Path(tmp) / "ffmpeg"
+            tool.write_text("binary", encoding="utf-8")
+            previous_path = os.environ.get("PATH")
+            try:
+                os.environ["PATH"] = "/usr/bin"
+                _prepend_tool_parent_to_path(str(tool))
+                self.assertEqual(os.environ["PATH"].split(os.pathsep)[0], str(tool.parent))
+            finally:
+                if previous_path is None:
+                    os.environ.pop("PATH", None)
+                else:
+                    os.environ["PATH"] = previous_path
 
 
 if __name__ == "__main__":

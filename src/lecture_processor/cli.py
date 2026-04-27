@@ -1,5 +1,6 @@
 import argparse
 import json
+import os
 import platform
 import subprocess
 import sys
@@ -17,7 +18,7 @@ from .config import (
     TranscriptionEngine,
 )
 from .errors import LectureProcessorError
-from .media import ensure_media_tools
+from .media import ensure_media_tools, resolve_media_tool
 from .models import BatchSummary, FileStatus
 from .pipeline import BatchProcessor, discover_mov_files
 from .slides import SlideExtractor
@@ -109,6 +110,8 @@ def _run_process(args) -> int:
             ffmpeg_path=config.ffmpeg_path,
             needs_ffmpeg=needs_ffmpeg,
         )
+        if needs_ffmpeg:
+            _prepend_tool_parent_to_path(config.ffmpeg_path)
         transcriber = build_transcriber(
             config.transcription_engine,
             config.whisper_model,
@@ -178,6 +181,15 @@ def _detect_apple_silicon() -> bool:
 
 def _default_output_dir(input_dir: Path) -> Path:
     return input_dir.parent / f"{input_dir.name}_processed"
+
+
+def _prepend_tool_parent_to_path(command: str) -> None:
+    tool_path = Path(resolve_media_tool(command))
+    tool_dir = str(tool_path.parent)
+    existing = os.environ.get("PATH", "")
+    paths = existing.split(os.pathsep) if existing else []
+    if tool_dir not in paths:
+        os.environ["PATH"] = os.pathsep.join([tool_dir, *paths])
 
 
 def _write_run_error(output_dir: Path, message: str) -> None:
