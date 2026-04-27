@@ -1,0 +1,2188 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lecture Processor App — PRD v1.3</title>
+<link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&amp;family=Fraunces:ital,opsz,wght@0,9..144,300;0,9..144,600;1,9..144,300&amp;family=DM+Sans:wght@300;400;500&amp;display=swap" rel="stylesheet">
+<style>
+  :root {
+    --ink: #0f0f0f;
+    --paper: #f5f2eb;
+    --cream: #ede9df;
+    --accent: #c84b2f;
+    --accent2: #2a6b4f;
+    --muted: #7a7268;
+    --rule: #d4cfc4;
+    --ui-bg: #1a1a1a;
+    --ui-surface: #252525;
+    --ui-border: #333;
+    --ui-text: #e8e4dc;
+    --ui-muted: #888;
+    --ui-accent: #e07b5a;
+    --ui-green: #5aaa7a;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: 'DM Sans', sans-serif;
+    font-weight: 300;
+    line-height: 1.6;
+  }
+
+  /* ── HEADER ── */
+  header {
+    border-bottom: 2px solid var(--ink);
+    padding: 2.5rem 4rem 2rem;
+    display: grid;
+    grid-template-columns: 1fr auto;
+    align-items: end;
+    gap: 2rem;
+  }
+
+  .doc-label {
+    font-family: 'DM Mono', monospace;
+    font-size: 0.7rem;
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin-bottom: 0.5rem;
+  }
+
+  h1 {
+    font-family: 'Fraunces', serif;
+    font-size: 3.2rem;
+    font-weight: 300;
+    line-height: 1.05;
+    letter-spacing: -0.02em;
+  }
+
+  h1 em {
+    font-style: italic;
+    color: var(--accent);
+  }
+
+  .meta-block {
+    text-align: right;
+    font-family: 'DM Mono', monospace;
+    font-size: 0.72rem;
+    color: var(--muted);
+    line-height: 2;
+  }
+
+  .version-badge {
+    display: inline-block;
+    background: var(--ink);
+    color: var(--paper);
+    padding: 0.2rem 0.7rem;
+    font-family: 'DM Mono', monospace;
+    font-size: 0.7rem;
+    letter-spacing: 0.08em;
+    margin-bottom: 0.5rem;
+  }
+
+  /* ── LAYOUT ── */
+  .prd-body {
+    display: grid;
+    grid-template-columns: 220px 1fr;
+    min-height: 100vh;
+  }
+
+  /* ── SIDEBAR ── */
+  nav {
+    border-right: 1px solid var(--rule);
+    padding: 3rem 1.5rem;
+    position: sticky;
+    top: 0;
+    height: 100vh;
+    overflow-y: auto;
+  }
+
+  nav .nav-label {
+    font-family: 'DM Mono', monospace;
+    font-size: 0.62rem;
+    text-transform: uppercase;
+    letter-spacing: 0.15em;
+    color: var(--muted);
+    margin-bottom: 1rem;
+  }
+
+  nav a {
+    display: block;
+    font-size: 0.82rem;
+    color: var(--muted);
+    text-decoration: none;
+    padding: 0.35rem 0;
+    border-left: 2px solid transparent;
+    padding-left: 0.75rem;
+    transition: all 0.15s;
+    line-height: 1.4;
+  }
+
+  nav a:hover, nav a.active {
+    color: var(--ink);
+    border-left-color: var(--accent);
+  }
+
+  nav .nav-section {
+    margin-top: 1.5rem;
+  }
+
+  /* ── MAIN CONTENT ── */
+  main {
+    padding: 3rem 4rem 5rem;
+    max-width: 900px;
+  }
+
+  section {
+    margin-bottom: 4rem;
+    padding-bottom: 4rem;
+    border-bottom: 1px solid var(--rule);
+  }
+
+  section:last-child {
+    border-bottom: none;
+  }
+
+  .section-num {
+    font-family: 'DM Mono', monospace;
+    font-size: 0.68rem;
+    color: var(--accent);
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    margin-bottom: 0.4rem;
+  }
+
+  h2 {
+    font-family: 'Fraunces', serif;
+    font-size: 1.9rem;
+    font-weight: 600;
+    letter-spacing: -0.02em;
+    margin-bottom: 1.5rem;
+  }
+
+  h3 {
+    font-family: 'DM Sans', sans-serif;
+    font-size: 0.8rem;
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--muted);
+    margin: 2rem 0 0.75rem;
+  }
+
+  p {
+    font-size: 0.92rem;
+    color: #2a2a2a;
+    margin-bottom: 0.9rem;
+    max-width: 68ch;
+  }
+
+  .lead {
+    font-family: 'Fraunces', serif;
+    font-size: 1.15rem;
+    font-weight: 300;
+    font-style: italic;
+    color: var(--muted);
+    border-left: 3px solid var(--accent);
+    padding-left: 1.2rem;
+    margin-bottom: 1.5rem;
+    max-width: 60ch;
+    line-height: 1.5;
+  }
+
+  /* ── TABLES ── */
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.85rem;
+    margin: 1.2rem 0;
+  }
+
+  th {
+    background: var(--ink);
+    color: var(--paper);
+    padding: 0.6rem 1rem;
+    text-align: left;
+    font-family: 'DM Mono', monospace;
+    font-size: 0.68rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    font-weight: 400;
+  }
+
+  td {
+    padding: 0.65rem 1rem;
+    border-bottom: 1px solid var(--rule);
+    vertical-align: top;
+    line-height: 1.5;
+  }
+
+  tr:nth-child(even) td { background: var(--cream); }
+
+  td:first-child {
+    font-family: 'DM Mono', monospace;
+    font-size: 0.75rem;
+    color: var(--accent2);
+    white-space: nowrap;
+  }
+
+  /* ── PIPELINE ── */
+  .pipeline {
+    display: flex;
+    align-items: stretch;
+    gap: 0;
+    margin: 1.5rem 0;
+    overflow-x: auto;
+  }
+
+  .pipe-step {
+    flex: 1;
+    min-width: 120px;
+    background: var(--cream);
+    border: 1px solid var(--rule);
+    padding: 1rem 0.85rem;
+    position: relative;
+    text-align: center;
+  }
+
+  .pipe-step.new-step {
+    background: #fdf3ef;
+    border-color: #e8b8a8;
+  }
+
+  .pipe-step + .pipe-step::before {
+    content: '→';
+    position: absolute;
+    left: -0.8rem;
+    top: 50%;
+    transform: translateY(-50%);
+    font-size: 1rem;
+    color: var(--muted);
+    z-index: 1;
+    background: var(--paper);
+    padding: 0 2px;
+  }
+
+  .pipe-icon {
+    font-size: 1.4rem;
+    margin-bottom: 0.4rem;
+  }
+
+  .pipe-label {
+    font-family: 'DM Mono', monospace;
+    font-size: 0.68rem;
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--ink);
+    margin-bottom: 0.25rem;
+  }
+
+  .pipe-desc {
+    font-size: 0.72rem;
+    color: var(--muted);
+    line-height: 1.4;
+  }
+
+  .pipe-new-tag {
+    display: inline-block;
+    background: var(--accent);
+    color: white;
+    font-family: 'DM Mono', monospace;
+    font-size: 0.55rem;
+    padding: 0.1rem 0.4rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin-bottom: 0.3rem;
+  }
+
+  /* ── CODE BLOCK ── */
+  pre {
+    background: #1a1a1a;
+    color: #d4cfbf;
+    padding: 1.25rem 1.5rem;
+    font-family: 'DM Mono', monospace;
+    font-size: 0.76rem;
+    line-height: 1.7;
+    overflow-x: auto;
+    border-left: 3px solid var(--accent);
+    margin: 1rem 0;
+  }
+
+  .code-comment { color: #6a8a6a; }
+  .code-flag { color: #e07b5a; }
+  .code-value { color: #7ab8d4; }
+  .code-filter { color: #c8a86a; }
+
+  /* ── OUTPUT TREE ── */
+  .file-tree {
+    background: #1a1a1a;
+    color: #d4cfbf;
+    padding: 1.25rem 1.5rem;
+    font-family: 'DM Mono', monospace;
+    font-size: 0.78rem;
+    line-height: 2;
+    margin: 1rem 0;
+  }
+
+  .ft-folder { color: #7ab8d4; }
+  .ft-new { color: #e07b5a; }
+  .ft-file { color: #d4cfbf; }
+  .ft-comment { color: #6a8a6a; }
+
+  /* ── RISK TABLE ── */
+  .risk-tag {
+    display: inline-block;
+    padding: 0.15rem 0.5rem;
+    font-family: 'DM Mono', monospace;
+    font-size: 0.65rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+  }
+  .risk-high { background: #fde8e4; color: #c84b2f; }
+  .risk-med { background: #fdf3e0; color: #a06020; }
+  .risk-low { background: #e8f4ee; color: #2a6b4f; }
+
+  /* ══════════════════════════════════════════
+     APP MOCKUPS
+  ══════════════════════════════════════════ */
+
+  .mockup-container {
+    margin: 2rem 0;
+  }
+
+  .mockup-label {
+    font-family: 'DM Mono', monospace;
+    font-size: 0.68rem;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--muted);
+    margin-bottom: 0.75rem;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+
+  .mockup-label::before {
+    content: '';
+    display: inline-block;
+    width: 2rem;
+    height: 1px;
+    background: var(--rule);
+  }
+
+  /* Window chrome */
+  .app-window {
+    background: var(--ui-bg);
+    border-radius: 10px;
+    overflow: hidden;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.35), 0 0 0 1px rgba(255,255,255,0.06);
+    font-family: 'DM Sans', sans-serif;
+  }
+
+  .window-titlebar {
+    background: #2a2a2a;
+    padding: 0.75rem 1rem;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    border-bottom: 1px solid var(--ui-border);
+  }
+
+  .traffic-light {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+  }
+  .tl-red { background: #ff5f56; }
+  .tl-yellow { background: #ffbd2e; }
+  .tl-green { background: #27c93f; }
+
+  .window-title {
+    flex: 1;
+    text-align: center;
+    font-size: 0.75rem;
+    color: #999;
+    letter-spacing: 0.03em;
+  }
+
+  .window-body {
+    padding: 2rem;
+  }
+
+  /* ── SCREEN 1: MAIN ── */
+  .main-screen {
+    display: grid;
+    grid-template-rows: auto 1fr auto;
+    gap: 1.5rem;
+    min-height: 460px;
+  }
+
+  .app-header-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  .app-logo {
+    font-family: 'Fraunces', serif;
+    font-size: 1.1rem;
+    font-weight: 600;
+    color: var(--ui-text);
+    letter-spacing: -0.01em;
+  }
+
+  .app-logo span {
+    color: var(--ui-accent);
+  }
+
+  .settings-btn {
+    background: var(--ui-surface);
+    border: 1px solid var(--ui-border);
+    color: var(--ui-muted);
+    padding: 0.4rem 0.75rem;
+    border-radius: 5px;
+    font-size: 0.75rem;
+    cursor: pointer;
+    font-family: 'DM Sans', sans-serif;
+  }
+
+  .drop-zone {
+    border: 2px dashed #444;
+    border-radius: 8px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 3rem 2rem;
+    text-align: center;
+    cursor: pointer;
+    transition: all 0.2s;
+    background: rgba(255,255,255,0.02);
+    gap: 0.75rem;
+    position: relative;
+  }
+
+  .drop-zone:hover {
+    border-color: var(--ui-accent);
+    background: rgba(224,123,90,0.05);
+  }
+
+  .drop-icon {
+    font-size: 2.5rem;
+    opacity: 0.5;
+  }
+
+  .drop-title {
+    font-size: 0.95rem;
+    color: var(--ui-text);
+    font-weight: 500;
+  }
+
+  .drop-sub {
+    font-size: 0.75rem;
+    color: var(--ui-muted);
+  }
+
+  .folder-loaded {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    background: rgba(90,170,122,0.1);
+    border: 1px solid rgba(90,170,122,0.3);
+    border-radius: 5px;
+    padding: 0.4rem 0.8rem;
+    font-family: 'DM Mono', monospace;
+    font-size: 0.72rem;
+    color: var(--ui-green);
+    margin-top: 0.5rem;
+  }
+
+  .bottom-bar {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: 1rem;
+    align-items: center;
+  }
+
+  .output-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    background: var(--ui-surface);
+    border: 1px solid var(--ui-border);
+    border-radius: 5px;
+    padding: 0.45rem 0.75rem;
+  }
+
+  .output-label {
+    font-size: 0.7rem;
+    color: var(--ui-muted);
+    white-space: nowrap;
+  }
+
+  .output-path {
+    font-family: 'DM Mono', monospace;
+    font-size: 0.7rem;
+    color: var(--ui-text);
+    opacity: 0.7;
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .browse-btn {
+    background: transparent;
+    border: 1px solid #444;
+    color: var(--ui-muted);
+    padding: 0.25rem 0.5rem;
+    border-radius: 3px;
+    font-size: 0.65rem;
+    cursor: pointer;
+    font-family: 'DM Sans', sans-serif;
+    white-space: nowrap;
+  }
+
+  .start-btn {
+    background: var(--ui-accent);
+    color: white;
+    border: none;
+    padding: 0.6rem 1.5rem;
+    border-radius: 6px;
+    font-size: 0.85rem;
+    font-weight: 500;
+    cursor: pointer;
+    font-family: 'DM Sans', sans-serif;
+    white-space: nowrap;
+    letter-spacing: 0.01em;
+  }
+
+  .start-btn:disabled {
+    opacity: 0.35;
+    cursor: not-allowed;
+  }
+
+  .file-count-badge {
+    background: rgba(224,123,90,0.15);
+    color: var(--ui-accent);
+    font-family: 'DM Mono', monospace;
+    font-size: 0.68rem;
+    padding: 0.15rem 0.5rem;
+    border-radius: 3px;
+    border: 1px solid rgba(224,123,90,0.2);
+  }
+
+  /* ── SCREEN 2: SETTINGS MODAL ── */
+  .modal-overlay {
+    background: rgba(0,0,0,0.6);
+    border-radius: 10px;
+    padding: 3rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 460px;
+  }
+
+  .modal {
+    background: #222;
+    border-radius: 8px;
+    width: 100%;
+    max-width: 440px;
+    border: 1px solid #3a3a3a;
+    overflow: hidden;
+  }
+
+  .modal-header {
+    padding: 1.1rem 1.5rem;
+    border-bottom: 1px solid #333;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+
+  .modal-title {
+    font-size: 0.9rem;
+    font-weight: 500;
+    color: var(--ui-text);
+    letter-spacing: 0.01em;
+  }
+
+  .modal-close {
+    color: #666;
+    font-size: 1rem;
+    cursor: pointer;
+    line-height: 1;
+  }
+
+  .modal-body {
+    padding: 1.5rem;
+    display: flex;
+    flex-direction: column;
+    gap: 1.5rem;
+  }
+
+  .setting-group {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+
+  .setting-label {
+    font-size: 0.75rem;
+    font-weight: 500;
+    color: var(--ui-text);
+    letter-spacing: 0.02em;
+  }
+
+  .setting-desc {
+    font-size: 0.7rem;
+    color: var(--ui-muted);
+    line-height: 1.4;
+  }
+
+  .radio-group {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+    margin-top: 0.25rem;
+  }
+
+  .radio-option {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    padding: 0.55rem 0.75rem;
+    border-radius: 5px;
+    cursor: pointer;
+    border: 1px solid transparent;
+    transition: all 0.15s;
+  }
+
+  .radio-option.selected {
+    background: rgba(224,123,90,0.1);
+    border-color: rgba(224,123,90,0.3);
+  }
+
+  .radio-dot {
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    border: 2px solid #555;
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .radio-dot.filled {
+    border-color: var(--ui-accent);
+    background: var(--ui-accent);
+  }
+
+  .radio-dot.filled::after {
+    content: '';
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+    background: white;
+  }
+
+  .radio-text {
+    flex: 1;
+  }
+
+  .radio-main {
+    font-size: 0.8rem;
+    color: var(--ui-text);
+  }
+
+  .radio-sub {
+    font-size: 0.68rem;
+    color: var(--ui-muted);
+  }
+
+  .divider {
+    height: 1px;
+    background: #333;
+  }
+
+  .toggle-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 1rem;
+  }
+
+  .toggle-info { flex: 1; }
+
+  .toggle {
+    width: 36px;
+    height: 20px;
+    border-radius: 10px;
+    background: #555;
+    position: relative;
+    flex-shrink: 0;
+    cursor: pointer;
+  }
+
+  .toggle.on { background: var(--ui-green); }
+
+  .toggle::after {
+    content: '';
+    position: absolute;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: white;
+    top: 3px;
+    left: 3px;
+    transition: left 0.15s;
+  }
+
+  .toggle.on::after { left: 19px; }
+
+  .select-field {
+    background: var(--ui-surface);
+    border: 1px solid #3a3a3a;
+    color: var(--ui-text);
+    padding: 0.45rem 0.75rem;
+    border-radius: 5px;
+    font-size: 0.78rem;
+    font-family: 'DM Sans', sans-serif;
+    width: 100%;
+    margin-top: 0.25rem;
+    appearance: none;
+    cursor: pointer;
+  }
+
+  .modal-footer {
+    padding: 1rem 1.5rem;
+    border-top: 1px solid #333;
+    display: flex;
+    justify-content: flex-end;
+    gap: 0.75rem;
+  }
+
+  .btn-secondary {
+    background: transparent;
+    border: 1px solid #444;
+    color: var(--ui-muted);
+    padding: 0.45rem 1rem;
+    border-radius: 5px;
+    font-size: 0.78rem;
+    cursor: pointer;
+    font-family: 'DM Sans', sans-serif;
+  }
+
+  .btn-primary {
+    background: var(--ui-accent);
+    border: none;
+    color: white;
+    padding: 0.45rem 1rem;
+    border-radius: 5px;
+    font-size: 0.78rem;
+    cursor: pointer;
+    font-family: 'DM Sans', sans-serif;
+    font-weight: 500;
+  }
+
+  /* warning banner inside modal */
+  .warning-banner {
+    background: rgba(224,123,90,0.12);
+    border: 1px solid rgba(224,123,90,0.35);
+    border-radius: 5px;
+    padding: 0.65rem 0.85rem;
+    font-size: 0.73rem;
+    color: #e8b898;
+    line-height: 1.5;
+    display: flex;
+    gap: 0.5rem;
+    align-items: flex-start;
+  }
+
+  .warning-icon { flex-shrink: 0; margin-top: 0.05rem; }
+
+  /* ── SCREEN 3: PROCESSING ── */
+  .processing-screen {
+    display: flex;
+    flex-direction: column;
+    gap: 1.25rem;
+    min-height: 460px;
+  }
+
+  .processing-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+
+  .processing-title {
+    font-size: 0.88rem;
+    font-weight: 500;
+    color: var(--ui-text);
+  }
+
+  .processing-eta {
+    font-family: 'DM Mono', monospace;
+    font-size: 0.7rem;
+    color: var(--ui-muted);
+  }
+
+  .overall-progress {
+    background: #333;
+    border-radius: 3px;
+    height: 4px;
+    overflow: hidden;
+  }
+
+  .overall-bar {
+    height: 100%;
+    background: linear-gradient(90deg, var(--ui-accent), #e8a88a);
+    border-radius: 3px;
+    transition: width 0.3s;
+  }
+
+  .file-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    flex: 1;
+    overflow-y: auto;
+  }
+
+  .file-item {
+    background: var(--ui-surface);
+    border: 1px solid var(--ui-border);
+    border-radius: 6px;
+    padding: 0.85rem 1rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+
+  .file-item.active { border-color: rgba(224,123,90,0.4); }
+  .file-item.done { border-color: rgba(90,170,122,0.3); }
+  .file-item.queued { opacity: 0.5; }
+
+  .file-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 1rem;
+  }
+
+  .file-name {
+    font-family: 'DM Mono', monospace;
+    font-size: 0.75rem;
+    color: var(--ui-text);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .file-status {
+    font-size: 0.7rem;
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+
+  .status-normalizing { color: var(--ui-accent); }
+  .status-transcribing { color: #7ab8d4; }
+  .status-done { color: var(--ui-green); }
+  .status-queued { color: var(--ui-muted); }
+
+  .step-pills {
+    display: flex;
+    gap: 0.35rem;
+  }
+
+  .step-pill {
+    font-family: 'DM Mono', monospace;
+    font-size: 0.58rem;
+    padding: 0.15rem 0.45rem;
+    border-radius: 3px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+
+  .pill-done { background: rgba(90,170,122,0.15); color: var(--ui-green); }
+  .pill-active { background: rgba(224,123,90,0.15); color: var(--ui-accent); }
+  .pill-pending { background: #2a2a2a; color: #555; }
+
+  .file-progress {
+    background: #2a2a2a;
+    border-radius: 2px;
+    height: 2px;
+  }
+
+  .file-bar {
+    height: 100%;
+    border-radius: 2px;
+  }
+
+  .bar-orange { background: var(--ui-accent); }
+  .bar-blue { background: #7ab8d4; }
+  .bar-green { background: var(--ui-green); }
+
+  .cancel-btn {
+    background: transparent;
+    border: 1px solid #444;
+    color: var(--ui-muted);
+    padding: 0.35rem 0.75rem;
+    border-radius: 5px;
+    font-size: 0.72rem;
+    cursor: pointer;
+    font-family: 'DM Sans', sans-serif;
+    align-self: flex-start;
+  }
+
+  /* ── SCREEN 4: COMPLETE ── */
+  .complete-screen {
+    display: flex;
+    flex-direction: column;
+    gap: 1.5rem;
+    min-height: 460px;
+  }
+
+  .complete-header {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+  }
+
+  .check-icon {
+    width: 44px;
+    height: 44px;
+    border-radius: 50%;
+    background: rgba(90,170,122,0.15);
+    border: 1.5px solid var(--ui-green);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.2rem;
+    flex-shrink: 0;
+  }
+
+  .complete-title {
+    font-family: 'Fraunces', serif;
+    font-size: 1.5rem;
+    font-weight: 300;
+    color: var(--ui-text);
+  }
+
+  .complete-sub {
+    font-size: 0.8rem;
+    color: var(--ui-muted);
+    margin-top: 0.2rem;
+  }
+
+  .stats-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 0.75rem;
+  }
+
+  .stat-card {
+    background: var(--ui-surface);
+    border: 1px solid var(--ui-border);
+    border-radius: 6px;
+    padding: 0.85rem 1rem;
+  }
+
+  .stat-num {
+    font-family: 'Fraunces', serif;
+    font-size: 1.8rem;
+    font-weight: 300;
+    color: var(--ui-text);
+    line-height: 1;
+    margin-bottom: 0.3rem;
+  }
+
+  .stat-label {
+    font-size: 0.68rem;
+    color: var(--ui-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    font-family: 'DM Mono', monospace;
+  }
+
+  .normalization-note {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    background: rgba(90,170,122,0.08);
+    border: 1px solid rgba(90,170,122,0.2);
+    border-radius: 5px;
+    padding: 0.65rem 0.85rem;
+    font-size: 0.75rem;
+    color: #8dcca8;
+  }
+
+  .output-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+
+  .output-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0.55rem 0.85rem;
+    background: var(--ui-surface);
+    border: 1px solid var(--ui-border);
+    border-radius: 5px;
+  }
+
+  .output-item-name {
+    font-family: 'DM Mono', monospace;
+    font-size: 0.72rem;
+    color: var(--ui-text);
+  }
+
+  .open-btn {
+    background: transparent;
+    border: 1px solid #3a3a3a;
+    color: var(--ui-muted);
+    padding: 0.25rem 0.6rem;
+    border-radius: 3px;
+    font-size: 0.65rem;
+    cursor: pointer;
+    font-family: 'DM Mono', monospace;
+  }
+
+  .done-actions {
+    display: flex;
+    gap: 0.75rem;
+  }
+
+  /* ── SPEC CALLOUTS ── */
+  .callout {
+    background: var(--cream);
+    border-left: 3px solid var(--accent2);
+    padding: 0.85rem 1.1rem;
+    margin: 1rem 0;
+    font-size: 0.85rem;
+  }
+
+  .callout-title {
+    font-family: 'DM Mono', monospace;
+    font-size: 0.65rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--accent2);
+    margin-bottom: 0.4rem;
+  }
+
+  ul.spec-list {
+    list-style: none;
+    padding: 0;
+    margin: 0.5rem 0;
+  }
+
+  ul.spec-list li {
+    font-size: 0.85rem;
+    padding: 0.3rem 0;
+    padding-left: 1.2rem;
+    position: relative;
+    color: #2a2a2a;
+    max-width: 68ch;
+  }
+
+  ul.spec-list li::before {
+    content: '—';
+    position: absolute;
+    left: 0;
+    color: var(--muted);
+  }
+
+  /* annotation layer */
+  .annotated {
+    position: relative;
+    display: inline-block;
+  }
+
+  .annotation {
+    display: block;
+    font-family: 'DM Mono', monospace;
+    font-size: 0.62rem;
+    color: var(--accent);
+    letter-spacing: 0.05em;
+    margin-top: 0.25rem;
+  }
+
+  /* future enhancements */
+  .future-item {
+    display: flex;
+    align-items: baseline;
+    gap: 0.75rem;
+    padding: 0.5rem 0;
+    border-bottom: 1px solid var(--rule);
+  }
+
+  .future-item:last-child { border-bottom: none; }
+
+  .future-tag {
+    font-family: 'DM Mono', monospace;
+    font-size: 0.62rem;
+    background: var(--cream);
+    border: 1px solid var(--rule);
+    padding: 0.15rem 0.4rem;
+    color: var(--muted);
+    white-space: nowrap;
+  }
+
+  .future-text {
+    font-size: 0.85rem;
+    color: #2a2a2a;
+  }
+
+  /* changelog */
+  .changelog-item {
+    display: grid;
+    grid-template-columns: 80px 1fr;
+    gap: 1rem;
+    padding: 0.6rem 0;
+    border-bottom: 1px dashed var(--rule);
+    font-size: 0.82rem;
+  }
+
+  .changelog-item:last-child { border-bottom: none; }
+
+  .changelog-tag {
+    font-family: 'DM Mono', monospace;
+    font-size: 0.68rem;
+    padding: 0.15rem 0.4rem;
+    border-radius: 2px;
+    text-align: center;
+    align-self: start;
+    margin-top: 0.1rem;
+  }
+
+  .tag-added { background: #e8f4ee; color: var(--accent2); }
+  .tag-changed { background: #fdf3e0; color: #a06020; }
+  .tag-removed { background: #fde8e4; color: var(--accent); }
+  .tag-fixed { background: #e8eef8; color: #2a4a8a; }
+
+  /* mockup tabs */
+  .mockup-tabs {
+    display: flex;
+    gap: 0.25rem;
+    margin-bottom: -1px;
+  }
+
+  .mockup-tab {
+    font-family: 'DM Mono', monospace;
+    font-size: 0.68rem;
+    padding: 0.45rem 1rem;
+    border-radius: 5px 5px 0 0;
+    cursor: pointer;
+    border: 1px solid transparent;
+    color: var(--muted);
+    background: var(--cream);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    transition: all 0.15s;
+  }
+
+  .mockup-tab.active {
+    background: var(--ui-bg);
+    color: var(--ui-text);
+    border-color: #333;
+    border-bottom-color: var(--ui-bg);
+  }
+
+  .mockup-screens { position: relative; }
+
+  .screen-panel {
+    display: none;
+  }
+
+  .screen-panel.active { display: block; }
+
+  /* confirm dialog */
+  .confirm-dialog {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    background: #2a2a2a;
+    border: 1px solid #444;
+    border-radius: 8px;
+    padding: 1.5rem;
+    width: 320px;
+    box-shadow: 0 20px 50px rgba(0,0,0,0.6);
+    z-index: 10;
+  }
+
+  .confirm-title {
+    font-size: 0.88rem;
+    font-weight: 500;
+    color: var(--ui-text);
+    margin-bottom: 0.6rem;
+  }
+
+  .confirm-body {
+    font-size: 0.75rem;
+    color: var(--ui-muted);
+    line-height: 1.6;
+    margin-bottom: 1.1rem;
+  }
+
+  .confirm-body strong {
+    color: var(--ui-accent);
+    font-weight: 500;
+  }
+
+  .confirm-actions {
+    display: flex;
+    gap: 0.6rem;
+    justify-content: flex-end;
+  }
+
+  @media (max-width: 800px) {
+    header { padding: 1.5rem 1.5rem 1.2rem; grid-template-columns: 1fr; }
+    .prd-body { grid-template-columns: 1fr; }
+    nav { display: none; }
+    main { padding: 2rem 1.5rem; }
+    h1 { font-size: 2.2rem; }
+    .stats-grid { grid-template-columns: 1fr 1fr; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div>
+    <div class="doc-label">Product Requirements Document</div>
+    <h1>Lecture <em>Processor</em><br>App</h1>
+  </div>
+  <div class="meta-block">
+    <div class="version-badge">v1.3</div>
+    <div>April 2026</div>
+    <div>Status: Draft → Review</div>
+    <div>Owner: Product</div>
+  </div>
+</header>
+
+<div class="prd-body">
+  <nav>
+    <div class="nav-label">Contents</div>
+    <a href="#overview" class="active">Overview</a>
+    <a href="#objectives">Objectives</a>
+    <a href="#pipeline">Pipeline</a>
+    <a href="#ux">UX Mockups</a>
+    <div class="nav-section">
+      <div class="nav-label" style="margin-top:0">Screens</div>
+      <a href="#screen-main" style="padding-left:1.25rem">1 — Main</a>
+      <a href="#screen-settings" style="padding-left:1.25rem">2 — Settings</a>
+      <a href="#screen-processing" style="padding-left:1.25rem">3 — Processing</a>
+      <a href="#screen-complete" style="padding-left:1.25rem">4 — Complete</a>
+    </div>
+    <div class="nav-section">
+      <div class="nav-label" style="margin-top:0">Spec</div>
+      <a href="#tech">Tech Stack</a>
+      <a href="#risks">Risks</a>
+      <a href="#future">Future</a>
+      <a href="#changelog">Changelog</a>
+    </div>
+  </nav>
+
+  <main>
+
+    <!-- ── OVERVIEW ── -->
+    <section id="overview">
+      <div class="section-num">01 — Overview</div>
+      <h2>Product Vision</h2>
+      <p class="lead">Drag in a folder of lecture recordings — get back normal-speed videos, searchable transcripts, and clean slide images, all in one go.</p>
+      <p>The Lecture Processor App is a local desktop application that batch-processes lecture recordings (.mov files). The user drops a folder and selects how their recordings were captured. The app normalizes speed if needed, transcribes audio, and extracts slides — all offline, all automated.</p>
+
+      <h3>Core Problem</h3>
+      <p>Students often record lectures at 2× speed to save storage and capture more. Reviewing these recordings later is uncomfortable and transcription tools (including Whisper) perform noticeably worse on sped-up speech. This app closes that gap.</p>
+    </section>
+
+    <!-- ── OBJECTIVES ── -->
+    <section id="objectives">
+      <div class="section-num">02 — Objectives</div>
+      <h2>Goals &amp; Metrics</h2>
+
+      <table>
+        <thead>
+          <tr><th>Goal</th><th>Metric</th><th>Target</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Speed conversion fidelity</td>
+            <td>Output duration ÷ input duration</td>
+            <td>≈ 2.00× (±1%)</td>
+          </tr>
+          <tr>
+            <td>Audio quality</td>
+            <td>Pitch deviation from reference</td>
+            <td>Imperceptible to listener</td>
+          </tr>
+          <tr>
+            <td>A/V sync</td>
+            <td>Audio drift at end of file</td>
+            <td>&lt; 50ms</td>
+          </tr>
+          <tr>
+            <td>Transcription accuracy</td>
+            <td>WER vs. raw 2× baseline</td>
+            <td>≥ 20% WER improvement</td>
+          </tr>
+          <tr>
+            <td>Processing overhead</td>
+            <td>Wall time per minute of source video</td>
+            <td>≤ 2.5× real-time at concurrency 4</td>
+          </tr>
+          <tr>
+            <td>User safety — accidental normalization</td>
+            <td>1× files processed with normalization on</td>
+            <td>Reduced by explicit warning + confirmation; not a hard block</td>
+          </tr>
+          <tr>
+            <td>Short file handling</td>
+            <td>Files under 60s</td>
+            <td>Skipped with warning — never processed</td>
+          </tr>
+          <tr>
+            <td>Failed file handling</td>
+            <td>Mid-pipeline failures</td>
+            <td>Batch continues; partial output cleaned; failures listed on completion screen</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <!-- ── PIPELINE ── -->
+    <section id="pipeline">
+      <div class="section-num">03 — Processing Pipeline</div>
+      <h2>Per-File Workflow</h2>
+      <p>When normalization is enabled, every file in the batch passes through all four steps in sequence. When disabled, Step 0 is skipped and the original file feeds Steps 1–3 directly.</p>
+
+      <div class="pipeline">
+        <div class="pipe-step new-step">
+          <div class="pipe-new-tag">New</div>
+          <div class="pipe-icon">⏱</div>
+          <div class="pipe-label">Step 0</div>
+          <div style="font-family:'DM Mono',monospace;font-size:0.72rem;color:#e07b5a;margin-bottom:0.2rem;">Normalize Speed</div>
+          <div class="pipe-desc">2× → 1×<br>FFmpeg setpts + atempo</div>
+        </div>
+        <div class="pipe-step">
+          <div class="pipe-icon" style="opacity:0.5">🎙</div>
+          <div class="pipe-label">Step 1</div>
+          <div style="font-family:'DM Mono',monospace;font-size:0.72rem;color:#7ab8d4;margin-bottom:0.2rem;">Transcribe</div>
+          <div class="pipe-desc">Whisper on<br>1× audio</div>
+        </div>
+        <div class="pipe-step">
+          <div class="pipe-icon" style="opacity:0.5">🖼</div>
+          <div class="pipe-label">Step 2</div>
+          <div style="font-family:'DM Mono',monospace;font-size:0.72rem;color:#7ab8d4;margin-bottom:0.2rem;">Extract Slides</div>
+          <div class="pipe-desc">Scene change<br>detection</div>
+        </div>
+        <div class="pipe-step">
+          <div class="pipe-icon" style="opacity:0.5">📁</div>
+          <div class="pipe-label">Step 3</div>
+          <div style="font-family:'DM Mono',monospace;font-size:0.72rem;color:#7ab8d4;margin-bottom:0.2rem;">Write Output</div>
+          <div class="pipe-desc">Folder structure<br>+ log</div>
+        </div>
+      </div>
+
+      <h3>Output Structure</h3>
+      <div class="file-tree">
+<span class="ft-folder">OutputFolder/</span>
+└── <span class="ft-folder">Lecture1/</span>
+    ├── <span class="ft-new">normalized_video.mp4</span>     <span class="ft-comment">← 1× version (optional to save)</span>
+    ├── <span class="ft-file">transcript.txt</span>
+    ├── <span class="ft-file">transcript.srt</span>           <span class="ft-comment">← timestamps match playback-speed video</span>
+    ├── <span class="ft-folder">slides/</span>
+    │   ├── <span class="ft-file">slide_0001_00-05-30.png</span>
+    │   └── <span class="ft-file">...</span>
+    └── <span class="ft-file">processing_log.txt</span>
+      </div>
+
+      <div class="callout">
+        <div class="callout-title">Timestamp Rule</div>
+        Timestamped outputs must match the video the user will actually play. If the normalized 1× video is saved, SRT and slide timestamps use 1× playback time. If the normalized video is not saved, timestamped outputs are converted back to the original recording's playback speed so they still line up with the available video.
+      </div>
+
+      <h3>FFmpeg Command (Normalization Step)</h3>
+      <pre><span class="code-comment"># Fast mode — atempo only (recommended for MVP)</span>
+ffmpeg <span class="code-flag">-i</span> <span class="code-value">input.mov</span> \
+  <span class="code-flag">-filter_complex</span> <span class="code-filter">"[0:v]setpts=2.0*PTS[v];[0:a]atempo=0.5[a]"</span> \
+  <span class="code-flag">-map</span> "[v]" <span class="code-flag">-map</span> "[a]" \
+  <span class="code-flag">-c:v</span> libx264 <span class="code-flag">-preset</span> medium <span class="code-flag">-crf</span> 23 \
+  <span class="code-value">output_1x.mp4</span>
+
+<span class="code-comment"># High-quality mode — Rubber Band for pitch-correct audio</span>
+<span class="code-comment"># Use pyrubberband or FFmpeg's rubberband filter if compiled in</span></pre>
+
+      <div class="callout">
+        <div class="callout-title">Edge Case — VFR Input</div>
+        .mov files from screen recorders often use variable frame rate (VFR). Detect VFR before processing and convert to a constant frame rate (CFR), using <code>fps=30</code> or the source's intended frame rate, before the setpts filter. Validate that end-of-file A/V drift stays under 50ms.
+      </div>
+
+      <div class="callout" style="border-left-color: var(--accent);">
+        <div class="callout-title" style="color:var(--accent)">Edge Case — Accidental Re-normalization</div>
+        If normalization is run on an already 1× file, output will be half-speed. MVP safety control: show an explicit warning and require confirmation before processing (see Screen 3 below). This reduces mistakes but does not fully prevent them; true blocking requires future speed detection.
+      </div>
+
+      <div class="callout" style="border-left-color: var(--accent);">
+        <div class="callout-title" style="color:var(--accent)">Edge Case — Short Files (&lt; 60 seconds)</div>
+        Files under 60 seconds are skipped entirely — not processed. A warning entry is written to the batch log and the file is listed on the completion screen under a "Skipped" section with reason "File too short (&lt;60s)".
+      </div>
+
+      <div class="callout" style="border-left-color: var(--accent2);">
+        <div class="callout-title" style="color:var(--accent2)">Failure Behavior</div>
+        If a file fails at any pipeline step: (1) partial output for that file is deleted, (2) the batch continues with remaining files, (3) the failure is recorded with step name and error message, (4) failed files are listed on the completion screen with their failure reason.
+      </div>
+
+      <h3>Processing Log Format</h3>
+      <pre><span class="code-comment"># processing_log.txt — one per output folder (per file)</span>
+<span class="code-value">File:</span>     Lecture2_W4_2x.mov
+<span class="code-value">Started:</span>  2026-04-26 14:02:11
+
+[00:00:00] Normalize   ✓  38.4s
+[00:00:38] Transcribe  ✓  22.1s  <span class="code-filter">(1,847 words)</span>
+[00:01:01] Slides      ✓  3.8s   <span class="code-filter">(14 slides extracted)</span>
+[00:01:04] Complete
+
+<span class="code-comment"># On failure:</span>
+[00:00:38] Transcribe  ✗  ERROR: Whisper returned empty transcript
+           Partial output cleaned. File skipped.</pre>
+    </section>
+
+    <!-- ── UX MOCKUPS ── -->
+    <section id="ux">
+      <div class="section-num">04 — UX Design</div>
+      <h2>Interface Mockups</h2>
+      <p>Four screen states. All mockups reflect the simplified batch model: speed setting applies to the entire folder, not individual files.</p>
+
+      <!-- SCREEN 1 -->
+      <div id="screen-main" class="mockup-container">
+        <div class="mockup-label">Screen 1 — Main / Drop</div>
+
+        <div class="mockup-tabs" style="margin-bottom:-1px;">
+          <div class="mockup-tab active" onclick="switchMainTab('loaded')">1a — Folder Loaded</div>
+          <div class="mockup-tab" onclick="switchMainTab('empty')">1b — Empty State</div>
+        </div>
+
+        <div id="main-tab-loaded" class="screen-panel active">
+        <div class="app-window" style="border-radius:0 8px 8px 8px;">
+          <div class="window-titlebar">
+            <div class="traffic-light tl-red"></div>
+            <div class="traffic-light tl-yellow"></div>
+            <div class="traffic-light tl-green"></div>
+            <div class="window-title">Lecture Processor</div>
+          </div>
+          <div class="window-body">
+            <div class="main-screen">
+              <div class="app-header-row">
+                <div class="app-logo">Lecture<span>Processor</span></div>
+                <button class="settings-btn">⚙ Settings &nbsp;<span style="opacity:0.45;font-size:0.65rem;">⌘,</span></button>
+              </div>
+
+              <div>
+                <div class="drop-zone">
+                  <div class="drop-icon">📂</div>
+                  <div class="drop-title">Drop lecture folder here</div>
+                  <div class="drop-sub">or click to browse — scans for .mov files</div>
+                  <div class="folder-loaded" style="justify-content:space-between;width:100%;max-width:380px;">
+                    <span>✓ &nbsp;/Desktop/Lectures/Week4 &nbsp;·&nbsp; <span class="file-count-badge">6 .mov files</span></span>
+                    <span style="color:#5aaa7a;opacity:0.6;cursor:pointer;padding-left:0.5rem;">✕</span>
+                  </div>
+                </div>
+
+                <div style="margin-top:0.75rem;padding:0.65rem 0.85rem;background:#252525;border-radius:5px;border:1px solid #333;display:flex;justify-content:space-between;align-items:center;">
+                  <div>
+                    <div style="font-size:0.75rem;color:#e8e4dc;font-weight:500;margin-bottom:0.15rem;">Recording Speed</div>
+                    <div style="font-size:0.68rem;color:#888;">Applied to entire batch</div>
+                  </div>
+                  <div style="display:flex;gap:0.5rem;">
+                    <div style="padding:0.35rem 0.75rem;border-radius:4px;font-size:0.75rem;background:#333;color:#aaa;cursor:pointer;">1× — No conversion</div>
+                    <div style="padding:0.35rem 0.75rem;border-radius:4px;font-size:0.75rem;background:rgba(224,123,90,0.15);color:#e07b5a;border:1px solid rgba(224,123,90,0.35);cursor:pointer;">2× → Normalize to 1×</div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="bottom-bar">
+                <div class="output-row">
+                  <span class="output-label">Output:</span>
+                  <span class="output-path">~/Desktop/Lectures/Week4_processed</span>
+                  <button class="browse-btn">Browse</button>
+                </div>
+                <button class="start-btn">Start &nbsp;<span style="opacity:0.6;font-size:0.75rem;">⌘R</span></button>
+              </div>
+            </div>
+          </div>
+        </div>
+        </div>
+
+        <div id="main-tab-empty" class="screen-panel">
+        <div class="app-window" style="border-radius:0 8px 8px 8px;">
+          <div class="window-titlebar">
+            <div class="traffic-light tl-red"></div>
+            <div class="traffic-light tl-yellow"></div>
+            <div class="traffic-light tl-green"></div>
+            <div class="window-title">Lecture Processor</div>
+          </div>
+          <div class="window-body">
+            <div class="main-screen">
+              <div class="app-header-row">
+                <div class="app-logo">Lecture<span>Processor</span></div>
+                <button class="settings-btn">⚙ Settings &nbsp;<span style="opacity:0.45;font-size:0.65rem;">⌘,</span></button>
+              </div>
+
+              <div>
+                <div class="drop-zone" style="border-color:#6a3a2f;">
+                  <div class="drop-icon">📂</div>
+                  <div class="drop-title">Drop lecture folder here</div>
+                  <div class="drop-sub">or click to browse — scans for .mov files</div>
+                  <div style="display:flex;align-items:center;gap:0.5rem;background:rgba(200,75,47,0.1);border:1px solid rgba(200,75,47,0.3);border-radius:5px;padding:0.4rem 0.8rem;font-family:'DM Mono',monospace;font-size:0.72rem;color:#e07b5a;margin-top:0.25rem;">
+                    ⚠ &nbsp;No .mov files found — try a different folder
+                  </div>
+                </div>
+
+                <div style="margin-top:0.75rem;padding:0.65rem 0.85rem;background:#252525;border-radius:5px;border:1px solid #333;display:flex;justify-content:space-between;align-items:center;opacity:0.4;pointer-events:none;">
+                  <div>
+                    <div style="font-size:0.75rem;color:#e8e4dc;font-weight:500;margin-bottom:0.15rem;">Recording Speed</div>
+                    <div style="font-size:0.68rem;color:#888;">Applied to entire batch</div>
+                  </div>
+                  <div style="display:flex;gap:0.5rem;">
+                    <div style="padding:0.35rem 0.75rem;border-radius:4px;font-size:0.75rem;background:#333;color:#aaa;">1× — No conversion</div>
+                    <div style="padding:0.35rem 0.75rem;border-radius:4px;font-size:0.75rem;background:#333;color:#aaa;">2× → Normalize to 1×</div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="bottom-bar">
+                <div class="output-row" style="opacity:0.4;">
+                  <span class="output-label">Output:</span>
+                  <span class="output-path">—</span>
+                </div>
+                <button class="start-btn" disabled>Start</button>
+              </div>
+            </div>
+          </div>
+        </div>
+        </div>
+      </div>
+
+      <!-- SCREEN 2 -->
+      <div id="screen-settings" class="mockup-container" style="margin-top:2rem;">
+        <div class="mockup-label">Screen 2 — Settings Modal</div>
+        <div class="app-window">
+          <div class="window-titlebar">
+            <div class="traffic-light tl-red"></div>
+            <div class="traffic-light tl-yellow"></div>
+            <div class="traffic-light tl-green"></div>
+            <div class="window-title">Lecture Processor</div>
+          </div>
+          <div class="window-body">
+            <div class="modal-overlay">
+              <div class="modal">
+                <div class="modal-header">
+                  <div class="modal-title">Settings</div>
+                  <div class="modal-close">✕</div>
+                </div>
+                <div class="modal-body">
+
+                  <div class="setting-group">
+                    <div class="setting-label">Recording Speed</div>
+                    <div class="setting-desc">Applies to all files in the batch. Select how your recordings were captured.</div>
+                    <div class="radio-group">
+                      <div class="radio-option">
+                        <div class="radio-dot"></div>
+                        <div class="radio-text">
+                          <div class="radio-main">1× — No conversion</div>
+                          <div class="radio-sub">Recordings are already at normal speed</div>
+                        </div>
+                      </div>
+                      <div class="radio-option selected">
+                        <div class="radio-dot filled"></div>
+                        <div class="radio-text">
+                          <div class="radio-main">2× → Normalize to 1×</div>
+                          <div class="radio-sub">Doubles duration, corrects pitch, improves transcription</div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div class="warning-banner">
+                    <div class="warning-icon">⚠</div>
+                    <div>Normalization selected. You will be asked to confirm before processing begins. Running this on 1× files will produce half-speed output.</div>
+                  </div>
+
+                  <div class="divider"></div>
+
+                  <div class="setting-group">
+                    <div class="setting-label">Audio Quality Mode</div>
+                    <select class="select-field">
+                      <option>Fast — basic atempo (recommended)</option>
+                      <option>High quality — pitch-corrected (Rubber Band)</option>
+                    </select>
+                    <div class="setting-desc" style="margin-top:0.35rem;">Rubber Band produces more natural-sounding output but adds ~40% processing time.</div>
+                  </div>
+
+                  <div class="divider"></div>
+
+                  <div class="toggle-row">
+                    <div class="toggle-info">
+                      <div class="setting-label">Save normalized video file</div>
+                      <div class="setting-desc">Keeps the 1× .mp4 alongside transcripts and slides. If disabled, transcript and slide timestamps are converted to match the original playback-speed video.</div>
+                    </div>
+                    <div class="toggle on"></div>
+                  </div>
+
+                  <div class="divider"></div>
+
+                  <div class="setting-group">
+                    <div class="setting-label">Whisper Model</div>
+                    <select class="select-field">
+                      <option selected>large-v3 (default — best accuracy, recommended for M1 Max+)</option>
+                      <option>medium (accuracy/speed balance — recommended for laptops)</option>
+                      <option>small (fastest, lower accuracy)</option>
+                    </select>
+                    <div class="setting-desc" style="margin-top:0.35rem;">MVP uses one controlled Whisper transcription queue to avoid loading multiple large models. File concurrency still controls how many recordings move through the overall pipeline at once.</div>
+                  </div>
+
+                  <div class="setting-group">
+                    <div class="setting-label">Slide Detection Sensitivity</div>
+                    <select class="select-field">
+                      <option>Medium (default)</option>
+                      <option>Low — fewer slides captured</option>
+                      <option>High — more slides captured</option>
+                    </select>
+                  </div>
+
+                  <div class="divider"></div>
+
+                  <div class="setting-group">
+                    <div class="setting-label">Concurrent Files</div>
+                    <div class="setting-desc">Number of files allowed in the processing pipeline at once. Default of 4 is tuned for Mac Studio M1 Max (32GB). Video normalization and slide extraction can run in parallel; transcription may queue behind the shared Whisper lane.</div>
+                    <div style="display:flex;align-items:center;gap:0.75rem;margin-top:0.35rem;">
+                      <div style="display:flex;align-items:center;background:#1a1a1a;border:1px solid #3a3a3a;border-radius:5px;overflow:hidden;">
+                        <button style="background:transparent;border:none;color:#aaa;padding:0.4rem 0.75rem;font-size:1rem;cursor:pointer;border-right:1px solid #3a3a3a;">−</button>
+                        <div style="padding:0.4rem 1.1rem;font-family:'DM Mono',monospace;font-size:0.88rem;color:#e07b5a;font-weight:500;min-width:2.5rem;text-align:center;">4</div>
+                        <button style="background:transparent;border:none;color:#aaa;padding:0.4rem 0.75rem;font-size:1rem;cursor:pointer;border-left:1px solid #3a3a3a;">+</button>
+                      </div>
+                      <div style="font-family:'DM Mono',monospace;font-size:0.68rem;color:#666;">Range: 1 – 8</div>
+                    </div>
+                    <div style="margin-top:0.5rem;display:flex;gap:0.5rem;flex-wrap:wrap;">
+                      <div style="font-size:0.68rem;background:rgba(90,170,122,0.1);border:1px solid rgba(90,170,122,0.2);color:#5aaa7a;padding:0.2rem 0.5rem;border-radius:3px;font-family:'DM Mono',monospace;">1–2 · Low-end / laptop</div>
+                      <div style="font-size:0.68rem;background:rgba(224,123,90,0.12);border:1px solid rgba(224,123,90,0.25);color:#e07b5a;padding:0.2rem 0.5rem;border-radius:3px;font-family:'DM Mono',monospace;">4 · Default (M1 Max 32GB) ✓</div>
+                      <div style="font-size:0.68rem;background:#2a2a2a;border:1px solid #3a3a3a;color:#888;padding:0.2rem 0.5rem;border-radius:3px;font-family:'DM Mono',monospace;">6–8 · High-end workstation</div>
+                    </div>
+                  </div>
+
+                </div>
+                <div class="modal-footer">
+                  <button class="btn-secondary">Cancel</button>
+                  <button class="btn-primary">Save Settings</button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- SCREEN 3 — CONFIRM + PROCESSING -->
+      <div id="screen-processing" class="mockup-container" style="margin-top:2rem;">
+        <div class="mockup-label">Screen 3 — Confirm Dialog → Processing</div>
+
+        <div class="mockup-tabs">
+          <div class="mockup-tab active" onclick="switchTab('confirm')">3a — Confirm</div>
+          <div class="mockup-tab" onclick="switchTab('processing')">3b — Processing</div>
+        </div>
+
+        <div class="mockup-screens">
+          <!-- 3a confirm -->
+          <div class="screen-panel active" id="tab-confirm">
+            <div class="app-window" style="border-radius:0 8px 8px 8px;">
+              <div class="window-titlebar">
+                <div class="traffic-light tl-red"></div>
+                <div class="traffic-light tl-yellow"></div>
+                <div class="traffic-light tl-green"></div>
+                <div class="window-title">Lecture Processor</div>
+              </div>
+              <div class="window-body" style="position:relative;min-height:300px;">
+                <!-- blurred bg -->
+                <div style="opacity:0.25;filter:blur(2px);">
+                  <div style="height:200px;background:#252525;border-radius:6px;border:2px dashed #333;display:flex;align-items:center;justify-content:center;">
+                    <span style="color:#555;font-size:0.8rem;">Main screen behind dialog</span>
+                  </div>
+                </div>
+                <div class="confirm-dialog">
+                  <div class="confirm-title">Confirm: 2× Normalization</div>
+                  <div class="confirm-body">
+                    Speed normalization is enabled. This will <strong>double the duration</strong> of all eligible files and apply pitch correction.<br><br>
+                    Confirm that the eligible files in <strong>/Desktop/Lectures/Week4</strong> were recorded at <strong>2× speed</strong>. Running this on 1× recordings will produce half-speed output.
+                  </div>
+                  <div class="confirm-actions">
+                    <button class="btn-secondary">Cancel</button>
+                    <button class="btn-primary">Confirm — Start Processing</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- 3b processing -->
+          <div class="screen-panel" id="tab-processing">
+            <div class="app-window" style="border-radius:0 8px 8px 8px;">
+              <div class="window-titlebar">
+                <div class="traffic-light tl-red"></div>
+                <div class="traffic-light tl-yellow"></div>
+                <div class="traffic-light tl-green"></div>
+                <div class="window-title">Lecture Processor — Processing</div>
+              </div>
+              <div class="window-body">
+                <div class="processing-screen">
+                  <div class="processing-header">
+                    <div class="processing-title">Processing batch — 2× → 1× · 4 concurrent</div>
+                    <div class="processing-eta" title="ETA less reliable at high concurrency">ETA ~8 min ±</div>
+                  </div>
+
+                  <div>
+                    <div style="display:flex;justify-content:space-between;margin-bottom:0.4rem;">
+                      <span style="font-size:0.7rem;color:#888;">Overall progress</span>
+                      <span style="font-family:'DM Mono',monospace;font-size:0.7rem;color:#aaa;">2 / 6 files</span>
+                    </div>
+                    <div class="overall-progress">
+                      <div class="overall-bar" style="width:33%"></div>
+                    </div>
+                  </div>
+
+                  <div class="file-list">
+                    <!-- done -->
+                    <div class="file-item done">
+                      <div class="file-row">
+                        <div class="file-name">Lecture1_W4_2x.mov</div>
+                        <div class="file-status status-done">✓ Complete</div>
+                      </div>
+                      <div class="step-pills">
+                        <div class="step-pill pill-done">Normalize</div>
+                        <div class="step-pill pill-done">Transcribe</div>
+                        <div class="step-pill pill-done">Slides</div>
+                      </div>
+                      <div class="file-progress"><div class="file-bar bar-green" style="width:100%"></div></div>
+                    </div>
+
+                    <!-- active slot 1 — transcribing -->
+                    <div class="file-item active">
+                      <div class="file-row">
+                        <div class="file-name">Lecture2_W4_2x.mov</div>
+                        <div class="file-status status-transcribing">Transcribing…</div>
+                      </div>
+                      <div class="step-pills">
+                        <div class="step-pill pill-done">Normalize</div>
+                        <div class="step-pill pill-active">Transcribe</div>
+                        <div class="step-pill pill-pending">Slides</div>
+                      </div>
+                      <div class="file-progress"><div class="file-bar bar-blue" style="width:65%"></div></div>
+                    </div>
+
+                    <!-- active slot 2 — normalizing -->
+                    <div class="file-item active">
+                      <div class="file-row">
+                        <div class="file-name">Lecture3_W4_2x.mov</div>
+                        <div class="file-status status-normalizing">Normalizing…</div>
+                      </div>
+                      <div class="step-pills">
+                        <div class="step-pill pill-active">Normalize</div>
+                        <div class="step-pill pill-pending">Transcribe</div>
+                        <div class="step-pill pill-pending">Slides</div>
+                      </div>
+                      <div class="file-progress"><div class="file-bar bar-orange" style="width:40%"></div></div>
+                    </div>
+
+                    <!-- active slot 3 — normalizing -->
+                    <div class="file-item active">
+                      <div class="file-row">
+                        <div class="file-name">Lecture4_W4_2x.mov</div>
+                        <div class="file-status status-normalizing">Normalizing…</div>
+                      </div>
+                      <div class="step-pills">
+                        <div class="step-pill pill-active">Normalize</div>
+                        <div class="step-pill pill-pending">Transcribe</div>
+                        <div class="step-pill pill-pending">Slides</div>
+                      </div>
+                      <div class="file-progress"><div class="file-bar bar-orange" style="width:18%"></div></div>
+                    </div>
+
+                    <!-- active slot 4 — just started -->
+                    <div class="file-item active">
+                      <div class="file-row">
+                        <div class="file-name">Lecture5_W4_2x.mov</div>
+                        <div class="file-status status-normalizing">Normalizing…</div>
+                      </div>
+                      <div class="step-pills">
+                        <div class="step-pill pill-active">Normalize</div>
+                        <div class="step-pill pill-pending">Transcribe</div>
+                        <div class="step-pill pill-pending">Slides</div>
+                      </div>
+                      <div class="file-progress"><div class="file-bar bar-orange" style="width:5%"></div></div>
+                    </div>
+
+                    <!-- queued -->
+                    <div class="file-item queued">
+                      <div class="file-row">
+                        <div class="file-name">Lecture6_W4_2x.mov</div>
+                        <div class="file-status status-queued">Queued</div>
+                      </div>
+                      <div class="step-pills">
+                        <div class="step-pill pill-pending">Normalize</div>
+                        <div class="step-pill pill-pending">Transcribe</div>
+                        <div class="step-pill pill-pending">Slides</div>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div>
+                    <button class="cancel-btn">✕ Cancel batch</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- SCREEN 4 -->
+      <div id="screen-complete" class="mockup-container" style="margin-top:2rem;">
+        <div class="mockup-label">Screen 4 — Completion</div>
+        <div class="app-window">
+          <div class="window-titlebar">
+            <div class="traffic-light tl-red"></div>
+            <div class="traffic-light tl-yellow"></div>
+            <div class="traffic-light tl-green"></div>
+            <div class="window-title">Lecture Processor — Done</div>
+          </div>
+          <div class="window-body">
+            <div class="complete-screen">
+              <div class="complete-header">
+                <div class="check-icon">✓</div>
+                <div>
+                  <div class="complete-title">Batch finished</div>
+                  <div class="complete-sub">6 attempted · 4 completed · 1 failed · 1 skipped</div>
+                </div>
+              </div>
+
+              <div class="stats-grid">
+                <div class="stat-card">
+                  <div class="stat-num">6</div>
+                  <div class="stat-label">Attempted</div>
+                </div>
+                <div class="stat-card">
+                  <div class="stat-num">4</div>
+                  <div class="stat-label">Completed</div>
+                </div>
+                <div class="stat-card">
+                  <div class="stat-num">1</div>
+                  <div class="stat-label">Failed</div>
+                </div>
+                <div class="stat-card">
+                  <div class="stat-num">1</div>
+                  <div class="stat-label">Skipped</div>
+                </div>
+              </div>
+
+              <div class="normalization-note">
+                ✓ &nbsp; Speed normalization attempted for 5 eligible files (2× → 1×) · 4 completed · 1 failed · 1 skipped before processing
+              </div>
+
+              <div class="output-list">
+                <div style="font-family:'DM Mono',monospace;font-size:0.65rem;text-transform:uppercase;letter-spacing:0.08em;color:#666;margin-bottom:0.5rem;">Per-file results</div>
+
+                <div class="output-item" style="flex-direction:column;align-items:stretch;gap:0.4rem;">
+                  <div style="display:flex;justify-content:space-between;align-items:center;">
+                    <div class="output-item-name">📁 Lecture1_W4_2x</div>
+                    <button class="open-btn">Open →</button>
+                  </div>
+                  <div style="display:flex;gap:1rem;">
+                    <span style="font-family:'DM Mono',monospace;font-size:0.68rem;color:#5aaa7a;">✓ 1,847 words</span>
+                    <span style="font-family:'DM Mono',monospace;font-size:0.68rem;color:#5aaa7a;">✓ 14 slides</span>
+                    <span style="font-family:'DM Mono',monospace;font-size:0.68rem;color:#888;">42m 18s → 1h 24m 36s</span>
+                  </div>
+                </div>
+
+                <div class="output-item" style="flex-direction:column;align-items:stretch;gap:0.4rem;">
+                  <div style="display:flex;justify-content:space-between;align-items:center;">
+                    <div class="output-item-name">📁 Lecture2_W4_2x</div>
+                    <button class="open-btn">Open →</button>
+                  </div>
+                  <div style="display:flex;gap:1rem;">
+                    <span style="font-family:'DM Mono',monospace;font-size:0.68rem;color:#5aaa7a;">✓ 2,103 words</span>
+                    <span style="font-family:'DM Mono',monospace;font-size:0.68rem;color:#5aaa7a;">✓ 18 slides</span>
+                    <span style="font-family:'DM Mono',monospace;font-size:0.68rem;color:#888;">44m 02s → 1h 28m 04s</span>
+                  </div>
+                </div>
+
+                <div class="output-item" style="flex-direction:column;align-items:stretch;gap:0.4rem;border-color:rgba(200,75,47,0.3);">
+                  <div style="display:flex;justify-content:space-between;align-items:center;">
+                    <div class="output-item-name" style="color:#e07b5a;">⚠ Lecture3_W4_2x</div>
+                    <span style="font-family:'DM Mono',monospace;font-size:0.65rem;color:#c84b2f;">Failed</span>
+                  </div>
+                  <div style="font-family:'DM Mono',monospace;font-size:0.68rem;color:#c84b2f;">✗ Transcribe — Whisper returned empty transcript. Partial output cleaned.</div>
+                </div>
+
+                <div class="output-item" style="flex-direction:column;align-items:stretch;gap:0.4rem;border-color:rgba(120,100,60,0.3);opacity:0.7;">
+                  <div style="display:flex;justify-content:space-between;align-items:center;">
+                    <div class="output-item-name" style="color:#aaa;">⊘ Lecture_test_clip.mov</div>
+                    <span style="font-family:'DM Mono',monospace;font-size:0.65rem;color:#888;">Skipped</span>
+                  </div>
+                  <div style="font-family:'DM Mono',monospace;font-size:0.68rem;color:#666;">File too short (18s &lt; 60s minimum)</div>
+                </div>
+
+                <div style="margin-top:0.5rem;display:flex;justify-content:flex-end;">
+                  <button class="open-btn" style="font-size:0.7rem;padding:0.3rem 0.75rem;">Open all output folders →</button>
+                </div>
+              </div>
+
+              <div class="done-actions">
+                <button class="btn-primary">Process Another Folder</button>
+                <button class="btn-secondary">Quit</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── TECH STACK ── -->
+    <section id="tech">
+      <div class="section-num">05 — Tech Stack</div>
+      <h2>Implementation</h2>
+
+      <table>
+        <thead><tr><th>Layer</th><th>Technology</th><th>Notes</th></tr></thead>
+        <tbody>
+          <tr><td>Desktop shell</td><td>Tauri (preferred) / Electron</td><td>Cross-platform, native file dialogs</td></tr>
+          <tr><td>Processing core</td><td>Python (CLI)</td><td>Invoked by Tauri via subprocess or sidecar</td></tr>
+          <tr><td>Speed normalization</td><td>FFmpeg via ffmpeg-python</td><td>setpts + atempo; Rubber Band for HQ mode</td></tr>
+          <tr><td>Transcription</td><td>faster-whisper (preferred) or openai-whisper</td><td>MVP uses one controlled Whisper transcription queue with large-v3 loaded once. Multiple files can still be active in the pipeline while transcription jobs wait their turn.</td></tr>
+          <tr><td>Slide extraction</td><td>OpenCV + imagehash</td><td>Scene change detection + dedup</td></tr>
+          <tr><td>Image post-processing</td><td>Pillow</td><td>Crop, resize, export PNG</td></tr>
+          <tr><td>Concurrency</td><td>ProcessPoolExecutor (Python)</td><td><code>max_workers=n</code> (default 4) for file-level pipeline work. Normalization and slide extraction can run in parallel; MVP transcription uses a single Whisper lane unless an advanced multi-model mode is added for high-RAM machines.</td></tr>
+        </tbody>
+      </table>
+
+      <h3>Implementation Order</h3>
+      <ul class="spec-list">
+        <li>Phase 1 — Python CLI with <code>--recording-speed [1x|2x]</code> flag; validate FFmpeg normalization + VFR guard on real .mov files</li>
+        <li>Phase 2 — Integrate transcription (shared large-v3 model) + slide extraction on normalized output; validate WER improvement; implement short-file skip (60s) and failure handling with partial output cleanup</li>
+        <li>Phase 3 — Add <code>--concurrent [1-8]</code> flag using <code>ProcessPoolExecutor</code>; default 4; validate on M1 Max 32GB; confirm video/slide parallelism with single-lane Whisper transcription queue under load</li>
+        <li>Phase 4 — Tauri wrapper + all Settings modal controls; wire confirmation dialog, empty state, ✕ clear, keyboard shortcuts (⌘, / ⌘R / Escape)</li>
+        <li>Phase 5 — Per-file completion stats (word count, slide count); failure + skipped rows on completion screen; HQ audio mode (Rubber Band)</li>
+      </ul>
+    </section>
+
+    <!-- ── RISKS ── -->
+    <section id="risks">
+      <div class="section-num">06 — Risks</div>
+      <h2>Known Risks</h2>
+
+      <table>
+        <thead><tr><th>Risk</th><th>Severity</th><th>Mitigation</th></tr></thead>
+        <tbody>
+          <tr>
+            <td>A/V sync drift on VFR .mov files</td>
+            <td><span class="risk-tag risk-high">High</span></td>
+            <td>Detect VFR on input; force CFR conversion before setpts</td>
+          </tr>
+          <tr>
+            <td>User normalizes 1× files (half-speed output)</td>
+            <td><span class="risk-tag risk-high">High</span></td>
+            <td>Confirmation dialog required; cannot be bypassed</td>
+          </tr>
+          <tr>
+            <td>atempo=0.5 at minimum boundary</td>
+            <td><span class="risk-tag risk-med">Med</span></td>
+            <td>Validate input; document that only 2× is supported in MVP</td>
+          </tr>
+          <tr>
+            <td>Disk space — normalized video doubles size</td>
+            <td><span class="risk-tag risk-med">Med</span></td>
+            <td>"Save normalized video" toggle; show estimated output size before processing</td>
+          </tr>
+          <tr>
+            <td>Rubber Band not installed on user machine</td>
+            <td><span class="risk-tag risk-low">Low</span></td>
+            <td>Gracefully fall back to Fast (atempo) mode with inline notice</td>
+          </tr>
+          <tr>
+            <td>High concurrency saturating RAM on low-end hardware</td>
+            <td><span class="risk-tag risk-low">Low</span></td>
+            <td>Default of 4 validated for M1 Max 32GB; UI shows hardware guidance labels (1–2 for laptops, 4 for default, 6–8 for workstations); transcription queue prevents multiple large model loads in MVP</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <!-- ── FUTURE ── -->
+    <section id="future">
+      <div class="section-num">07 — Future Enhancements</div>
+      <h2>Post-MVP Backlog</h2>
+
+      <div class="future-item">
+        <div class="future-tag">v1.2</div>
+        <div class="future-text">Other speed presets — support 1.5×, 1.75× source recordings, not just 2×</div>
+      </div>
+      <div class="future-item">
+        <div class="future-tag">v1.2</div>
+        <div class="future-text">Disk space estimate — show projected output size before processing starts</div>
+      </div>
+      <div class="future-item">
+        <div class="future-tag">v1.3</div>
+        <div class="future-text">Auto-detect speed — analyze average speaking rate to guess recording speed (no user input needed)</div>
+      </div>
+      <div class="future-item">
+        <div class="future-tag">v2.0</div>
+        <div class="future-text">Per-file speed override — for batches where a minority of files differ</div>
+      </div>
+      <div class="future-item">
+        <div class="future-tag">v2.0</div>
+        <div class="future-text">Smart compression — re-encode normalized videos at lower bitrate to partially offset size increase</div>
+      </div>
+    </section>
+
+    <!-- ── CHANGELOG ── -->
+    <section id="changelog">
+      <div class="section-num">08 — Changelog</div>
+      <h2>v1.0 → v1.3</h2>
+
+      <div style="font-family:'DM Mono',monospace;font-size:0.68rem;color:var(--accent);letter-spacing:0.06em;margin-bottom:0.75rem;">v1.3 — Resolved spec gaps</div>
+
+      <div class="changelog-item">
+        <div class="changelog-tag tag-added">Added</div>
+        <div>Whisper default locked to <code>large-v3</code>; MVP transcription uses a single controlled queue while video and slide steps can run in parallel</div>
+      </div>
+      <div class="changelog-item">
+        <div class="changelog-tag tag-added">Added</div>
+        <div>Output format locked to <code>.mp4</code> — user-configurable format selector removed</div>
+      </div>
+      <div class="changelog-item">
+        <div class="changelog-tag tag-added">Added</div>
+        <div>Failure behavior: continue batch, clean partial output, list failures on completion screen with step + error message</div>
+      </div>
+      <div class="changelog-item">
+        <div class="changelog-tag tag-added">Added</div>
+        <div>Short file skip: files under 60 seconds warned and skipped; shown in completion screen Skipped section</div>
+      </div>
+      <div class="changelog-item">
+        <div class="changelog-tag tag-added">Added</div>
+        <div>Existing output folder: overwrite silently — no prompt, no suffix</div>
+      </div>
+      <div class="changelog-item">
+        <div class="changelog-tag tag-added">Added</div>
+        <div>Processing log format: summary + errors in plain text, with per-file word count and slide count</div>
+      </div>
+      <div class="changelog-item">
+        <div class="changelog-tag tag-added">Added</div>
+        <div>Empty folder state: inline error message in drop zone — "No .mov files found — try a different folder"</div>
+      </div>
+      <div class="changelog-item">
+        <div class="changelog-tag tag-added">Added</div>
+        <div>Completion screen: per-file breakdown showing word count, slide count, source→output duration; failed and skipped rows</div>
+      </div>
+      <div class="changelog-item">
+        <div class="changelog-tag tag-added">Added</div>
+        <div>Keyboard shortcuts: ⌘, (Settings), ⌘R (Start), Escape (close modal)</div>
+      </div>
+      <div class="changelog-item">
+        <div class="changelog-tag tag-added">Added</div>
+        <div>Drag-cancel: ✕ button on loaded folder badge to clear selection; drop new folder replaces current</div>
+      </div>
+
+      <div style="font-family:'DM Mono',monospace;font-size:0.68rem;color:var(--muted);letter-spacing:0.06em;margin:1.25rem 0 0.75rem;">v1.2 — Concurrency</div>
+
+      <div class="changelog-item">
+        <div class="changelog-tag tag-added">Added</div>
+        <div>Concurrent file processing — configurable 1–8 workers, default 4 (tuned for M1 Max 32GB)</div>
+      </div>
+      <div class="changelog-item">
+        <div class="changelog-tag tag-added">Added</div>
+        <div>Concurrency stepper in Settings modal with hardware guidance labels</div>
+      </div>
+      <div class="changelog-item">
+        <div class="changelog-tag tag-changed">Changed</div>
+        <div>Processing screen now shows up to 4 simultaneous active file rows</div>
+      </div>
+      <div class="changelog-item">
+        <div class="changelog-tag tag-changed">Changed</div>
+        <div>ETA display marked as approximate (±) — less reliable under concurrent workloads</div>
+      </div>
+
+      <div style="font-family:'DM Mono',monospace;font-size:0.68rem;color:var(--muted);letter-spacing:0.06em;margin:1.25rem 0 0.75rem;">v1.1 — Speed normalization</div>
+
+      <div class="changelog-item">
+        <div class="changelog-tag tag-added">Added</div>
+        <div>Step 0: Speed normalization (2× → 1×) in processing pipeline</div>
+      </div>
+      <div class="changelog-item">
+        <div class="changelog-tag tag-added">Added</div>
+        <div>Recording Speed control on main screen (batch-level, not per-file)</div>
+      </div>
+      <div class="changelog-item">
+        <div class="changelog-tag tag-added">Added</div>
+        <div>Confirmation dialog before normalization batch starts</div>
+      </div>
+      <div class="changelog-item">
+        <div class="changelog-tag tag-fixed">Fixed</div>
+        <div>Removed erroneous asetrate+aresample from FFmpeg command</div>
+      </div>
+      <div class="changelog-item">
+        <div class="changelog-tag tag-removed">Removed</div>
+        <div>Per-file speed detection and mixed-speed folder handling — replaced by batch-uniform setting</div>
+      </div>
+    </section>
+
+  </main>
+</div>
+
+<script>
+function switchMainTab(id) {
+  const container = document.getElementById('screen-main');
+  container.querySelectorAll('.mockup-tab').forEach((t, i) => {
+    t.classList.toggle('active', (i === 0 && id === 'loaded') || (i === 1 && id === 'empty'));
+  });
+  document.getElementById('main-tab-loaded').classList.toggle('active', id === 'loaded');
+  document.getElementById('main-tab-empty').classList.toggle('active', id === 'empty');
+}
+
+function switchTab(id) {
+  const container = document.getElementById('screen-processing');
+  container.querySelectorAll('.mockup-tab').forEach((t, i) => {
+    t.classList.toggle('active', (i === 0 && id === 'confirm') || (i === 1 && id === 'processing'));
+  });
+  container.querySelectorAll('.screen-panel').forEach(p => {
+    p.classList.remove('active');
+  });
+  document.getElementById('tab-' + id).classList.add('active');
+}
+
+// Sidebar scroll spy
+const sections = document.querySelectorAll('section[id]');
+const navLinks = document.querySelectorAll('nav a');
+
+const observer = new IntersectionObserver((entries) => {
+  entries.forEach(entry => {
+    if (entry.isIntersecting) {
+      navLinks.forEach(a => {
+        a.classList.toggle('active', a.getAttribute('href') === '#' + entry.target.id);
+      });
+    }
+  });
+}, { rootMargin: '-30% 0px -60% 0px' });
+
+sections.forEach(s => observer.observe(s));
+</script>
+
+</body>
+</html>
