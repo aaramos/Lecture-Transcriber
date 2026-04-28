@@ -440,6 +440,7 @@ class BatchProcessor:
             slide_count=result.slide_count,
             enriched=result.enriched,
             rendered=result.rendered,
+            failure_step=result.failure_step,
         )
 
     def _emit(self, kind: str, **payload) -> None:
@@ -558,7 +559,7 @@ def _enrich_processed_lecture(
             message="Skipped by user",
             elapsed_seconds=time.monotonic() - started,
         )
-    if artifact.get("processing", {}).get("status") != FileStatus.COMPLETED.value:
+    if not _artifact_can_be_enriched(artifact):
         return _file_result_from_artifact(
             source=source,
             output_dir=output_dir,
@@ -698,6 +699,18 @@ def _file_result_from_artifact(
     )
 
 
+def _artifact_can_be_enriched(artifact: Dict) -> bool:
+    processing = artifact.get("processing") or {}
+    if processing.get("status") == FileStatus.COMPLETED.value:
+        return True
+    if processing.get("status") != FileStatus.FAILED.value:
+        return False
+    if processing.get("failure_step") != "Enrich":
+        return False
+    transcript = artifact.get("transcript") or {}
+    return bool(transcript.get("text") or transcript.get("segments") or artifact.get("slides"))
+
+
 def _source_path_from_artifact(artifact: Dict, output_dir: Path) -> Path:
     source = artifact.get("source") or {}
     filename = source.get("filename") or f"{output_dir.name}.mov"
@@ -738,6 +751,7 @@ def _emit_file_finished(
         slide_count=result.slide_count,
         enriched=result.enriched,
         rendered=result.rendered,
+        failure_step=result.failure_step,
     )
 
 

@@ -85,6 +85,24 @@
           <div id="progressBar" class="progress-bar"></div>
         </div>
 
+        <div class="system-metrics" aria-label="System usage">
+          <div class="system-card">
+            <label>CPU</label>
+            <span id="cpuMetric">--</span>
+            <small id="cpuMetricStatus">Waiting</small>
+          </div>
+          <div class="system-card">
+            <label>GPU</label>
+            <span id="gpuMetric">--</span>
+            <small id="gpuMetricStatus">Waiting</small>
+          </div>
+          <div class="system-card">
+            <label>Memory</label>
+            <span id="memoryMetric">--</span>
+            <small id="memoryMetricStatus">Waiting</small>
+          </div>
+        </div>
+
         <div id="resultsGrid" class="results-grid">
           <div>
             <span id="completedCount">0</span>

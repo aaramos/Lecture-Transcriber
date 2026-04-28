@@ -559,6 +559,43 @@ class BatchProcessorTests(unittest.TestCase):
             self.assertTrue((root / "index.html").exists())
             self.assertIn("batch_finished", [event["kind"] for event in events])
 
+    def test_processed_batch_enrichment_retries_enrich_failures(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            lecture_dir = root / "failed_enrich"
+            lecture_dir.mkdir()
+            (lecture_dir / "lecture.json").write_text(
+                json.dumps(
+                    {
+                        "lecture_id": "failed_enrich",
+                        "source": {"filename": "failed_enrich.mov"},
+                        "media": {"duration_seconds": 120},
+                        "transcript": {"text": "hello lecture", "word_count": 2, "segments": []},
+                        "slides": [],
+                        "processing": {
+                            "status": "failed",
+                            "failure_step": "Enrich",
+                            "failure_message": "Gemini returned an empty response.",
+                        },
+                        "enrichment": None,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            config = BatchConfig(
+                input_dir=root,
+                output_dir=root,
+                transcription_engine=TranscriptionEngine.NONE,
+                ai_provider=AIProviderName.MOCK,
+            )
+
+            summary = enrich_processed_batch(config)
+
+            self.assertEqual(summary.completed, 1)
+            artifact = json.loads((lecture_dir / "lecture.json").read_text(encoding="utf-8"))
+            self.assertEqual(artifact["enrichment"]["provider"], "mock")
+            self.assertTrue((lecture_dir / "html" / "index.html").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

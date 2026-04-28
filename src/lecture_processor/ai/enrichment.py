@@ -9,6 +9,8 @@ from lecture_processor.config import AIProviderName, BatchConfig
 from .providers.registry import build_provider, provider_info
 from .providers.base import AnalyzeLectureRequest, AnalyzeLectureResponse
 
+ENRICHMENT_PARTIAL_NAME = ".enrichment_partial.json"
+
 
 def enrich_lecture_artifact(
     lecture_json_path: Path,
@@ -29,7 +31,21 @@ def enrich_lecture_artifact(
         api_key=_api_key_for(config.ai_provider),
         model=config.ai_model or info.default_model,
     )
-    response = provider.analyze_lecture(_request_from_artifact(artifact, lecture_json_path.parent))
+    request = _request_from_artifact(artifact, lecture_json_path.parent)
+    chunked_analyzer = getattr(provider, "analyze_lecture_chunked", None)
+    if callable(chunked_analyzer):
+        response = chunked_analyzer(
+            request,
+            cache_path=lecture_json_path.parent / ENRICHMENT_PARTIAL_NAME,
+            progress_callback=lambda payload: _emit(
+                progress_callback,
+                "enrichment_progress",
+                source=artifact["source"]["filename"],
+                **payload,
+            ),
+        )
+    else:
+        response = provider.analyze_lecture(request)
     finished_at = utc_now_iso()
     enrichment = _enrichment_payload(
         response,

@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tauri::Emitter;
 
 #[cfg(unix)]
@@ -40,6 +40,13 @@ struct ActiveProcess {
 #[derive(Default)]
 struct AppState {
     active_process: Arc<Mutex<Option<ActiveProcess>>>,
+    metrics_state: Arc<Mutex<MetricsState>>,
+}
+
+#[derive(Default)]
+struct MetricsState {
+    last_gpu_time_ns: Option<u64>,
+    last_gpu_sample: Option<Instant>,
 }
 
 #[derive(Serialize)]
@@ -103,6 +110,17 @@ struct CleanupTempResponse {
 #[serde(rename_all = "camelCase")]
 struct ApiKeyStatus {
     saved: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SystemMetrics {
+    cpu_percent: Option<f64>,
+    gpu_percent: Option<f64>,
+    memory_used_gb: Option<f64>,
+    cpu_status: String,
+    gpu_status: String,
+    memory_status: String,
 }
 
 #[derive(Deserialize)]
@@ -249,12 +267,7 @@ fn scan_processed_lectures(folder: &Path) -> Result<Vec<ProcessedLectureScan>, S
         let Ok(payload) = serde_json::from_str::<serde_json::Value>(&text) else {
             continue;
         };
-        if payload
-            .get("processing")
-            .and_then(|value| value.get("status"))
-            .and_then(|value| value.as_str())
-            != Some("completed")
-        {
+        if !processed_lecture_can_be_enriched(&payload) {
             continue;
         }
         let source_name = payload
@@ -279,6 +292,43 @@ fn scan_processed_lectures(folder: &Path) -> Result<Vec<ProcessedLectureScan>, S
         });
     }
     Ok(lectures)
+}
+
+fn processed_lecture_can_be_enriched(payload: &serde_json::Value) -> bool {
+    let processing = payload
+        .get("processing")
+        .unwrap_or(&serde_json::Value::Null);
+    if processing.get("status").and_then(|value| value.as_str()) == Some("completed") {
+        return true;
+    }
+    if processing.get("status").and_then(|value| value.as_str()) != Some("failed") {
+        return false;
+    }
+    if processing
+        .get("failure_step")
+        .and_then(|value| value.as_str())
+        != Some("Enrich")
+    {
+        return false;
+    }
+    let transcript = payload
+        .get("transcript")
+        .unwrap_or(&serde_json::Value::Null);
+    transcript
+        .get("text")
+        .and_then(|value| value.as_str())
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false)
+        || transcript
+            .get("segments")
+            .and_then(|value| value.as_array())
+            .map(|value| !value.is_empty())
+            .unwrap_or(false)
+        || payload
+            .get("slides")
+            .and_then(|value| value.as_array())
+            .map(|value| !value.is_empty())
+            .unwrap_or(false)
 }
 
 fn already_processed_files_for_source(
@@ -411,6 +461,22 @@ fn has_api_key(provider: String) -> Result<ApiKeyStatus, String> {
 }
 
 #[tauri::command]
+fn system_metrics(state: tauri::State<'_, AppState>) -> Result<SystemMetrics, String> {
+    let cpu_percent = sample_cpu_percent();
+    let memory_used_gb = sample_memory_used_gb();
+    let gpu_percent = sample_gpu_percent(&state.metrics_state);
+
+    Ok(SystemMetrics {
+        cpu_status: metric_status(cpu_percent, "Unavailable"),
+        gpu_status: metric_status(gpu_percent, "Warming up"),
+        memory_status: metric_status(memory_used_gb, "Unavailable"),
+        cpu_percent,
+        gpu_percent,
+        memory_used_gb,
+    })
+}
+
+#[tauri::command]
 async fn process_batch(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
@@ -471,6 +537,182 @@ fn update_file_control(request: FileControlRequest) -> Result<FileControlRespons
     Ok(FileControlResponse {
         status: request.action,
     })
+}
+
+fn metric_status(value: Option<f64>, fallback: &str) -> String {
+    if value.is_some() {
+        "Live".to_string()
+    } else {
+        fallback.to_string()
+    }
+}
+
+fn sample_cpu_percent() -> Option<f64> {
+    let output = Command::new("ps")
+        .args(["-A", "-o", "%cpu="])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let total_process_cpu = text
+        .lines()
+        .filter_map(|line| line.trim().parse::<f64>().ok())
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .sum::<f64>();
+    let logical_cpus = thread::available_parallelism().ok()?.get() as f64;
+    Some(round_one(
+        (total_process_cpu / logical_cpus).clamp(0.0, 100.0),
+    ))
+}
+
+fn sample_memory_used_gb() -> Option<f64> {
+    let output = Command::new("vm_stat").output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let page_size = parse_vm_page_size(&text)?;
+    let active = parse_vm_pages(&text, "Pages active")?;
+    let wired = parse_vm_pages(&text, "Pages wired down")?;
+    let compressed = parse_vm_pages(&text, "Pages occupied by compressor").unwrap_or(0);
+    let used_bytes = (active + wired + compressed) as f64 * page_size as f64;
+    Some(round_one(used_bytes / 1_073_741_824.0))
+}
+
+fn sample_gpu_percent(metrics_state: &Arc<Mutex<MetricsState>>) -> Option<f64> {
+    let total_gpu_time_ns = sample_gpu_accumulated_time_ns()?;
+    let now = Instant::now();
+    let mut state = metrics_state
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let percent = match (state.last_gpu_time_ns, state.last_gpu_sample) {
+        (Some(previous_time), Some(previous_sample)) if total_gpu_time_ns >= previous_time => {
+            let elapsed_ns = now.duration_since(previous_sample).as_nanos() as f64;
+            if elapsed_ns > 0.0 {
+                Some(round_one(
+                    ((total_gpu_time_ns - previous_time) as f64 / elapsed_ns * 100.0)
+                        .clamp(0.0, 100.0),
+                ))
+            } else {
+                None
+            }
+        }
+        _ => None,
+    };
+    state.last_gpu_time_ns = Some(total_gpu_time_ns);
+    state.last_gpu_sample = Some(now);
+    percent
+}
+
+fn sample_gpu_accumulated_time_ns() -> Option<u64> {
+    let output = Command::new("/usr/sbin/ioreg")
+        .args(["-l", "-w", "0", "-c", "AGXDeviceUserClient"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let values = parse_accumulated_gpu_times(&text);
+    if values.is_empty() {
+        return None;
+    }
+    Some(values.into_iter().sum())
+}
+
+fn parse_vm_page_size(text: &str) -> Option<u64> {
+    let line = text.lines().find(|line| line.contains("page size of"))?;
+    let value = line.split("page size of").nth(1)?.split("bytes").next()?;
+    value.trim().parse::<u64>().ok()
+}
+
+fn parse_vm_pages(text: &str, key: &str) -> Option<u64> {
+    let line = text
+        .lines()
+        .find(|line| line.trim_start().starts_with(key))?;
+    let value = line.split(':').nth(1)?;
+    value
+        .trim()
+        .trim_end_matches('.')
+        .replace('.', "")
+        .parse::<u64>()
+        .ok()
+}
+
+fn parse_accumulated_gpu_times(text: &str) -> Vec<u64> {
+    let marker = "\"accumulatedGPUTime\"=";
+    let mut values = Vec::new();
+    let mut remaining = text;
+    while let Some(index) = remaining.find(marker) {
+        let after_marker = &remaining[index + marker.len()..];
+        let digits = after_marker
+            .chars()
+            .take_while(|character| character.is_ascii_digit())
+            .collect::<String>();
+        if let Ok(value) = digits.parse::<u64>() {
+            values.push(value);
+        }
+        remaining = after_marker;
+    }
+    values
+}
+
+fn round_one(value: f64) -> f64 {
+    (value * 10.0).round() / 10.0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        parse_accumulated_gpu_times, parse_vm_page_size, parse_vm_pages,
+        processed_lecture_can_be_enriched,
+    };
+    use serde_json::json;
+
+    #[test]
+    fn parses_vm_stat_values() {
+        let sample = r#"Mach Virtual Memory Statistics: (page size of 16384 bytes)
+Pages active:                                 628839.
+Pages wired down:                             185384.
+Pages occupied by compressor:                  87041.
+"#;
+
+        assert_eq!(parse_vm_page_size(sample), Some(16_384));
+        assert_eq!(parse_vm_pages(sample, "Pages active"), Some(628_839));
+        assert_eq!(parse_vm_pages(sample, "Pages wired down"), Some(185_384));
+        assert_eq!(
+            parse_vm_pages(sample, "Pages occupied by compressor"),
+            Some(87_041)
+        );
+    }
+
+    #[test]
+    fn parses_gpu_accumulated_times() {
+        let sample = r#"
+          "AppUsage" = ({"API"="Metal","accumulatedGPUTime"=1200},{"API"="Metal","accumulatedGPUTime"=3400})
+          "AppUsage" = ({"API"="Metal","lastSubmittedTime"=0,"accumulatedGPUTime"=0})
+        "#;
+
+        assert_eq!(parse_accumulated_gpu_times(sample), vec![1200, 3400, 0]);
+    }
+
+    #[test]
+    fn enrichable_processed_lecture_includes_enrich_failures() {
+        let payload = json!({
+            "processing": {
+                "status": "failed",
+                "failure_step": "Enrich"
+            },
+            "transcript": {
+                "text": "ready for retry"
+            },
+            "slides": []
+        });
+
+        assert!(processed_lecture_can_be_enriched(&payload));
+    }
 }
 
 fn mark_active_process_cancelled(
@@ -1168,6 +1410,7 @@ pub fn run() {
             cleanup_temp_files,
             save_api_key,
             has_api_key,
+            system_metrics,
             process_batch,
             cancel_batch,
             update_file_control

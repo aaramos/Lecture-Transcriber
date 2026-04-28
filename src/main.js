@@ -14,6 +14,18 @@ const STEP_LABELS = {
   Render: "Building HTML",
 };
 
+const STEP_SHORT_LABELS = {
+  Probe: "Check",
+  Normalize: "Normalize",
+  Audio: "Audio",
+  Transcribe: "Transcript",
+  Slides: "Slides",
+  Enrich: "Gemini",
+  Render: "HTML",
+};
+
+const STEP_ORDER = ["Probe", "Normalize", "Audio", "Transcribe", "Slides", "Enrich", "Render"];
+
 const STEP_START_PROGRESS = {
   Probe: 8,
   Normalize: 22,
@@ -63,6 +75,7 @@ const state = {
   progressDone: 0,
   runStartedAt: 0,
   elapsedTimer: null,
+  systemMetricsTimer: null,
   finishedFileReports: 0,
   geminiKeySaved: false,
   enhanceWithGeminiPreference: DEFAULT_SETTINGS.enhanceWithGemini,
@@ -96,6 +109,12 @@ const elements = {
   statusPill: document.querySelector("#statusPill"),
   elapsedTime: document.querySelector("#elapsedTime"),
   progressBar: document.querySelector("#progressBar"),
+  cpuMetric: document.querySelector("#cpuMetric"),
+  cpuMetricStatus: document.querySelector("#cpuMetricStatus"),
+  gpuMetric: document.querySelector("#gpuMetric"),
+  gpuMetricStatus: document.querySelector("#gpuMetricStatus"),
+  memoryMetric: document.querySelector("#memoryMetric"),
+  memoryMetricStatus: document.querySelector("#memoryMetricStatus"),
   activeVideos: document.querySelector("#activeVideos"),
   activeSummary: document.querySelector("#activeSummary"),
   completedCount: document.querySelector("#completedCount"),
@@ -124,6 +143,7 @@ loadPersistedSettings();
 refreshGeminiKeyStatus();
 cleanupTempFilesAtLaunch();
 setupDragAndDrop();
+startSystemMetrics();
 
 document.addEventListener("keydown", (event) => {
   const key = event.key.toLowerCase();
@@ -195,7 +215,7 @@ elements.speedSegments.forEach((button) => {
     state.recordingSpeed = button.dataset.speed;
     elements.speedSegments.forEach((item) => item.classList.toggle("active", item === button));
     saveCurrentSettings();
-    renderNormalizationWarning();
+    render();
   });
 });
 
@@ -457,6 +477,7 @@ function render() {
     state.folderMode === "processed" ? true : state.enhanceWithGeminiPreference;
   elements.enhanceWithGemini.disabled = state.running || state.folderMode === "processed";
   if (!state.running) {
+    syncPendingFilePlans();
     elements.runMeta.textContent = hasFolder
       ? readyRunMeta()
       : "Select a folder to begin.";
@@ -511,6 +532,204 @@ function resetResults() {
   state.fileOrder = [];
   setProgress(0, 0);
   renderVideoDashboard();
+}
+
+function plannedStepNames() {
+  if (state.folderMode === "processed") {
+    return ["Enrich", "Render"];
+  }
+
+  const steps = ["Probe"];
+  if (state.recordingSpeed === "2x") {
+    steps.push("Normalize");
+  }
+  if (elements.transcriptionEngine.value !== "none") {
+    steps.push("Audio");
+  }
+  steps.push("Transcribe", "Slides");
+  if (needsGemini()) {
+    steps.push("Enrich");
+  }
+  steps.push("Render");
+  return steps;
+}
+
+function buildInitialSteps(fileStatus = "queued") {
+  const stepStatus = fileStatus === "skipped" ? "skipped" : "waiting";
+  return plannedStepNames().map((key) => ({
+    key,
+    label: STEP_SHORT_LABELS[key] || key,
+    status: stepStatus,
+    elapsedSeconds: null,
+    startedAt: null,
+  }));
+}
+
+function stepRunningDetail(step) {
+  const label = STEP_LABELS[step] || step || "Working";
+  return `${label} started`;
+}
+
+function markStepStarted(file, step) {
+  const now = Date.now();
+  const steps = ensureStepStates(file, step);
+  const activeIndex = steps.findIndex((item) => item.key === step);
+  return {
+    steps: steps.map((item, index) => {
+      if (item.key === step) {
+        return {
+          ...item,
+          status: "active",
+          startedAt: now,
+          elapsedSeconds: null,
+        };
+      }
+      if (index < activeIndex && ["waiting", "active"].includes(item.status)) {
+        return {
+          ...item,
+          status: "done",
+          elapsedSeconds: item.elapsedSeconds,
+        };
+      }
+      return item;
+    }),
+    currentStep: step,
+    currentStepStartedAt: now,
+    lastEventAt: now,
+  };
+}
+
+function markStepFinished(file, step, elapsedSeconds) {
+  const now = Date.now();
+  const steps = ensureStepStates(file, step);
+  return {
+    steps: steps.map((item) =>
+      item.key === step
+        ? {
+            ...item,
+            status: "done",
+            elapsedSeconds,
+            startedAt: item.startedAt || null,
+          }
+        : item,
+    ),
+    currentStep: file?.currentStep === step ? null : file?.currentStep || null,
+    currentStepStartedAt: file?.currentStep === step ? null : file?.currentStepStartedAt || null,
+    lastEventAt: now,
+  };
+}
+
+function markFileFinished(file, status, failureStep) {
+  const steps = ensureStepStates(file, failureStep || file?.currentStep || null);
+  if (status === "completed") {
+    return {
+      steps: steps.map((item) => ({
+        ...item,
+        status: item.status === "skipped" ? "skipped" : "done",
+      })),
+      currentStep: null,
+      currentStepStartedAt: null,
+      lastEventAt: Date.now(),
+    };
+  }
+
+  if (status === "failed") {
+    const failedKey = failureStep || file?.currentStep || steps.find((item) => item.status === "active")?.key;
+    return {
+      steps: steps.map((item) =>
+        item.key === failedKey
+          ? { ...item, status: "failed" }
+          : item.status === "active"
+            ? { ...item, status: "failed" }
+            : item,
+      ),
+      currentStep: null,
+      currentStepStartedAt: null,
+      lastEventAt: Date.now(),
+    };
+  }
+
+  if (status === "skipped" || status === "stopped") {
+    return {
+      steps: steps.map((item) =>
+        item.status === "done"
+          ? item
+          : {
+              ...item,
+              status: status === "stopped" ? "stopped" : "skipped",
+            },
+      ),
+      currentStep: null,
+      currentStepStartedAt: null,
+      lastEventAt: Date.now(),
+    };
+  }
+
+  return {};
+}
+
+function ensureStepStates(file, step = null) {
+  const existing = Array.isArray(file?.steps) && file.steps.length > 0 ? file.steps : buildInitialSteps(file?.status);
+  if (!step || existing.some((item) => item.key === step)) {
+    return existing;
+  }
+
+  const inserted = [
+    ...existing,
+    {
+      key: step,
+      label: STEP_SHORT_LABELS[step] || step,
+      status: "waiting",
+      elapsedSeconds: null,
+      startedAt: null,
+    },
+  ];
+  return inserted.sort((a, b) => stepOrderIndex(a.key) - stepOrderIndex(b.key));
+}
+
+function stepOrderIndex(step) {
+  const index = STEP_ORDER.indexOf(step);
+  return index === -1 ? STEP_ORDER.length : index;
+}
+
+function renderStepStrip(file) {
+  const steps = ensureStepStates(file);
+  if (!steps.length) return "";
+  const html = steps
+    .map((step) => {
+      const stateClass = escapeHtml(step.status || "waiting");
+      const activeTime = step.status === "active" ? activeStepDuration(file, step) : "";
+      const finishedTime = step.status === "done" && step.elapsedSeconds ? formatDuration(step.elapsedSeconds) : "";
+      const time = activeTime || finishedTime;
+      return `<span class="video-step ${stateClass}"><span>${escapeHtml(step.label)}</span>${
+        time ? `<span class="video-step-time">${escapeHtml(time)}</span>` : ""
+      }</span>`;
+    })
+    .join("");
+  return `<div class="video-step-list" aria-label="File steps">${html}</div>`;
+}
+
+function activeStepDetail(file) {
+  const activeStep = ensureStepStates(file).find((step) => step.status === "active");
+  if (!activeStep) return file.detail || statusLabel(file.status);
+  return `${STEP_LABELS[activeStep.key] || activeStep.label} for ${activeStepDuration(file, activeStep)}`;
+}
+
+function activeStepDuration(file, step) {
+  const startedAt = step.startedAt || file?.currentStepStartedAt;
+  if (!startedAt) return "0s";
+  return formatDuration((Date.now() - startedAt) / 1000);
+}
+
+function formatDuration(seconds) {
+  const wholeSeconds = Math.max(0, Math.floor(Number(seconds) || 0));
+  if (wholeSeconds < 60) return `${wholeSeconds}s`;
+  const minutes = Math.floor(wholeSeconds / 60);
+  const remainingSeconds = wholeSeconds % 60;
+  if (minutes < 60) return `${minutes}m ${String(remainingSeconds).padStart(2, "0")}s`;
+  const hours = Math.floor(minutes / 60);
+  const remainingMinutes = minutes % 60;
+  return `${hours}h ${String(remainingMinutes).padStart(2, "0")}m`;
 }
 
 function confirmNormalization() {
@@ -580,8 +799,9 @@ function handleProcessorEvent(event) {
     updateFile(event.source, {
       status: "running",
       stage: STEP_LABELS[event.step] || event.step,
-      detail: "Working",
+      detail: stepRunningDetail(event.step),
       progress: STEP_START_PROGRESS[event.step] || 12,
+      ...markStepStarted(state.files.get(event.source), event.step),
     });
   } else if (event.kind === "step_finished") {
     if (["skipped", "stopping", "stopped"].includes(state.files.get(event.source)?.status)) {
@@ -591,6 +811,30 @@ function handleProcessorEvent(event) {
       stage: `${STEP_LABELS[event.step] || event.step} complete`,
       detail: `${Number(event.elapsed_seconds || 0).toFixed(1)}s`,
       progress: STEP_DONE_PROGRESS[event.step] || 20,
+      ...markStepFinished(state.files.get(event.source), event.step, Number(event.elapsed_seconds || 0)),
+    });
+  } else if (event.kind === "enrichment_started") {
+    updateFile(event.source, {
+      detail: "Waiting for Gemini",
+      ...markStepStarted(state.files.get(event.source), "Enrich"),
+    });
+  } else if (event.kind === "enrichment_progress") {
+    const completed = Number(event.completed || 0);
+    const total = Number(event.total || 0);
+    const countText = total > 0 ? ` (${completed}/${total})` : "";
+    const current = state.files.get(event.source);
+    const activePatch = current?.currentStep === "Enrich" ? {} : markStepStarted(current, "Enrich");
+    updateFile(event.source, {
+      status: "running",
+      stage: STEP_LABELS.Enrich,
+      detail: `Gemini: ${event.step || "working"}${countText}`,
+      progress: Math.max(STEP_START_PROGRESS.Enrich, Math.min(STEP_DONE_PROGRESS.Enrich, 88 + completed)),
+      ...activePatch,
+    });
+  } else if (event.kind === "enrichment_finished") {
+    updateFile(event.source, {
+      detail: event.title ? `Gemini finished: ${event.title}` : "Gemini finished",
+      ...markStepFinished(state.files.get(event.source), "Enrich", Number(event.elapsed_seconds || 0)),
     });
   } else if (event.kind === "file_finished") {
     state.finishedFileReports += 1;
@@ -602,6 +846,7 @@ function handleProcessorEvent(event) {
       stage: statusLabel(event.status),
       detail: fileFinishedDetail(event, failedStage),
       progress: 100,
+      ...markFileFinished(previous, event.status, event.failure_step),
     });
   } else if (event.kind === "batch_finished") {
     setProgress(Number(event.attempted || state.progressDone), Number(event.attempted || state.progressTotal));
@@ -627,6 +872,7 @@ function updateFile(source, patch) {
     stage: "Queue",
     detail: "Waiting to start",
     progress: 0,
+    steps: buildInitialSteps("queued"),
   };
   state.files.set(source, { ...previous, ...patch });
   renderVideoDashboard();
@@ -657,6 +903,7 @@ function primeQueuedFiles(concurrentFiles) {
       stage: skipped ? "Skipped" : preparing ? "Preparing" : "Queue",
       detail: skipped ? skipReason : preparing ? `Preparing ${itemNoun()}` : "Waiting to start",
       progress: skipped ? 100 : preparing ? 3 : 0,
+      steps: buildInitialSteps(skipped ? "skipped" : "queued"),
     });
   });
 
@@ -680,8 +927,22 @@ function initializeQueuedFiles() {
       stage: skipped ? "Skipped" : "Queue",
       detail: skipped ? skipReason : "Waiting to start",
       progress: skipped ? 100 : 0,
+      steps: buildInitialSteps(skipped ? "skipped" : "queued"),
     });
   });
+}
+
+function syncPendingFilePlans() {
+  if (state.finishedFileReports > 0) return;
+  for (const [name, file] of state.files.entries()) {
+    if (!["queued", "skipped", "preparing"].includes(file.status)) continue;
+    state.files.set(name, {
+      ...file,
+      steps: buildInitialSteps(file.status === "skipped" ? "skipped" : "queued"),
+      currentStep: null,
+      currentStepStartedAt: null,
+    });
+  }
 }
 
 function dashboardEntries() {
@@ -693,6 +954,7 @@ function dashboardEntries() {
         stage: "Queue",
         detail: "Waiting to start",
         progress: 0,
+        steps: buildInitialSteps("queued"),
       },
     ]);
   }
@@ -705,6 +967,7 @@ function dashboardEntries() {
         stage: "Queue",
         detail: "Waiting to start",
         progress: 0,
+        steps: buildInitialSteps("queued"),
       },
     ]);
   }
@@ -759,12 +1022,18 @@ function renderVideoList(entries) {
       return `
         <div class="video-row ${status}">
           <span class="video-status-dot" aria-hidden="true"></span>
-          <span class="video-name" title="${escapeHtml(name)}">${escapeHtml(name)}</span>
-          <span class="video-stage">${escapeHtml(file.stage || statusLabel(file.status))}</span>
+          <div class="video-main">
+            <div class="video-title-line">
+              <span class="video-name" title="${escapeHtml(name)}">${escapeHtml(name)}</span>
+              <span class="video-stage">${escapeHtml(file.stage || statusLabel(file.status))}</span>
+            </div>
+            <div class="video-detail">${escapeHtml(detail)}</div>
+            ${renderStepStrip(file)}
+          </div>
           ${
             active
               ? `<span class="video-progress-cell"><span class="video-bar-track" aria-hidden="true"><span class="video-bar" style="width: ${percent}%"></span></span><span class="video-percent">${percent}%</span></span>`
-              : `<span class="video-detail">${escapeHtml(detail)}</span>`
+              : `<span class="video-progress-cell complete"><span class="video-percent">${percent}%</span></span>`
           }
           ${
             action
@@ -813,6 +1082,7 @@ function fileFinishedDetailFromState(file) {
   if (file.status === "skipped") return file.detail || "Skipped by user";
   if (file.status === "stopped") return file.detail || "Stopped by user";
   if (file.status === "queued") return file.detail || "Waiting to start";
+  if (isActiveStatus(file.status)) return activeStepDetail(file);
   return file.detail || statusLabel(file.status);
 }
 
@@ -850,6 +1120,7 @@ function updateActiveVideosForCancel() {
         status: "stopping",
         stage: "Stopping",
         detail: "Stopping batch",
+        ...markFileFinished(file, "stopped"),
       });
     }
   }
@@ -866,6 +1137,7 @@ function markRemainingVideosStopped() {
         stage: "Stopped",
         detail: "Stopped by user",
         progress: 100,
+        ...markFileFinished(file, "stopped"),
       });
       changed += 1;
     }
@@ -887,6 +1159,7 @@ function markUnfinishedVideosFailed(detail) {
         stage: "Not completed",
         detail,
         progress: 100,
+        ...markFileFinished(file, "failed"),
       });
       changed += 1;
     }
@@ -939,6 +1212,7 @@ async function handleVideoAction(action, source) {
         stage: "Skipped",
         detail: "Skipped by user",
         progress: 100,
+        ...markFileFinished(state.files.get(source), "skipped"),
       });
       render();
     } else if (action === "unskip") {
@@ -948,6 +1222,9 @@ async function handleVideoAction(action, source) {
         stage: "Queue",
         detail: "Waiting to start",
         progress: 0,
+        steps: buildInitialSteps("queued"),
+        currentStep: null,
+        currentStepStartedAt: null,
       });
       render();
     }
@@ -960,6 +1237,7 @@ async function handleVideoAction(action, source) {
       stage: "Skipped",
       detail: "Skipped by user",
       progress: 100,
+      ...markFileFinished(state.files.get(source), "skipped"),
     });
     await updateFileControl("skip", source);
   } else if (action === "stop") {
@@ -967,6 +1245,7 @@ async function handleVideoAction(action, source) {
       status: "stopping",
       stage: "Stopping",
       detail: "Stopping and removing partial output",
+      ...markFileFinished(state.files.get(source), "stopped"),
     });
     await updateFileControl("stop", source);
   }
@@ -1230,6 +1509,56 @@ function updateElapsedTime() {
   const minutes = String(Math.floor(elapsedSeconds / 60)).padStart(2, "0");
   const seconds = String(elapsedSeconds % 60).padStart(2, "0");
   elements.elapsedTime.textContent = `${minutes}:${seconds}`;
+  if (state.running) {
+    renderVideoDashboard();
+  }
+}
+
+function startSystemMetrics() {
+  refreshSystemMetrics();
+  state.systemMetricsTimer = window.setInterval(refreshSystemMetrics, 2500);
+}
+
+async function refreshSystemMetrics() {
+  try {
+    const metrics = await invoke("system_metrics");
+    renderSystemMetrics(metrics);
+  } catch {
+    renderSystemMetrics(null);
+  }
+}
+
+function renderSystemMetrics(metrics) {
+  const cpuPercent = metrics?.cpuPercent;
+  const gpuPercent = metrics?.gpuPercent;
+  const memoryUsedGb = metrics?.memoryUsedGb;
+  renderMetric(
+    elements.cpuMetric,
+    elements.cpuMetricStatus,
+    cpuPercent == null ? "--" : `${Math.round(cpuPercent)}%`,
+    cpuPercent == null ? metrics?.cpuStatus || "Unavailable" : "of CPU capacity",
+    cpuPercent == null,
+  );
+  renderMetric(
+    elements.gpuMetric,
+    elements.gpuMetricStatus,
+    gpuPercent == null ? "--" : `${Math.round(gpuPercent)}%`,
+    gpuPercent == null ? metrics?.gpuStatus || "Unavailable" : "of GPU capacity",
+    gpuPercent == null,
+  );
+  renderMetric(
+    elements.memoryMetric,
+    elements.memoryMetricStatus,
+    memoryUsedGb == null ? "--" : `${Number(memoryUsedGb).toFixed(1)} GB`,
+    memoryUsedGb == null ? metrics?.memoryStatus || "Unavailable" : "active + wired + compressed",
+    memoryUsedGb == null,
+  );
+}
+
+function renderMetric(valueElement, statusElement, value, status, unavailable) {
+  valueElement.textContent = value;
+  statusElement.textContent = status;
+  valueElement.closest(".system-card")?.classList.toggle("unavailable", unavailable);
 }
 
 function waitForPaint() {
