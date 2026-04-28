@@ -1,6 +1,7 @@
 import html
+import re
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional
+from typing import Dict, List, Optional
 
 from .artifacts import LECTURE_ARTIFACT_NAME, load_json
 from .models import BatchSummary, FileResult, FileStatus
@@ -26,22 +27,20 @@ def _lecture_html(artifact: Dict) -> str:
     enrichment = artifact.get("enrichment") or {}
     title = enrichment.get("title") or _fallback_title(artifact)
     summary = enrichment.get("executive_summary") or _fallback_summary(artifact)
-    slide_analysis = {item.get("slide_id"): item for item in enrichment.get("slide_analysis", [])}
+    slide_analysis = {_analysis_slide_id(item): item for item in enrichment.get("slide_analysis", [])}
     outline = enrichment.get("outline") or []
     resources = enrichment.get("resources") or []
     slides = artifact.get("slides") or []
     transcript = artifact.get("transcript", {})
+    transcript_text = enrichment.get("formatted_transcript") or transcript.get("text") or ""
     body = [
         _html_head(title),
         "<body>",
         "<main>",
-        f"<header><p class=\"eyebrow\">Lecture Study Page</p><h1>{_e(title)}</h1>"
-        f"<p class=\"summary\">{_e(summary)}</p></header>",
-        _stats_block(artifact),
-        _outline_block(outline),
-        _slides_block(slides, slide_analysis),
+        _hero_block(title, summary, slides, outline, resources),
+        _flow_block(outline, slides, slide_analysis),
+        _transcript_block(transcript_text),
         _resources_block(resources),
-        _transcript_block(transcript.get("text") or ""),
         "</main>",
         "</body></html>",
     ]
@@ -87,129 +86,353 @@ def _html_head(title: str) -> str:
   <title>{_e(title)}</title>
   <style>
     :root {{
-      color-scheme: light;
-      --ink: #24211d;
-      --muted: #6f675d;
-      --line: #ddd6cc;
-      --paper: #fbfaf7;
-      --accent: #9f5137;
-      --soft: #f2eee7;
-      --good: #2f7d4f;
-      --bad: #a6423d;
-      --warn: #906d1f;
+      color-scheme: dark;
+      --bg: #161716;
+      --panel: #232522;
+      --line: #42483f;
+      --text: #f4f2e9;
+      --muted: #b8b3a5;
+      --accent: #e08658;
+      --accent-soft: rgba(224, 134, 88, 0.16);
+      --blue: #79a7c7;
+      --blue-soft: rgba(121, 167, 199, 0.16);
+      --good: #83bd8c;
+      --warn: #d6b85a;
+      --bad: #d9847a;
     }}
     * {{ box-sizing: border-box; }}
     body {{
       margin: 0;
-      background: var(--paper);
-      color: var(--ink);
+      background: var(--bg);
+      color: var(--text);
       font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       line-height: 1.55;
     }}
-    main {{ width: min(1080px, calc(100vw - 32px)); margin: 0 auto; padding: 34px 0 56px; }}
-    header {{ margin-bottom: 28px; }}
-    h1 {{ margin: 0; font-size: clamp(2rem, 5vw, 4.5rem); line-height: 0.98; letter-spacing: 0; }}
-    h2 {{ margin: 28px 0 12px; font-size: 1.45rem; }}
-    h3 {{ margin: 0 0 6px; }}
-    .eyebrow {{ margin: 0 0 8px; color: var(--accent); font-size: 0.78rem; font-weight: 800; text-transform: uppercase; }}
-    .summary {{ max-width: 820px; margin: 16px 0 0; color: var(--muted); font-size: 1.08rem; }}
-    .stats, .lecture-list, .outline, .resources, .transcript {{ border-top: 1px solid var(--line); padding-top: 18px; margin-top: 22px; }}
-    .stats {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 12px; }}
-    .stat {{ background: var(--soft); border-radius: 6px; padding: 12px; }}
-    .stat strong {{ display: block; font-size: 1.4rem; }}
-    .stat span {{ color: var(--muted); font-size: 0.82rem; }}
+    main {{
+      max-width: 1320px;
+      min-width: 0;
+      margin: 0 auto;
+      border-left: 1px solid var(--line);
+      border-right: 1px solid var(--line);
+    }}
+    header, .hero-band, .content-band {{ border-bottom: 1px solid var(--line); padding: 34px; }}
+    header {{ margin: 0; }}
+    h1 {{ margin: 0; max-width: 980px; font-size: clamp(2.4rem, 7vw, 5.4rem); line-height: 1.02; letter-spacing: 0; }}
+    h2 {{ margin: 0; font-size: 1.45rem; }}
+    h3, h4, p {{ margin: 0; }}
+    .eyebrow {{
+      margin: 0 0 8px;
+      color: var(--muted);
+      font-size: 0.75rem;
+      font-weight: 800;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }}
+    .summary {{ max-width: 920px; margin-top: 22px; color: #ded9ca; font-size: 1.08rem; line-height: 1.65; }}
+    .hero-band {{
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(220px, 280px);
+      gap: 28px;
+      min-height: 380px;
+      align-items: end;
+    }}
+    .metric-strip {{ display: grid; gap: 10px; }}
+    .metric-strip div {{ border: 1px solid var(--line); border-radius: 8px; padding: 16px; background: var(--panel); }}
+    .metric-strip strong, .metric-strip span {{ display: block; }}
+    .metric-strip strong {{ font-size: 1.9rem; }}
+    .metric-strip span {{ color: var(--muted); font-size: 0.76rem; font-weight: 800; text-transform: uppercase; }}
+    .section-head {{ display: flex; align-items: end; justify-content: space-between; gap: 16px; margin-bottom: 18px; }}
+    .flow-list {{ display: grid; gap: 12px; }}
+    .flow-section {{ border: 1px solid var(--line); border-radius: 8px; background: var(--panel); overflow: hidden; }}
+    .flow-section summary {{
+      display: grid;
+      grid-template-columns: auto 42px minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 14px;
+      padding: 14px;
+      cursor: pointer;
+      list-style: none;
+    }}
+    .flow-section summary::-webkit-details-marker {{ display: none; }}
+    .flow-section summary::before {{ content: "\\25B8"; color: var(--muted); font-size: 1.05rem; font-weight: 900; }}
+    .flow-section[open] summary {{ border-bottom: 1px solid var(--line); }}
+    .flow-section[open] summary::before {{ content: "\\25BE"; color: var(--accent); }}
+    .outline-number, .slide-id {{
+      display: grid;
+      place-items: center;
+      border-radius: 999px;
+      font-weight: 900;
+    }}
+    .outline-number {{ width: 34px; height: 34px; background: var(--accent-soft); color: var(--accent); }}
+    .flow-title {{ min-width: 0; font-size: 0.95rem; font-weight: 900; overflow-wrap: anywhere; }}
+    .flow-count {{ color: var(--muted); font-size: 0.75rem; font-weight: 900; text-transform: uppercase; }}
+    .flow-slides {{ display: grid; gap: 14px; padding: 14px; }}
+    .slide-row {{
+      display: grid;
+      grid-template-columns: minmax(220px, 320px) minmax(0, 1fr);
+      gap: 18px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 14px;
+      background: rgba(255, 255, 255, 0.02);
+    }}
+    .slide-media {{
+      display: grid;
+      min-height: 180px;
+      place-items: center;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #111;
+    }}
+    .slide-media img {{ width: 100%; height: 100%; object-fit: contain; }}
+    .missing-slide {{ color: var(--warn); font-size: 0.75rem; font-weight: 800; text-align: center; }}
+    .slide-copy {{ display: grid; gap: 12px; align-content: start; }}
+    .slide-title-row {{ display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 10px; align-items: center; }}
+    .slide-id {{ width: 38px; height: 38px; background: var(--blue-soft); color: var(--blue); }}
+    .slide-title-row h4 {{ overflow-wrap: anywhere; font-size: 1.05rem; }}
+    .slide-summary, .commentary, .caption, .resource-card p, .transcript-text {{ color: #ded9ca; font-size: 0.93rem; line-height: 1.6; }}
+    .caption {{ border: 1px solid var(--line); border-radius: 6px; padding: 10px 12px; background: rgba(255, 255, 255, 0.03); color: var(--muted); }}
+    .caption strong {{ color: var(--text); }}
+    .commentary {{ border-left: 3px solid var(--accent); padding-left: 12px; }}
+    .tag-row {{ display: flex; flex-wrap: wrap; gap: 6px; }}
+    .tag {{ border: 1px solid var(--line); border-radius: 999px; padding: 4px 8px; color: var(--muted); font-size: 0.72rem; font-weight: 800; }}
+    .transcript-text {{ display: grid; max-width: 980px; gap: 1rem; font-size: 0.98rem; line-height: 1.72; }}
+    .resource-list {{ display: grid; gap: 12px; }}
+    .resource-card {{
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 18px;
+      align-items: start;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 16px;
+      background: var(--panel);
+    }}
+    .resource-card a {{ color: var(--text); font-weight: 900; text-decoration-color: var(--accent); text-underline-offset: 3px; }}
+    .resource-card p {{ margin-top: 8px; }}
+    .quality {{ border: 1px solid var(--line); border-radius: 999px; padding: 4px 9px; color: var(--muted); font-size: 0.72rem; font-weight: 900; text-transform: uppercase; }}
+    .quality.high {{ border-color: rgba(131, 189, 140, 0.5); background: rgba(131, 189, 140, 0.12); color: var(--good); }}
+    .empty-state {{ color: var(--muted); }}
+    .lecture-list {{ padding: 18px 34px 34px; }}
     .lecture-row {{ display: grid; grid-template-columns: 132px minmax(0, 1fr) auto; gap: 16px; align-items: center; border-bottom: 1px solid var(--line); padding: 16px 0; }}
-    .lecture-row img {{ width: 132px; aspect-ratio: 16 / 9; object-fit: cover; border: 1px solid var(--line); border-radius: 4px; background: var(--soft); }}
+    .lecture-row img {{ width: 132px; aspect-ratio: 16 / 9; object-fit: cover; border: 1px solid var(--line); border-radius: 4px; background: var(--panel); }}
     .lecture-row.failed h2, .lecture-row.failed .status {{ color: var(--bad); }}
     .lecture-row.skipped h2, .lecture-row.skipped .status {{ color: var(--warn); }}
     .lecture-row.stopped h2, .lecture-row.stopped .status {{ color: var(--warn); }}
     .lecture-row h2 {{ margin: 0 0 4px; font-size: 1.1rem; }}
     .lecture-row p {{ margin: 0; color: var(--muted); }}
     .lecture-row a {{ color: var(--accent); font-weight: 800; text-decoration: none; }}
-    .slide {{ display: grid; grid-template-columns: minmax(220px, 420px) minmax(0, 1fr); gap: 18px; border-top: 1px solid var(--line); padding: 20px 0; }}
-    .slide img {{ width: 100%; border: 1px solid var(--line); border-radius: 4px; background: white; }}
-    .tags {{ display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }}
-    .tag {{ background: var(--soft); border-radius: 999px; padding: 4px 8px; color: var(--muted); font-size: 0.78rem; }}
-    .transcript pre {{ overflow: auto; white-space: pre-wrap; background: var(--soft); border-radius: 6px; padding: 14px; }}
-    @media (max-width: 760px) {{
-      .lecture-row, .slide {{ grid-template-columns: 1fr; }}
+    @media (max-width: 980px) {{
+      .hero-band {{ grid-template-columns: 1fr; min-height: auto; }}
+      .metric-strip {{ grid-template-columns: repeat(3, minmax(0, 1fr)); }}
+      .flow-section summary {{ grid-template-columns: auto 42px minmax(0, 1fr); }}
+      .flow-count {{ grid-column: 3; }}
+      .slide-row, .resource-card, .lecture-row {{ grid-template-columns: 1fr; }}
       .lecture-row img {{ width: 100%; }}
     }}
   </style>
 </head>"""
 
 
-def _stats_block(artifact: Dict) -> str:
-    media = artifact.get("media", {})
-    transcript = artifact.get("transcript", {})
-    slides = artifact.get("slides") or []
-    enrichment = artifact.get("enrichment")
-    values = [
-        (f"{media.get('duration_seconds', 0) / 60:.1f}", "minutes"),
-        (str(transcript.get("word_count", 0)), "transcript words"),
-        (str(len(slides)), "slides"),
-        ("AI" if enrichment else "Local", "study notes"),
+def _hero_block(title: str, summary: str, slides: List[Dict], outline: List[Dict], resources: List[Dict]) -> str:
+    metrics = [
+        (str(len(slides)), "Slides"),
+        (str(len(outline)), "Sections"),
+        (str(len(resources)), "Resources"),
     ]
-    return "<section class=\"stats\">" + "".join(
-        f"<div class=\"stat\"><strong>{_e(value)}</strong><span>{_e(label)}</span></div>"
-        for value, label in values
-    ) + "</section>"
-
-
-def _outline_block(outline: List[Dict]) -> str:
-    if not outline:
-        return ""
-    items = "\n".join(
-        f"<li><strong>{_e(item.get('heading', 'Section'))}</strong>"
-        f"<span> slides {_e(', '.join(str(slide) for slide in item.get('slide_ids', [])) or 'none')}</span></li>"
-        for item in outline
+    metric_html = "".join(
+        f"<div><strong>{_e(value)}</strong><span>{_e(label)}</span></div>" for value, label in metrics
     )
-    return f"<section class=\"outline\"><h2>Outline</h2><ol>{items}</ol></section>"
+    return f"""
+      <section class="hero-band">
+        <div>
+          <p class="eyebrow">AI Study Notes</p>
+          <h1>{_e(title)}</h1>
+          <p class="summary">{_e(summary)}</p>
+        </div>
+        <div class="metric-strip" aria-label="Lecture metrics">{metric_html}</div>
+      </section>
+    """
 
 
-def _slides_block(slides: List[Dict], slide_analysis: Dict[int, Dict]) -> str:
-    if not slides:
-        return "<section><h2>Slides</h2><p>No slides were extracted for this lecture.</p></section>"
+def _flow_block(outline: List[Dict], slides: List[Dict], slide_analysis: Dict[int, Dict]) -> str:
+    sections = _sections_with_slides(outline, slides, slide_analysis)
+    if not sections:
+        return """
+          <section class="content-band">
+            <div class="section-head"><div><p class="eyebrow">Outline</p><h2>Lecture Flow</h2></div></div>
+            <p class="empty-state">No slides were extracted for this lecture.</p>
+          </section>
+        """
+
     rows = []
-    for slide in slides:
-        analysis = slide_analysis.get(slide.get("id")) or {}
-        image = _e("../" + slide.get("relative_path", ""))
-        title = analysis.get("descriptive_filename") or slide.get("filename") or f"Slide {slide.get('id')}"
-        summary = analysis.get("summary") or "No slide summary is available yet."
-        commentary = analysis.get("instructor_commentary") or ""
-        tags = analysis.get("tags") or []
+    for index, section in enumerate(sections):
         rows.append(
             f"""
-            <article class="slide">
-              <div><img src="{image}" alt="{_e(title)}"></div>
-              <div>
-                <p class="eyebrow">Slide {slide.get('id')}</p>
-                <h3>{_e(title)}</h3>
-                <p>{_e(summary)}</p>
-                {f'<p><strong>Instructor context:</strong> {_e(commentary)}</p>' if commentary else ''}
-                <div class="tags">{''.join(f'<span class="tag">{_e(str(tag))}</span>' for tag in tags)}</div>
+            <details id="section-{_e(section["id"])}" class="flow-section" {"open" if index == 0 else ""}>
+              <summary>
+                <span class="outline-number">{_e(section["id"])}</span>
+                <span class="flow-title">{_e(section["heading"])}</span>
+                <span class="flow-count">{len(section["slides"])} slides</span>
+              </summary>
+              <div class="flow-slides">
+                {''.join(_slide_card(slide, slide_analysis.get(_slide_id(slide), {})) for slide in section["slides"])}
               </div>
-            </article>
+            </details>
             """
         )
-    return "<section><h2>Slides And Commentary</h2>" + "\n".join(rows) + "</section>"
+    return f"""
+      <section class="content-band">
+        <div class="section-head"><div><p class="eyebrow">Outline</p><h2>Lecture Flow</h2></div></div>
+        <div class="flow-list">{''.join(rows)}</div>
+      </section>
+    """
+
+
+def _sections_with_slides(outline: List[Dict], slides: List[Dict], slide_analysis: Dict[int, Dict]) -> List[Dict]:
+    if not slides and slide_analysis:
+        slides = [{"id": slide_id} for slide_id in sorted(slide_analysis)]
+    if not slides:
+        return []
+
+    slide_by_id = {_slide_id(slide): slide for slide in slides}
+    if not outline:
+        return [{"id": 1, "heading": "Lecture slides", "slides": slides}]
+
+    sections = []
+    used_ids = set()
+    for index, item in enumerate(outline, start=1):
+        section_slides = []
+        for numeric_id in _outline_slide_ids(item):
+            if numeric_id <= 0:
+                continue
+            used_ids.add(numeric_id)
+            section_slides.append(slide_by_id.get(numeric_id, {"id": numeric_id}))
+        if not section_slides:
+            continue
+        sections.append(
+            {
+                "id": item.get("id") or index,
+                "heading": item.get("heading") or item.get("title") or f"Section {index}",
+                "slides": section_slides,
+            }
+        )
+
+    extras = [slide for slide in slides if _slide_id(slide) not in used_ids]
+    if extras:
+        heading = "Additional slides" if sections else "Lecture slides"
+        sections.append({"id": len(sections) + 1, "heading": heading, "slides": extras})
+    return sections
+
+
+def _slide_card(slide: Dict, analysis: Dict) -> str:
+    slide_id = _slide_id(slide)
+    title = analysis.get("descriptive_filename") or slide.get("filename") or f"Slide {slide_id}"
+    summary = analysis.get("summary") or "No slide summary is available yet."
+    caption = analysis.get("caption")
+    commentary = analysis.get("instructor_commentary") or ""
+    tags = analysis.get("tags") or []
+    image_path = slide.get("relative_path")
+    if image_path:
+        media = f'<img src="{_e("../" + str(image_path))}" alt="{_e(title)}">'
+    else:
+        media = '<span class="missing-slide">Slide image not available</span>'
+    caption_html = f'<p class="caption"><strong>Visible on slide:</strong> {_e(caption)}</p>' if caption else ""
+    commentary_html = f'<p class="commentary">{_e(commentary)}</p>' if commentary else ""
+    tags_html = "".join(f'<span class="tag">{_e(str(tag))}</span>' for tag in tags)
+    return f"""
+      <article id="slide-{slide_id}" class="slide-row">
+        <div class="slide-media">{media}</div>
+        <div class="slide-copy">
+          <div class="slide-title-row"><span class="slide-id">{slide_id}</span><h4>{_e(title)}</h4></div>
+          <p class="slide-summary">{_e(summary)}</p>
+          {caption_html}
+          {commentary_html}
+          <div class="tag-row">{tags_html}</div>
+        </div>
+      </article>
+    """
+
+
+def _slide_id(slide: Dict) -> int:
+    return _numeric_slide_id(slide.get("id") or slide.get("slide_id") or slide.get("filename"))
+
+
+def _analysis_slide_id(item: Dict) -> int:
+    return _numeric_slide_id(item.get("slide_id") or item.get("id") or item.get("descriptive_filename"))
+
+
+def _outline_slide_ids(item: Dict) -> List[int]:
+    if item.get("slide_ids") is not None:
+        return _numeric_slide_ids(item.get("slide_ids"))
+    if item.get("slide_id") is not None:
+        return _numeric_slide_ids(item.get("slide_id"))
+    return []
+
+
+def _numeric_slide_ids(value) -> List[int]:
+    if isinstance(value, (list, tuple, set)):
+        return [_numeric_slide_id(item) for item in value]
+    if isinstance(value, str):
+        matches = re.findall(r"\d+", value)
+        if matches:
+            return [int(match) for match in matches]
+    numeric_id = _numeric_slide_id(value)
+    return [numeric_id] if numeric_id else []
+
+
+def _numeric_slide_id(value) -> int:
+    if value is None:
+        return 0
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        match = re.search(r"\d+", str(value))
+        return int(match.group(0)) if match else 0
 
 
 def _resources_block(resources: List[Dict]) -> str:
     if not resources:
         return ""
-    items = "\n".join(
-        f"<li><a href=\"{_e(item.get('url', '#'))}\">{_e(item.get('title', 'Resource'))}</a>"
-        f"<p>{_e(item.get('summary', ''))}</p></li>"
+    items = "".join(
+        f"""
+        <article class="resource-card">
+          <div>
+            <a href="{_e(item.get('url', '#'))}">{_e(item.get('title', 'Resource'))}</a>
+            <p>{_e(item.get('summary', ''))}</p>
+          </div>
+          <span class="quality {_e(item.get('source_quality', 'medium'))}">{_e(item.get('source_quality', 'medium'))}</span>
+        </article>
+        """
         for item in resources
     )
-    return f"<section class=\"resources\"><h2>Further Learning</h2><ul>{items}</ul></section>"
+    return f"""
+      <section class="content-band">
+        <div class="section-head"><div><p class="eyebrow">Resources</p><h2>Further Learning</h2></div></div>
+        <div class="resource-list">{items}</div>
+      </section>
+    """
 
 
 def _transcript_block(text: str) -> str:
     if not text:
         return ""
-    return f"<section class=\"transcript\"><h2>Transcript</h2><pre>{_e(text)}</pre></section>"
+    paragraphs = "".join(f"<p>{_e(paragraph)}</p>" for paragraph in _paragraphs(text))
+    return f"""
+      <section class="content-band">
+        <div class="section-head"><div><p class="eyebrow">Transcript</p><h2>Lecture Transcript</h2></div></div>
+        <div class="transcript-text">{paragraphs}</div>
+      </section>
+    """
+
+
+def _paragraphs(text: str) -> List[str]:
+    normalized = str(text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not normalized:
+        return []
+    blocks = [block.strip() for block in normalized.split("\n\n") if block.strip()]
+    return [" ".join(block.split()) for block in blocks]
 
 
 def _batch_row(result: FileResult, title: str, description: str, link: Optional[str], thumb: Optional[Path], output_dir: Path) -> str:
