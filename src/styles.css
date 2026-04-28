@@ -44,6 +44,84 @@ button {
   padding: 18px;
 }
 
+.dependency-setup {
+  position: fixed;
+  z-index: 10;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(23, 23, 23, 0.96);
+}
+
+.dependency-panel {
+  display: grid;
+  width: min(620px, calc(100vw - 48px));
+  gap: 18px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 22px;
+  background: var(--panel);
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.38);
+}
+
+.setup-copy {
+  margin-top: 8px;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1.45;
+}
+
+.setup-progress-head,
+.setup-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.setup-progress-head span {
+  font-size: 24px;
+  font-weight: 900;
+}
+
+.setup-step-list {
+  display: grid;
+  gap: 8px;
+}
+
+.setup-step {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 10px 12px;
+  background: var(--panel-soft);
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.setup-step.active {
+  border-color: rgba(222, 118, 83, 0.48);
+  color: var(--accent-strong);
+}
+
+.setup-step.done {
+  border-color: rgba(112, 185, 141, 0.4);
+  color: var(--good);
+}
+
+.setup-step.failed {
+  border-color: rgba(214, 103, 95, 0.48);
+  color: var(--bad);
+}
+
+.setup-actions {
+  justify-content: flex-end;
+}
+
+.setup-actions .primary-button {
+  width: 190px;
+}
+
 .setup,
 .activity {
   min-width: 0;

@@ -125,13 +125,23 @@ Useful options:
 ```bash
 lecture-processor process /path/to/lectures \
   --output /path/to/output \
-  --concurrent 4 \
+  --concurrent 2 \
+  --transcription-quality balanced \
   --whisper-model large-v3 \
   --transcription-engine faster-whisper \
   --ffmpeg-hwaccel auto \
   --slide-backend auto \
   --slide-sensitivity medium
 ```
+
+Transcription quality modes:
+
+- `accurate`: closest to the original higher-accuracy defaults.
+- `balanced`: faster while staying close to the original accuracy target.
+- `fast`: fastest local mode for drafts or quick review.
+
+Whisper model choices now include `large-v3` for best accuracy and `medium.en`
+for faster English lecture transcription.
 
 To generate local HTML only, use the default `--ai-provider none`. To preview the AI study-note flow without an API call:
 
@@ -167,6 +177,7 @@ On Apple Silicon, the Tauri shell detects the platform and passes `--apple-silic
 Useful speed controls:
 
 - `--transcription-engine whisper-cpp` forces the whisper.cpp backend.
+- `--transcription-quality accurate|balanced|fast` controls the faster-whisper accuracy/speed tradeoff.
 - `--require-whisper-cpp-coreml` fails fast unless `pywhispercpp` reports CoreML support.
 - `--ffmpeg-hwaccel auto` uses VideoToolbox on Apple Silicon and falls back to software decode if hardware decode is not accepted for a file.
 - `--slide-backend ffmpeg` forces FFmpeg frame sampling; `auto` falls back to OpenCV if FFmpeg frame extraction is unavailable.

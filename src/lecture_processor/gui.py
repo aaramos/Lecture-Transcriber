@@ -198,7 +198,11 @@ class LectureProcessorApp(tk.Tk):
             config.validate()
             if not discover_mov_files(config.input_dir):
                 raise LectureProcessorError("No .mov files found. Try a different folder.")
-            transcriber = build_transcriber(config.transcription_engine, config.whisper_model)
+            transcriber = build_transcriber(
+                config.transcription_engine,
+                config.whisper_model,
+                quality=config.transcription_quality,
+            )
             ensure_media_tools(
                 ffprobe_path=config.ffprobe_path,
                 ffmpeg_path=config.ffmpeg_path,

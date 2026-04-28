@@ -1,12 +1,12 @@
 use serde::{Deserialize, Serialize};
-use std::env;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
-use tauri::Emitter;
+use std::{env, fs};
+use tauri::{Emitter, Manager};
 
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
@@ -75,6 +75,7 @@ struct ProcessRequest {
     save_normalized_video: bool,
     audio_quality: String,
     transcription_engine: String,
+    transcription_quality: String,
     whisper_model: String,
     slide_sensitivity: String,
     ai_provider: String,
@@ -121,6 +122,26 @@ struct SystemMetrics {
     cpu_status: String,
     gpu_status: String,
     memory_status: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DependencyStatus {
+    ready: bool,
+    message: String,
+    detail: String,
+    runtime_dir: String,
+    processor_cli: String,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DependencyEvent {
+    kind: String,
+    title: String,
+    detail: String,
+    progress: u8,
+    step: u8,
 }
 
 #[derive(Deserialize)]
@@ -477,6 +498,19 @@ fn system_metrics(state: tauri::State<'_, AppState>) -> Result<SystemMetrics, St
 }
 
 #[tauri::command]
+fn dependency_status(app: tauri::AppHandle) -> Result<DependencyStatus, String> {
+    dependency_status_impl(&app)
+}
+
+#[tauri::command]
+async fn setup_dependencies(app: tauri::AppHandle) -> Result<DependencyStatus, String> {
+    let app_for_setup = app.clone();
+    tauri::async_runtime::spawn_blocking(move || setup_dependencies_impl(app_for_setup))
+        .await
+        .map_err(|error| format!("Dependency setup task failed: {error}"))?
+}
+
+#[tauri::command]
 async fn process_batch(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
@@ -745,8 +779,8 @@ fn run_process_batch(
     if !enhance_mode && request.recording_speed == "2x" && !request.confirm_normalization {
         return Err("2x normalization requires confirmation.".to_string());
     }
-    if request.concurrent_files == 0 || request.concurrent_files > 8 {
-        return Err("Concurrent files must be between 1 and 8.".to_string());
+    if request.concurrent_files == 0 || request.concurrent_files > 3 {
+        return Err("Concurrent files must be between 1 and 3.".to_string());
     }
     if !enhance_mode && request.output_dir.trim().is_empty() {
         return Err("Choose an output folder before starting.".to_string());
@@ -767,11 +801,11 @@ fn run_process_batch(
         return Err("A batch is already running.".to_string());
     }
 
-    let project_root = find_project_root()?;
-    let cli = project_root.join(".venv/bin/lecture-processor");
+    let project_root = find_project_root(Some(&app))?;
+    let cli = processor_cli_path(&app, &project_root)?;
     if !cli.exists() {
         return Err(format!(
-            "Processor CLI was not found at {}. Run . ./scripts/dev-env.sh and install dependencies.",
+            "Processor CLI was not found at {}. Run the first-run dependency installer.",
             cli.display()
         ));
     }
@@ -812,6 +846,8 @@ fn run_process_batch(
             request.audio_quality.clone(),
             "--transcription-engine".to_string(),
             request.transcription_engine.clone(),
+            "--transcription-quality".to_string(),
+            request.transcription_quality.clone(),
             "--whisper-model".to_string(),
             request.whisper_model.clone(),
             "--slide-sensitivity".to_string(),
@@ -870,7 +906,7 @@ fn run_process_batch(
         args.push("--no-save-normalized-video".to_string());
     }
 
-    let path = tool_path(&project_root);
+    let path = tool_path(&app, &project_root);
     let mut command = Command::new(cli);
     command
         .args(args)
@@ -1124,7 +1160,195 @@ fn is_apple_silicon() -> bool {
     }
 }
 
-fn find_project_root() -> Result<PathBuf, String> {
+fn dependency_status_impl(app: &tauri::AppHandle) -> Result<DependencyStatus, String> {
+    let runtime_dir = runtime_dir(app)?;
+    let project_root = find_project_root(Some(app)).ok();
+    let processor_cli = project_root
+        .as_ref()
+        .and_then(|root| {
+            let cli = root.join(".venv/bin/lecture-processor");
+            cli.exists().then_some(cli)
+        })
+        .unwrap_or_else(|| runtime_dir.join(".venv/bin/lecture-processor"));
+    let ready = processor_cli.exists();
+    Ok(DependencyStatus {
+        ready,
+        message: if ready {
+            "Dependencies ready".to_string()
+        } else {
+            "Dependencies need setup".to_string()
+        },
+        detail: if ready {
+            "The local processor runtime is available.".to_string()
+        } else {
+            "Install the processor runtime before starting a batch.".to_string()
+        },
+        runtime_dir: runtime_dir.to_string_lossy().to_string(),
+        processor_cli: processor_cli.to_string_lossy().to_string(),
+    })
+}
+
+fn setup_dependencies_impl(app: tauri::AppHandle) -> Result<DependencyStatus, String> {
+    emit_dependency_event(
+        &app,
+        "running",
+        "Preparing setup",
+        "Creating the app support folder.",
+        5,
+        0,
+    );
+    let runtime_dir = runtime_dir(&app)?;
+    fs::create_dir_all(&runtime_dir)
+        .map_err(|error| format!("Could not create runtime folder: {error}"))?;
+
+    emit_dependency_event(
+        &app,
+        "running",
+        "Finding processor source",
+        "Locating the bundled Python processor.",
+        14,
+        0,
+    );
+    let project_root = find_project_root(Some(&app))?;
+
+    let venv_dir = runtime_dir.join(".venv");
+    let venv_python = venv_dir.join("bin/python");
+    if !venv_python.exists() {
+        emit_dependency_event(
+            &app,
+            "running",
+            "Creating Python runtime",
+            "Building a private Python environment for Lecture Processor.",
+            28,
+            1,
+        );
+        let mut command = Command::new("python3");
+        command.args(["-m", "venv"]).arg(&venv_dir);
+        run_setup_command(&mut command, "create Python runtime")?;
+    }
+
+    emit_dependency_event(
+        &app,
+        "running",
+        "Updating installer tools",
+        "Updating pip, setuptools, and wheel.",
+        42,
+        2,
+    );
+    let mut upgrade = Command::new(&venv_python);
+    upgrade.args([
+        "-m",
+        "pip",
+        "install",
+        "--upgrade",
+        "pip",
+        "setuptools",
+        "wheel",
+    ]);
+    run_setup_command(&mut upgrade, "update Python installer tools")?;
+
+    emit_dependency_event(
+        &app,
+        "running",
+        "Installing dependencies",
+        "Downloading and installing transcription, slide, and AI packages.",
+        58,
+        2,
+    );
+    let install_target = format!(
+        "{}[transcription,slides,ai]",
+        project_root.to_string_lossy()
+    );
+    let mut install = Command::new(&venv_python);
+    install.args(["-m", "pip", "install"]).arg(install_target);
+    run_setup_command(&mut install, "install processor dependencies")?;
+
+    emit_dependency_event(
+        &app,
+        "running",
+        "Verifying processor",
+        "Checking that the command line processor starts.",
+        86,
+        3,
+    );
+    let cli = processor_cli_path(&app, &project_root)?;
+    let mut verify = Command::new(&cli);
+    verify
+        .arg("--help")
+        .env("PATH", tool_path(&app, &project_root));
+    run_setup_command(&mut verify, "verify processor command")?;
+
+    emit_dependency_event(
+        &app,
+        "complete",
+        "Setup complete",
+        "Dependencies are installed and ready.",
+        100,
+        4,
+    );
+    dependency_status_impl(&app)
+}
+
+fn run_setup_command(command: &mut Command, action: &str) -> Result<(), String> {
+    let output = command
+        .output()
+        .map_err(|error| format!("Could not {action}: {error}"))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let detail = if stderr.trim().is_empty() {
+        stdout.trim()
+    } else {
+        stderr.trim()
+    };
+    Err(format!("Could not {action}: {}", last_lines(detail, 8)))
+}
+
+fn last_lines(text: &str, count: usize) -> String {
+    let lines = text.lines().collect::<Vec<_>>();
+    let start = lines.len().saturating_sub(count);
+    lines[start..].join("\n")
+}
+
+fn emit_dependency_event(
+    app: &tauri::AppHandle,
+    kind: &str,
+    title: &str,
+    detail: &str,
+    progress: u8,
+    step: u8,
+) {
+    let _ = app.emit(
+        "dependency-event",
+        DependencyEvent {
+            kind: kind.to_string(),
+            title: title.to_string(),
+            detail: detail.to_string(),
+            progress,
+            step,
+        },
+    );
+}
+
+fn runtime_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    Ok(app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("Could not find app support folder: {error}"))?
+        .join("runtime"))
+}
+
+fn processor_cli_path(app: &tauri::AppHandle, project_root: &Path) -> Result<PathBuf, String> {
+    let project_cli = project_root.join(".venv/bin/lecture-processor");
+    if project_cli.exists() {
+        return Ok(project_cli);
+    }
+    Ok(runtime_dir(app)?.join(".venv/bin/lecture-processor"))
+}
+
+fn find_project_root(app: Option<&tauri::AppHandle>) -> Result<PathBuf, String> {
     if let Ok(value) = env::var("LECTURE_PROCESSOR_ROOT") {
         let path = PathBuf::from(value);
         if path.join("pyproject.toml").exists() {
@@ -1138,6 +1362,12 @@ fn find_project_root() -> Result<PathBuf, String> {
     }
     if let Ok(exe) = env::current_exe() {
         starts.push(exe);
+    }
+    if let Some(app) = app {
+        if let Ok(resource_dir) = app.path().resource_dir() {
+            starts.push(resource_dir.join("_up_"));
+            starts.push(resource_dir);
+        }
     }
 
     for start in starts {
@@ -1172,10 +1402,15 @@ fn default_whisper_cpp_model_dir(project_root: &Path, model_name: &str) -> Optio
     }
 }
 
-fn tool_path(project_root: &Path) -> String {
+fn tool_path(app: &tauri::AppHandle, project_root: &Path) -> String {
     let mut paths = vec![
+        runtime_dir(app)
+            .unwrap_or_else(|_| project_root.to_path_buf())
+            .join(".venv/bin"),
         project_root.join(".tools/darwin_arm64"),
         project_root.join(".venv/bin"),
+        PathBuf::from("/opt/homebrew/bin"),
+        PathBuf::from("/usr/local/bin"),
     ];
     if let Some(existing) = env::var_os("PATH") {
         paths.extend(env::split_paths(&existing));
@@ -1411,6 +1646,8 @@ pub fn run() {
             save_api_key,
             has_api_key,
             system_metrics,
+            dependency_status,
+            setup_dependencies,
             process_batch,
             cancel_batch,
             update_file_control

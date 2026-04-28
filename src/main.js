@@ -52,11 +52,12 @@ const DEFAULT_SETTINGS = Object.freeze({
   recordingSpeed: "1x",
   audioQuality: "fast",
   transcriptionEngine: "faster-whisper",
+  transcriptionQuality: "balanced",
   whisperModel: "large-v3",
   slideSensitivity: "medium",
   aiModel: "gemini-2.5-flash-lite",
   enhanceWithGemini: false,
-  concurrentFiles: 4,
+  concurrentFiles: 2,
   saveNormalized: true,
 });
 
@@ -79,6 +80,8 @@ const state = {
   finishedFileReports: 0,
   geminiKeySaved: false,
   enhanceWithGeminiPreference: DEFAULT_SETTINGS.enhanceWithGemini,
+  dependencyReady: false,
+  dependencySetupRunning: false,
   files: new Map(),
   fileOrder: [],
   skippedFiles: new Set(),
@@ -86,6 +89,15 @@ const state = {
 };
 
 const elements = {
+  setupScreen: document.querySelector("#setupScreen"),
+  setupStatusTitle: document.querySelector("#setupStatusTitle"),
+  setupStatusMeta: document.querySelector("#setupStatusMeta"),
+  setupProgressBar: document.querySelector("#setupProgressBar"),
+  setupProgressPercent: document.querySelector("#setupProgressPercent"),
+  setupStepList: document.querySelector("#setupStepList"),
+  setupInstallButton: document.querySelector("#setupInstallButton"),
+  setupRecheckButton: document.querySelector("#setupRecheckButton"),
+  setupError: document.querySelector("#setupError"),
   dropZone: document.querySelector("#dropZone"),
   chooseFolderButton: document.querySelector("#chooseFolderButton"),
   clearFolderButton: document.querySelector("#clearFolderButton"),
@@ -125,6 +137,7 @@ const elements = {
   canceledCount: document.querySelector("#canceledCount"),
   audioQuality: document.querySelector("#audioQuality"),
   transcriptionEngine: document.querySelector("#transcriptionEngine"),
+  transcriptionQuality: document.querySelector("#transcriptionQuality"),
   whisperModel: document.querySelector("#whisperModel"),
   slideSensitivity: document.querySelector("#slideSensitivity"),
   enhanceWithGemini: document.querySelector("#enhanceWithGemini"),
@@ -139,7 +152,9 @@ const elements = {
 };
 
 window.__TAURI__?.event?.listen?.("processor-event", (event) => handleProcessorEvent(event.payload));
+window.__TAURI__?.event?.listen?.("dependency-event", (event) => handleDependencyEvent(event.payload));
 loadPersistedSettings();
+refreshDependencyStatus();
 refreshGeminiKeyStatus();
 cleanupTempFilesAtLaunch();
 setupDragAndDrop();
@@ -173,6 +188,8 @@ elements.chooseFolderButton.addEventListener("click", chooseInputFolder);
 elements.chooseOutputButton.addEventListener("click", chooseOutputFolder);
 elements.clearFolderButton.addEventListener("click", clearFolder);
 elements.startButton.addEventListener("click", startBatch);
+elements.setupInstallButton.addEventListener("click", setupDependencies);
+elements.setupRecheckButton.addEventListener("click", refreshDependencyStatus);
 elements.cancelRunButton.addEventListener("click", cancelBatch);
 elements.openOutputButton.addEventListener("click", openOutput);
 elements.settingsButton.addEventListener("click", () => showDialog(elements.settingsDialog));
@@ -194,6 +211,7 @@ elements.concurrentFiles.addEventListener("input", () => {
 [
   elements.audioQuality,
   elements.transcriptionEngine,
+  elements.transcriptionQuality,
   elements.whisperModel,
   elements.slideSensitivity,
   elements.enhanceWithGemini,
@@ -297,6 +315,10 @@ function clearFolder() {
 
 async function startBatch() {
   if (state.running || !state.inputDir || processableFileCount() === 0) return;
+  if (!state.dependencyReady) {
+    await refreshDependencyStatus();
+    if (!state.dependencyReady) return;
+  }
 
   if (state.recordingSpeed === "2x") {
     const confirmed = await confirmNormalization();
@@ -327,6 +349,7 @@ async function startBatch() {
     saveNormalizedVideo: elements.saveNormalized.checked,
     audioQuality: elements.audioQuality.value,
     transcriptionEngine: elements.transcriptionEngine.value,
+    transcriptionQuality: elements.transcriptionQuality.value,
     whisperModel: elements.whisperModel.value,
     slideSensitivity: elements.slideSensitivity.value,
     aiProvider: needsGemini() ? "gemini" : "none",
@@ -355,6 +378,117 @@ async function startBatch() {
     state.processorStarted = false;
     setRunning(false);
   }
+}
+
+async function refreshDependencyStatus() {
+  try {
+    const status = await invoke("dependency_status");
+    applyDependencyStatus(status);
+  } catch (error) {
+    showDependencySetup({
+      message: "Dependency check failed",
+      detail: String(error),
+      progress: 0,
+      failed: true,
+    });
+  }
+}
+
+async function setupDependencies() {
+  if (state.dependencySetupRunning) return;
+  state.dependencySetupRunning = true;
+  elements.setupInstallButton.disabled = true;
+  elements.setupRecheckButton.disabled = true;
+  setSetupError("");
+  updateSetupProgress({
+    title: "Starting setup",
+    detail: "Preparing the app support folder.",
+    progress: 2,
+    step: 0,
+  });
+
+  try {
+    const status = await invoke("setup_dependencies");
+    applyDependencyStatus(status);
+  } catch (error) {
+    showDependencySetup({
+      message: "Setup failed",
+      detail: String(error),
+      progress: 100,
+      failed: true,
+    });
+  } finally {
+    state.dependencySetupRunning = false;
+    elements.setupInstallButton.disabled = false;
+    elements.setupRecheckButton.disabled = false;
+  }
+}
+
+function applyDependencyStatus(status) {
+  state.dependencyReady = Boolean(status?.ready);
+  if (state.dependencyReady) {
+    elements.setupScreen.classList.add("hidden");
+    render();
+    return;
+  }
+
+  showDependencySetup({
+    message: status?.message || "Dependencies need setup",
+    detail: status?.detail || "Install the local processor runtime before starting a batch.",
+    progress: 0,
+    failed: false,
+  });
+}
+
+function showDependencySetup({ message, detail, progress, failed }) {
+  state.dependencyReady = false;
+  elements.setupScreen.classList.remove("hidden");
+  elements.setupStatusTitle.textContent = message;
+  elements.setupStatusMeta.textContent = detail;
+  setSetupProgress(progress || 0);
+  setSetupError(failed ? detail : "");
+  markSetupSteps(failed ? 3 : 0, failed);
+}
+
+function handleDependencyEvent(event) {
+  if (!event || typeof event !== "object") return;
+  updateSetupProgress({
+    title: event.title || "Installing dependencies",
+    detail: event.detail || "",
+    progress: event.progress || 0,
+    step: event.step || 0,
+    failed: event.kind === "failed",
+  });
+  if (event.kind === "failed") {
+    setSetupError(event.detail || "Setup failed.");
+  }
+}
+
+function updateSetupProgress({ title, detail, progress, step, failed }) {
+  elements.setupScreen.classList.remove("hidden");
+  elements.setupStatusTitle.textContent = title;
+  elements.setupStatusMeta.textContent = detail;
+  setSetupProgress(progress);
+  markSetupSteps(step, failed);
+}
+
+function setSetupProgress(progress) {
+  const value = clampPercent(progress);
+  elements.setupProgressBar.style.width = `${value}%`;
+  elements.setupProgressPercent.textContent = `${value}%`;
+}
+
+function markSetupSteps(activeIndex, failed) {
+  [...elements.setupStepList.children].forEach((step, index) => {
+    step.classList.toggle("done", !failed && index < activeIndex);
+    step.classList.toggle("active", !failed && index === activeIndex);
+    step.classList.toggle("failed", Boolean(failed && index === activeIndex));
+  });
+}
+
+function setSetupError(message) {
+  elements.setupError.textContent = message;
+  elements.setupError.classList.toggle("hidden", !message);
 }
 
 async function cancelBatch() {
@@ -749,14 +883,14 @@ function confirmNormalization() {
 function validateSettings(options = {}) {
   const { showDialogOnError = true } = options;
   const value = Number.parseInt(elements.concurrentFiles.value, 10);
-  const valid = Number.isInteger(value) && value >= 1 && value <= 8;
+  const valid = Number.isInteger(value) && value >= 1 && value <= 3;
   elements.concurrentFiles.classList.toggle("invalid", !valid);
   if (!valid) {
     if (showDialogOnError) {
       showDialog(elements.settingsDialog);
     }
     elements.concurrentFiles.focus();
-    elements.runMeta.textContent = "Concurrent files must be between 1 and 8.";
+    elements.runMeta.textContent = "Concurrent files must be between 1 and 3.";
     return null;
   }
   if (needsGemini() && !state.geminiKeySaved && !elements.geminiApiKey.value.trim()) {
@@ -1318,6 +1452,7 @@ function applySettings(settings) {
     : DEFAULT_SETTINGS.recordingSpeed;
   setSelectValue(elements.audioQuality, settings.audioQuality, DEFAULT_SETTINGS.audioQuality);
   setSelectValue(elements.transcriptionEngine, settings.transcriptionEngine, DEFAULT_SETTINGS.transcriptionEngine);
+  setSelectValue(elements.transcriptionQuality, settings.transcriptionQuality, DEFAULT_SETTINGS.transcriptionQuality);
   setSelectValue(elements.whisperModel, settings.whisperModel, DEFAULT_SETTINGS.whisperModel);
   setSelectValue(elements.slideSensitivity, settings.slideSensitivity, DEFAULT_SETTINGS.slideSensitivity);
   setSelectValue(elements.aiModel, settings.aiModel, DEFAULT_SETTINGS.aiModel);
@@ -1332,12 +1467,13 @@ function applySettings(settings) {
 
 function saveCurrentSettings() {
   const concurrentFiles = Number.parseInt(elements.concurrentFiles.value, 10);
-  if (!Number.isInteger(concurrentFiles) || concurrentFiles < 1 || concurrentFiles > 8) return;
+  if (!Number.isInteger(concurrentFiles) || concurrentFiles < 1 || concurrentFiles > 3) return;
 
   const settings = {
     recordingSpeed: state.recordingSpeed,
     audioQuality: elements.audioQuality.value,
     transcriptionEngine: elements.transcriptionEngine.value,
+    transcriptionQuality: elements.transcriptionQuality.value,
     whisperModel: elements.whisperModel.value,
     slideSensitivity: elements.slideSensitivity.value,
     enhanceWithGemini: state.folderMode === "processed" ? state.enhanceWithGeminiPreference : elements.enhanceWithGemini.checked,
@@ -1430,7 +1566,7 @@ function setSelectValue(select, value, fallback) {
 
 function validConcurrentFiles(value) {
   const parsed = Number.parseInt(value, 10);
-  return Number.isInteger(parsed) && parsed >= 1 && parsed <= 8 ? parsed : DEFAULT_SETTINGS.concurrentFiles;
+  return Number.isInteger(parsed) && parsed >= 1 && parsed <= 3 ? parsed : DEFAULT_SETTINGS.concurrentFiles;
 }
 
 function renderNormalizationWarning() {

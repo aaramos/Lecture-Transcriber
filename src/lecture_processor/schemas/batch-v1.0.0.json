@@ -19,6 +19,7 @@
         "recording_speed": {"type": "string", "enum": ["1x", "2x"]},
         "audio_quality": {"type": "string", "enum": ["fast", "high"]},
         "transcription_engine": {"type": "string"},
+        "transcription_quality": {"type": "string", "enum": ["accurate", "balanced", "fast"]},
         "whisper_model": {"type": "string"},
         "slide_sensitivity": {"type": "string", "enum": ["low", "medium", "high"]},
         "concurrent_files": {"type": "integer", "minimum": 1, "maximum": 8},

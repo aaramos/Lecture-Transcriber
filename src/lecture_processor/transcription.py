@@ -4,7 +4,7 @@ import threading
 from pathlib import Path
 from typing import Optional, Protocol
 
-from .config import TranscriptionEngine
+from .config import TranscriptionEngine, TranscriptionQuality
 from .errors import DependencyMissingError, ProcessingError
 from .models import TranscriptResult, TranscriptSegment
 
@@ -46,28 +46,66 @@ class LockedTranscriber:
 
 
 class FasterWhisperTranscriber:
-    TRANSCRIBE_OPTIONS = {
+    COMMON_TRANSCRIBE_OPTIONS = {
         "language": "en",
         "task": "transcribe",
-        "beam_size": 5,
-        "best_of": 5,
-        "temperature": [0.0, 0.2, 0.4],
         "compression_ratio_threshold": 2.2,
         "log_prob_threshold": -1.0,
         "no_speech_threshold": 0.6,
         "condition_on_previous_text": False,
         "vad_filter": True,
         "vad_parameters": {"min_silence_duration_ms": 500},
-        "repetition_penalty": 1.05,
-        "no_repeat_ngram_size": 5,
+    }
+    QUALITY_PRESETS = {
+        TranscriptionQuality.ACCURATE: {
+            "model_options": {"compute_type": "default"},
+            "transcribe_options": {
+                "beam_size": 5,
+                "best_of": 5,
+                "temperature": [0.0, 0.2, 0.4],
+                "repetition_penalty": 1.05,
+                "no_repeat_ngram_size": 5,
+            },
+        },
+        TranscriptionQuality.BALANCED: {
+            "model_options": {"compute_type": "default"},
+            "transcribe_options": {
+                "beam_size": 2,
+                "best_of": 2,
+                "temperature": 0.0,
+                "repetition_penalty": 1.03,
+                "no_repeat_ngram_size": 5,
+            },
+        },
+        TranscriptionQuality.FAST: {
+            "model_options": {"compute_type": "int8"},
+            "transcribe_options": {
+                "beam_size": 1,
+                "best_of": 1,
+                "temperature": 0.0,
+            },
+        },
     }
 
-    def __init__(self, model_name: str) -> None:
+    def __init__(
+        self,
+        model_name: str,
+        quality: TranscriptionQuality = TranscriptionQuality.BALANCED,
+    ) -> None:
         module = importlib.import_module("faster_whisper")
-        self._model = module.WhisperModel(model_name)
+        self.quality = TranscriptionQuality(quality)
+        preset = self.QUALITY_PRESETS[self.quality]
+        self.model_options = dict(preset["model_options"])
+        self.transcribe_options = {
+            **self.COMMON_TRANSCRIBE_OPTIONS,
+            **preset["transcribe_options"],
+        }
+        self._model = module.WhisperModel(model_name, **self.model_options)
         self.metadata = {
             "resolved_engine": "faster-whisper",
             "model": model_name,
+            "quality": self.quality.value,
+            "compute_type": self.model_options.get("compute_type", ""),
             "coreml_used": False,
             "language": "en",
             "audio_input": "clean_16khz_mono_wav",
@@ -76,7 +114,7 @@ class FasterWhisperTranscriber:
         }
 
     def transcribe(self, media_path: Path) -> TranscriptResult:
-        segments_iter, _info = self._model.transcribe(str(media_path), **self.TRANSCRIBE_OPTIONS)
+        segments_iter, _info = self._model.transcribe(str(media_path), **self.transcribe_options)
         segments = []
         text_parts = []
         for segment in segments_iter:
@@ -180,6 +218,7 @@ def build_transcriber(
     engine: TranscriptionEngine,
     model_name: str,
     *,
+    quality: TranscriptionQuality = TranscriptionQuality.BALANCED,
     prefer_whisper_cpp: bool = False,
     whisper_cpp_model_dir: str = "",
     require_whisper_cpp_coreml: bool = False,
@@ -219,7 +258,7 @@ def build_transcriber(
 
     if engine in (TranscriptionEngine.AUTO, TranscriptionEngine.FASTER_WHISPER):
         try:
-            return LockedTranscriber(FasterWhisperTranscriber(model_name))
+            return LockedTranscriber(FasterWhisperTranscriber(model_name, quality))
         except ImportError:
             if engine is TranscriptionEngine.FASTER_WHISPER:
                 raise DependencyMissingError(

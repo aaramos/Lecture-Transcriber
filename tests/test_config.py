@@ -2,7 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from lecture_processor.config import BatchConfig, RecordingSpeed
+from lecture_processor.config import BatchConfig, RecordingSpeed, TranscriptionQuality
 from lecture_processor.errors import LectureProcessorError
 
 
@@ -33,6 +33,13 @@ class BatchConfigTests(unittest.TestCase):
 
             with self.assertRaises(LectureProcessorError):
                 config.validate()
+
+    def test_default_transcription_quality_is_balanced(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            config = BatchConfig(input_dir=folder, output_dir=folder / "out")
+
+            self.assertIs(config.transcription_quality, TranscriptionQuality.BALANCED)
 
 
 if __name__ == "__main__":

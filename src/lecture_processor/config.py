@@ -30,6 +30,12 @@ class TranscriptionEngine(str, Enum):
     NONE = "none"
 
 
+class TranscriptionQuality(str, Enum):
+    ACCURATE = "accurate"
+    BALANCED = "balanced"
+    FAST = "fast"
+
+
 class FfmpegHwAccel(str, Enum):
     AUTO = "auto"
     NONE = "none"
@@ -60,6 +66,7 @@ class BatchConfig:
     audio_quality: AudioQuality = AudioQuality.FAST
     slide_sensitivity: SlideSensitivity = SlideSensitivity.MEDIUM
     transcription_engine: TranscriptionEngine = TranscriptionEngine.FASTER_WHISPER
+    transcription_quality: TranscriptionQuality = TranscriptionQuality.BALANCED
     whisper_model: str = "large-v3"
     whisper_cpp_model_dir: str = ""
     require_whisper_cpp_coreml: bool = False

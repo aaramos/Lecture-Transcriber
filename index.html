@@ -7,6 +7,39 @@
     <link rel="stylesheet" href="src/styles.css" />
   </head>
   <body>
+    <section id="setupScreen" class="dependency-setup hidden" aria-live="polite">
+      <div class="dependency-panel">
+        <div>
+          <p class="eyebrow">First Run</p>
+          <h1>Setup Required</h1>
+          <p id="setupStatusMeta" class="setup-copy">Checking local tools...</p>
+        </div>
+
+        <div class="setup-progress-head">
+          <h2 id="setupStatusTitle">Checking dependencies</h2>
+          <span id="setupProgressPercent">0%</span>
+        </div>
+
+        <div class="progress-track">
+          <div id="setupProgressBar" class="progress-bar"></div>
+        </div>
+
+        <div id="setupStepList" class="setup-step-list">
+          <div class="setup-step active">Inspecting app support folder</div>
+          <div class="setup-step">Creating Python runtime</div>
+          <div class="setup-step">Installing processor dependencies</div>
+          <div class="setup-step">Verifying command line tools</div>
+        </div>
+
+        <div class="setup-actions">
+          <button id="setupInstallButton" class="primary-button" type="button">Install Dependencies</button>
+          <button id="setupRecheckButton" class="secondary-button" type="button">Recheck</button>
+        </div>
+
+        <div id="setupError" class="inline-error hidden"></div>
+      </div>
+    </section>
+
     <main id="app">
       <section class="setup">
         <div class="title-row">
@@ -179,12 +212,24 @@
             </label>
 
             <label>
+              Transcription Quality
+              <select id="transcriptionQuality">
+                <option value="balanced" selected>Balanced</option>
+                <option value="accurate">Accurate</option>
+                <option value="fast">Fast</option>
+              </select>
+              <span class="field-help">Balanced is faster while staying close to today's accuracy.</span>
+            </label>
+
+            <label>
               Whisper Model
               <select id="whisperModel">
                 <option value="large-v3">large-v3</option>
+                <option value="medium.en">medium.en</option>
                 <option value="medium">medium</option>
                 <option value="small">small</option>
               </select>
+              <span class="field-help">large-v3 is most accurate. medium.en is faster for English lectures.</span>
             </label>
 
             <label>
@@ -207,8 +252,8 @@
 
             <label>
               Concurrent Files
-              <input id="concurrentFiles" type="number" min="1" max="8" value="4" />
-              <span class="field-help">Use 1–2 on smaller laptops, 4 by default, 6–8 on high-memory workstations.</span>
+              <input id="concurrentFiles" type="number" min="1" max="3" value="2" />
+              <span class="field-help">Use 2 by default. Use 3 only on stronger Macs.</span>
             </label>
 
             <label class="checkbox-row">

@@ -30,10 +30,24 @@ def _require_command(command: str) -> str:
     local = _local_tool_candidate(command)
     if local:
         return str(local)
+    system = _known_system_tool_candidate(command)
+    if system:
+        return str(system)
     resolved = shutil.which(command)
     if not resolved:
         raise DependencyMissingError(f"Required command not found on PATH: {command}")
     return resolved
+
+
+def _known_system_tool_candidate(command: str) -> Optional[Path]:
+    if command not in {"ffmpeg", "ffprobe"}:
+        return None
+
+    for root in (Path("/opt/homebrew/bin"), Path("/usr/local/bin")):
+        candidate = root / command
+        if candidate.exists():
+            return candidate
+    return None
 
 
 def _local_tool_candidate(command: str) -> Optional[Path]:

@@ -49,6 +49,8 @@
       "properties": {
         "engine": {"type": "string", "enum": ["whisper-cpp", "faster-whisper", "openai-whisper", "none"]},
         "model": {"type": "string"},
+        "quality": {"type": "string", "enum": ["accurate", "balanced", "fast"]},
+        "compute_type": {"type": "string"},
         "coreml_used": {"type": "boolean"},
         "language": {"type": "string", "minLength": 2, "maxLength": 5},
         "word_count": {"type": "integer", "minimum": 0},

@@ -113,6 +113,8 @@ def build_lecture_artifact(
         "transcript": {
             "engine": _resolved_transcription_engine(transcriber_metadata, config),
             "model": str(transcriber_metadata.get("model") or config.whisper_model or ""),
+            "quality": str(transcriber_metadata.get("quality") or config.transcription_quality.value),
+            "compute_type": str(transcriber_metadata.get("compute_type") or ""),
             "coreml_used": bool(transcriber_metadata.get("coreml_used", False)),
             "language": str(transcriber_metadata.get("language") or "en"),
             "word_count": transcript.word_count,
@@ -208,6 +210,7 @@ def build_batch_artifact(
             "recording_speed": config.recording_speed.value,
             "audio_quality": config.audio_quality.value,
             "transcription_engine": config.transcription_engine.value,
+            "transcription_quality": config.transcription_quality.value,
             "whisper_model": config.whisper_model,
             "slide_sensitivity": config.slide_sensitivity.value,
             "concurrent_files": config.concurrent_files,

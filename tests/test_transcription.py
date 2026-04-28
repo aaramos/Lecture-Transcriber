@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from lecture_processor.config import TranscriptionEngine
+from lecture_processor.config import TranscriptionEngine, TranscriptionQuality
 from lecture_processor.errors import DependencyMissingError, ProcessingError
 from lecture_processor.transcription import (
     FasterWhisperTranscriber,
@@ -65,12 +65,13 @@ class TranscriptionTests(unittest.TestCase):
 
         self.assertIsInstance(transcriber._transcriber, NullTranscriber)
 
-    def test_faster_whisper_uses_safer_english_transcription_options(self):
+    def test_faster_whisper_uses_balanced_english_transcription_options_by_default(self):
         captured = {}
 
         class FakeWhisperModel:
-            def __init__(self, model_name):
+            def __init__(self, model_name, **model_options):
                 captured["model_name"] = model_name
+                captured["model_options"] = model_options
 
             def transcribe(self, media_path, **options):
                 captured["media_path"] = media_path
@@ -83,12 +84,54 @@ class TranscriptionTests(unittest.TestCase):
 
         self.assertEqual(result.text, "hello lecture")
         self.assertEqual(captured["model_name"], "large-v3")
+        self.assertEqual(captured["model_options"]["compute_type"], "default")
         self.assertEqual(captured["media_path"], "clean.wav")
         self.assertEqual(captured["options"]["language"], "en")
         self.assertFalse(captured["options"]["condition_on_previous_text"])
         self.assertTrue(captured["options"]["vad_filter"])
-        self.assertEqual(captured["options"]["temperature"], [0.0, 0.2, 0.4])
+        self.assertEqual(captured["options"]["beam_size"], 2)
+        self.assertEqual(captured["options"]["best_of"], 2)
+        self.assertEqual(captured["options"]["temperature"], 0.0)
         self.assertEqual(captured["options"]["no_repeat_ngram_size"], 5)
+
+    def test_faster_whisper_quality_modes_adjust_model_and_decode_options(self):
+        captured = []
+
+        class FakeWhisperModel:
+            def __init__(self, model_name, **model_options):
+                captured.append({"model_name": model_name, "model_options": model_options})
+
+            def transcribe(self, media_path, **options):
+                captured[-1]["options"] = options
+                return iter([FakeFasterWhisperSegment()]), object()
+
+        fake_module = type("FakeFasterWhisperModule", (), {"WhisperModel": FakeWhisperModel})
+        with mock.patch("lecture_processor.transcription.importlib.import_module", return_value=fake_module):
+            FasterWhisperTranscriber("large-v3", TranscriptionQuality.ACCURATE).transcribe(Path("clean.wav"))
+            FasterWhisperTranscriber("large-v3", TranscriptionQuality.FAST).transcribe(Path("clean.wav"))
+
+        self.assertEqual(captured[0]["model_options"]["compute_type"], "default")
+        self.assertEqual(captured[0]["options"]["beam_size"], 5)
+        self.assertEqual(captured[0]["options"]["best_of"], 5)
+        self.assertEqual(captured[0]["options"]["temperature"], [0.0, 0.2, 0.4])
+        self.assertEqual(captured[1]["model_options"]["compute_type"], "int8")
+        self.assertEqual(captured[1]["options"]["beam_size"], 1)
+        self.assertEqual(captured[1]["options"]["best_of"], 1)
+        self.assertEqual(captured[1]["options"]["temperature"], 0.0)
+        self.assertNotIn("no_repeat_ngram_size", captured[1]["options"])
+
+    def test_build_transcriber_passes_requested_quality_to_faster_whisper(self):
+        with mock.patch(
+            "lecture_processor.transcription.FasterWhisperTranscriber",
+            return_value=NullTranscriber(),
+        ) as constructor:
+            build_transcriber(
+                TranscriptionEngine.FASTER_WHISPER,
+                "medium.en",
+                quality=TranscriptionQuality.ACCURATE,
+            )
+
+        constructor.assert_called_once_with("medium.en", TranscriptionQuality.ACCURATE)
 
     def test_whisper_cpp_runtime_defaults_disable_unstable_metal_decoder(self):
         with mock.patch.dict(os.environ, {}, clear=True):

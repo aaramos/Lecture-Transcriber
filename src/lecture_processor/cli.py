@@ -18,6 +18,7 @@ from .config import (
     SlideBackend,
     SlideSensitivity,
     TranscriptionEngine,
+    TranscriptionQuality,
 )
 from .ai.enrichment import enrich_lecture_artifact
 from .errors import LectureProcessorError
@@ -53,6 +54,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--transcription-engine",
         choices=[item.value for item in TranscriptionEngine],
         default="faster-whisper",
+    )
+    process.add_argument(
+        "--transcription-quality",
+        choices=[item.value for item in TranscriptionQuality],
+        default="balanced",
     )
     process.add_argument("--whisper-model", default="large-v3")
     process.add_argument("--whisper-cpp-model-dir", default="")
@@ -131,6 +137,7 @@ def _run_process(args) -> int:
         slide_sensitivity=SlideSensitivity(args.slide_sensitivity),
         slide_backend=SlideBackend(args.slide_backend),
         transcription_engine=TranscriptionEngine(args.transcription_engine),
+        transcription_quality=TranscriptionQuality(args.transcription_quality),
         whisper_model=args.whisper_model,
         whisper_cpp_model_dir=args.whisper_cpp_model_dir,
         require_whisper_cpp_coreml=args.require_whisper_cpp_coreml,
@@ -168,6 +175,7 @@ def _run_process(args) -> int:
         transcriber = build_transcriber(
             config.transcription_engine,
             config.whisper_model,
+            quality=config.transcription_quality,
             prefer_whisper_cpp=False,
             whisper_cpp_model_dir=config.whisper_cpp_model_dir,
             require_whisper_cpp_coreml=config.require_whisper_cpp_coreml,
