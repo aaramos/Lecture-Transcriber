@@ -5,7 +5,7 @@
   "type": "object",
   "required": [
     "schema_version", "provider", "model", "started_at", "finished_at",
-    "title", "executive_summary", "outline", "slide_analysis", "warnings"
+    "title", "executive_summary", "formatted_transcript", "outline", "slide_analysis", "resources", "warnings"
   ],
   "additionalProperties": false,
   "properties": {
@@ -20,6 +20,7 @@
     "output_token_estimate": {"type": "integer", "minimum": 0},
     "title": {"type": "string", "minLength": 1, "maxLength": 200},
     "executive_summary": {"type": "string", "minLength": 1, "maxLength": 2000},
+    "formatted_transcript": {"type": "string", "minLength": 1, "maxLength": 50000},
     "outline": {
       "type": "array",
       "items": {
@@ -40,11 +41,12 @@
       "type": "array",
       "items": {
         "type": "object",
-        "required": ["slide_id", "summary", "tags", "instructor_commentary"],
+        "required": ["slide_id", "descriptive_filename", "caption", "summary", "tags", "instructor_commentary"],
         "additionalProperties": false,
         "properties": {
           "slide_id": {"type": "integer", "minimum": 1},
           "descriptive_filename": {"type": ["string", "null"], "maxLength": 200},
+          "caption": {"type": ["string", "null"], "maxLength": 1000},
           "summary": {"type": "string", "minLength": 1, "maxLength": 1000},
           "tags": {
             "type": "array",
@@ -65,7 +67,7 @@
           "title": {"type": "string", "minLength": 1, "maxLength": 200},
           "url": {"type": "string", "format": "uri"},
           "summary": {"type": "string", "minLength": 1, "maxLength": 500},
-          "source_quality": {"type": "string", "enum": ["academic", "official", "industry", "reference", "other"]}
+          "source_quality": {"type": "string", "enum": ["high", "medium"]}
         }
       }
     },

@@ -28,6 +28,7 @@ class MockProvider:
                 {
                     "slide_id": 1,
                     "descriptive_filename": None,
+                    "caption": None,
                     "summary": "No slides were extracted for this lecture.",
                     "tags": ["lecture"],
                     "instructor_commentary": summary,
@@ -38,6 +39,7 @@ class MockProvider:
             executive_summary=summary,
             outline=outline,
             slide_analysis=slide_analysis,
+            formatted_transcript=_formatted_transcript(request.transcript_text),
             resources=[],
             input_token_estimate=max(1, len(request.transcript_text.split())),
             output_token_estimate=250 + (60 * len(slide_analysis)),
@@ -59,6 +61,10 @@ def _summary_from_transcript(text: str) -> str:
     if len(clean) <= 420:
         return clean
     return clean[:417].rsplit(" ", 1)[0] + "..."
+
+
+def _formatted_transcript(text: str) -> str:
+    return " ".join(str(text or "").split())
 
 
 def _outline_from_slides(request: AnalyzeLectureRequest) -> list:
@@ -90,6 +96,7 @@ def _slide_analysis(request: AnalyzeLectureRequest, slide: dict) -> dict:
     return {
         "slide_id": slide_id,
         "descriptive_filename": f"slide_{slide_id:04d}_study_note.png",
+        "caption": None,
         "summary": summary,
         "tags": ["lecture", "slide", f"slide-{slide_id}"],
         "instructor_commentary": commentary,

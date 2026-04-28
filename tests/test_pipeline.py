@@ -463,8 +463,10 @@ class BatchProcessorTests(unittest.TestCase):
             lecture_json = json.loads((output / "lecture" / "lecture.json").read_text(encoding="utf-8"))
             self.assertEqual(lecture_json["enrichment"]["provider"], "mock")
             self.assertIn("Hello Lecture", lecture_json["enrichment"]["title"])
+            self.assertIn("formatted_transcript", lecture_json["enrichment"])
             html = (output / "lecture" / "html" / "index.html").read_text(encoding="utf-8")
-            self.assertIn("Lecture Study Page", html)
+            self.assertIn("AI Study Notes", html)
+            self.assertIn("Lecture Transcript", html)
             batch = json.loads((output / "batch.json").read_text(encoding="utf-8"))
             self.assertEqual(batch["summary"]["enriched"], 1)
 

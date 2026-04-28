@@ -59,6 +59,17 @@ class GeminiExportTests(unittest.TestCase):
                 prompt = archive.read("prompt.md").decode("utf-8")
                 self.assertIn("Return JSON only", prompt)
                 self.assertIn("slide_analysis", prompt)
+                self.assertIn("Google Search grounding", prompt)
+                self.assertIn("Slide captions", prompt)
+                self.assertIn("formatted_transcript", prompt)
+                schema = json.loads(archive.read("expected-response-schema.json").decode("utf-8"))
+                self.assertIn("formatted_transcript", schema["required"])
+                slide_item = schema["properties"]["slide_analysis"]["items"]
+                self.assertIn("caption", slide_item["required"])
+                self.assertEqual(
+                    ["high", "medium"],
+                    schema["properties"]["resources"]["items"]["properties"]["source_quality"]["enum"],
+                )
 
     def test_export_accepts_lecture_json_path(self):
         with tempfile.TemporaryDirectory() as tmp:

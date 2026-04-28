@@ -1,4 +1,5 @@
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Dict, List, Optional, Protocol
 
 
@@ -19,6 +20,7 @@ class AnalyzeLectureRequest:
     slides: List[Dict]
     duration_minutes: float
     prompt_version: str = "v1"
+    lecture_dir: Optional[Path] = None
 
 
 @dataclass(frozen=True)
@@ -27,6 +29,7 @@ class AnalyzeLectureResponse:
     executive_summary: str
     outline: List[Dict]
     slide_analysis: List[Dict]
+    formatted_transcript: str = ""
     resources: List[Dict] = field(default_factory=list)
     input_token_estimate: int = 0
     output_token_estimate: int = 0

@@ -215,6 +215,7 @@ Lecture: `{lecture_id}`
 
 - Is the title useful?
 - Is the summary accurate and not too long?
+- Is the formatted transcript readable while still faithful to the original lecture?
 - Do slide notes match the transcript and images?
 - Are tags useful for search?
 - Does the JSON parse without manual cleanup?

@@ -29,7 +29,7 @@ def enrich_lecture_artifact(
         api_key=_api_key_for(config.ai_provider),
         model=config.ai_model or info.default_model,
     )
-    response = provider.analyze_lecture(_request_from_artifact(artifact))
+    response = provider.analyze_lecture(_request_from_artifact(artifact, lecture_json_path.parent))
     finished_at = utc_now_iso()
     enrichment = _enrichment_payload(
         response,
@@ -51,7 +51,7 @@ def enrich_lecture_artifact(
     return artifact
 
 
-def _request_from_artifact(artifact: Dict) -> AnalyzeLectureRequest:
+def _request_from_artifact(artifact: Dict, lecture_dir: Path) -> AnalyzeLectureRequest:
     duration = float(artifact.get("media", {}).get("duration_seconds") or 0.0) / 60.0
     return AnalyzeLectureRequest(
         lecture_id=artifact["lecture_id"],
@@ -59,6 +59,7 @@ def _request_from_artifact(artifact: Dict) -> AnalyzeLectureRequest:
         segments=list(artifact.get("transcript", {}).get("segments") or []),
         slides=list(artifact.get("slides") or []),
         duration_minutes=duration,
+        lecture_dir=lecture_dir,
     )
 
 
@@ -83,6 +84,7 @@ def _enrichment_payload(
         "output_token_estimate": response.output_token_estimate,
         "title": response.title,
         "executive_summary": response.executive_summary,
+        "formatted_transcript": response.formatted_transcript,
         "outline": response.outline,
         "slide_analysis": response.slide_analysis,
         "resources": response.resources,
