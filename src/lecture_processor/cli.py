@@ -25,7 +25,7 @@ from .gemini_export import export_gemini_test_package
 from .html_renderer import render_lecture_page
 from .media import ensure_media_tools, resolve_media_tool
 from .models import BatchSummary, FileStatus
-from .pipeline import BatchProcessor, discover_mov_files
+from .pipeline import BatchProcessor, discover_mov_files, enrich_processed_batch
 from .slides import SlideExtractor
 from .temp_cleanup import cleanup_slide_temp_dirs
 from .transcription import build_transcriber
@@ -74,6 +74,15 @@ def build_parser() -> argparse.ArgumentParser:
     enrich.add_argument("--ai-model", default="")
     enrich.add_argument("--render-html", action="store_true")
 
+    enrich_batch = subparsers.add_parser("enrich-batch", help="Enhance an existing processed batch folder")
+    enrich_batch.add_argument("processed_dir", type=Path)
+    enrich_batch.add_argument("--ai-provider", choices=["mock", "gemini"], default="gemini")
+    enrich_batch.add_argument("--ai-model", default="")
+    enrich_batch.add_argument("--concurrent", type=int, default=1)
+    enrich_batch.add_argument("--skip-file", action="append", default=[], help=argparse.SUPPRESS)
+    enrich_batch.add_argument("--no-render-html", action="store_true")
+    enrich_batch.add_argument("--json-events", action="store_true", help=argparse.SUPPRESS)
+
     render = subparsers.add_parser("render", help="Render an existing lecture.json artifact")
     render.add_argument("lecture_json", type=Path)
 
@@ -94,6 +103,8 @@ def main(argv=None) -> int:
         return _run_process(args)
     if args.command == "enrich":
         return _run_enrich(args)
+    if args.command == "enrich-batch":
+        return _run_enrich_batch(args)
     if args.command == "render":
         return _run_render(args)
     if args.command == "export-gemini-test":
@@ -221,6 +232,44 @@ def _run_enrich(args) -> int:
     except Exception as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
+
+
+def _run_enrich_batch(args) -> int:
+    processed_dir = args.processed_dir.expanduser().resolve()
+    provider = AIProviderName(args.ai_provider)
+    event_printer = _build_event_printer(args.json_events)
+    if provider is AIProviderName.GEMINI and not _gemini_api_key_available():
+        print("Error: Gemini enrichment requires GEMINI_API_KEY.", file=sys.stderr)
+        return 2
+    if provider is AIProviderName.GEMINI and not _gemini_dependency_available():
+        print("Error: Gemini support is not installed. Install with: python3 -m pip install -e '.[ai]'", file=sys.stderr)
+        return 2
+    config = BatchConfig(
+        input_dir=processed_dir,
+        output_dir=processed_dir,
+        transcription_engine=TranscriptionEngine.NONE,
+        concurrent_files=args.concurrent,
+        ai_provider=provider,
+        ai_model=args.ai_model,
+        render_html=not args.no_render_html,
+        skip_files=tuple(args.skip_file or ()),
+    )
+    try:
+        summary = enrich_processed_batch(config, progress_callback=event_printer)
+    except LectureProcessorError as exc:
+        if event_printer:
+            event_printer({"kind": "batch_failed", "message": str(exc), "output_dir": str(processed_dir)})
+        print(f"Error: {exc}", file=sys.stderr)
+        return 2
+    except Exception as exc:
+        message = f"Unexpected enrichment error: {exc}"
+        if event_printer:
+            event_printer({"kind": "batch_failed", "message": message, "output_dir": str(processed_dir)})
+        print(f"Error: {message}", file=sys.stderr)
+        return 1
+
+    print(_format_summary(summary, processed_dir))
+    return 1 if summary.failed else 0
 
 
 def _run_render(args) -> int:

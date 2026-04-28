@@ -42,13 +42,14 @@ const DEFAULT_SETTINGS = Object.freeze({
   transcriptionEngine: "faster-whisper",
   whisperModel: "large-v3",
   slideSensitivity: "medium",
-  aiProvider: "none",
   aiModel: "gemini-2.5-flash-lite",
+  enhanceWithGemini: false,
   concurrentFiles: 4,
   saveNormalized: true,
 });
 
 const state = {
+  folderMode: "source",
   inputDir: "",
   outputDir: "",
   fileCount: 0,
@@ -64,9 +65,11 @@ const state = {
   elapsedTimer: null,
   finishedFileReports: 0,
   geminiKeySaved: false,
+  enhanceWithGeminiPreference: DEFAULT_SETTINGS.enhanceWithGemini,
   files: new Map(),
   fileOrder: [],
   skippedFiles: new Set(),
+  autoSkipReasons: new Map(),
 };
 
 const elements = {
@@ -105,7 +108,7 @@ const elements = {
   transcriptionEngine: document.querySelector("#transcriptionEngine"),
   whisperModel: document.querySelector("#whisperModel"),
   slideSensitivity: document.querySelector("#slideSensitivity"),
-  aiProvider: document.querySelector("#aiProvider"),
+  enhanceWithGemini: document.querySelector("#enhanceWithGemini"),
   aiModel: document.querySelector("#aiModel"),
   geminiApiKey: document.querySelector("#geminiApiKey"),
   saveGeminiKeyButton: document.querySelector("#saveGeminiKeyButton"),
@@ -173,13 +176,17 @@ elements.concurrentFiles.addEventListener("input", () => {
   elements.transcriptionEngine,
   elements.whisperModel,
   elements.slideSensitivity,
-  elements.aiProvider,
+  elements.enhanceWithGemini,
   elements.aiModel,
   elements.saveNormalized,
 ].forEach((element) => {
   element.addEventListener("change", () => {
+    if (element === elements.enhanceWithGemini && state.folderMode !== "processed") {
+      state.enhanceWithGeminiPreference = elements.enhanceWithGemini.checked;
+    }
     saveCurrentSettings();
     renderAiControls();
+    render();
   });
 });
 
@@ -212,28 +219,50 @@ async function chooseOutputFolder() {
   if (!folder) return;
   state.outputDir = folder;
   rememberOutputDir(state.outputDir);
+  if (state.inputDir) {
+    await scanFolder();
+  }
   render();
 }
 
 async function scanFolder() {
   try {
-    const scan = await invoke("scan_folder", { inputDir: state.inputDir });
-    state.fileCount = scan.movCount;
-    state.fileNames = scan.movFiles || [];
+    const scan = await invoke("scan_folder", { inputDir: state.inputDir, outputDir: state.outputDir || null });
+    state.folderMode = scan.folderMode === "processed" ? "processed" : "source";
+    state.outputDir = scan.outputDir || state.outputDir;
+    rememberOutputDir(state.outputDir);
+    state.fileNames = state.folderMode === "processed" ? scan.lectureFiles || [] : scan.movFiles || [];
+    state.fileCount = state.fileNames.length;
     state.skippedFiles.clear();
+    state.autoSkipReasons.clear();
+    (scan.alreadyProcessedFiles || []).forEach((name) => {
+      state.skippedFiles.add(name);
+      state.autoSkipReasons.set(name, "Already processed");
+    });
+    (scan.alreadyEnhancedFiles || []).forEach((name) => {
+      state.skippedFiles.add(name);
+      state.autoSkipReasons.set(name, "Already enhanced");
+    });
     initializeQueuedFiles();
-    setFolderError(scan.movCount === 0 ? "No .mov files found. Try a different folder." : "");
+    const emptyMessage =
+      state.folderMode === "processed"
+        ? "No completed processed lectures found. Try a different folder."
+        : "No .mov files found. Try a different folder.";
+    setFolderError(state.fileCount === 0 ? emptyMessage : "");
   } catch (error) {
+    state.folderMode = "source";
     state.fileCount = 0;
     state.fileNames = [];
     state.files.clear();
     state.fileOrder = [];
     state.skippedFiles.clear();
+    state.autoSkipReasons.clear();
     setFolderError(String(error));
   }
 }
 
 function clearFolder() {
+  state.folderMode = "source";
   state.inputDir = "";
   state.outputDir = "";
   state.fileCount = 0;
@@ -241,6 +270,7 @@ function clearFolder() {
   state.files.clear();
   state.fileOrder = [];
   state.skippedFiles.clear();
+  state.autoSkipReasons.clear();
   setFolderError("");
   render();
 }
@@ -253,7 +283,7 @@ async function startBatch() {
     if (!confirmed) return;
   }
 
-  if (elements.aiProvider.value === "gemini" && elements.geminiApiKey.value.trim()) {
+  if (needsGemini() && elements.geminiApiKey.value.trim()) {
     const saved = await saveGeminiKey({ quiet: true });
     if (!saved) return;
   }
@@ -268,6 +298,7 @@ async function startBatch() {
   await waitForPaint();
 
   const request = {
+    mode: state.folderMode === "processed" ? "enhance" : "process",
     inputDir: state.inputDir,
     outputDir: state.outputDir,
     recordingSpeed: state.recordingSpeed,
@@ -278,10 +309,10 @@ async function startBatch() {
     transcriptionEngine: elements.transcriptionEngine.value,
     whisperModel: elements.whisperModel.value,
     slideSensitivity: elements.slideSensitivity.value,
-    aiProvider: elements.aiProvider.value,
+    aiProvider: needsGemini() ? "gemini" : "none",
     aiModel: elements.aiModel.value,
     minDuration: 60,
-    skippedFiles: [...state.skippedFiles],
+    skippedFiles: manualSkippedFiles(),
   };
   rememberOutputDir(request.outputDir);
 
@@ -412,13 +443,19 @@ function finalRunSummary(counts, unfinished, exitCode) {
 
 function render() {
   const hasFolder = Boolean(state.inputDir);
-  elements.folderTitle.textContent = hasFolder ? basename(state.inputDir) : "Choose lecture folder";
+  const noun = itemNoun();
+  elements.folderTitle.textContent = hasFolder ? basename(state.inputDir) : "Choose lecture or processed folder";
   elements.folderSub.textContent = hasFolder
-    ? `${state.inputDir} · ${state.fileCount} .mov file${state.fileCount === 1 ? "" : "s"}`
+    ? `${state.inputDir} · ${state.fileCount} ${noun}${state.fileCount === 1 ? "" : "s"}`
     : "No folder selected";
   elements.outputPath.textContent = state.outputDir || "-";
   elements.clearFolderButton.classList.toggle("hidden", !hasFolder);
   elements.startButton.disabled = state.running || !hasFolder || processableFileCount() === 0;
+  elements.startButton.textContent = state.folderMode === "processed" ? "Enhance" : "Start";
+  elements.chooseOutputButton.disabled = state.running || state.folderMode === "processed";
+  elements.enhanceWithGemini.checked =
+    state.folderMode === "processed" ? true : state.enhanceWithGeminiPreference;
+  elements.enhanceWithGemini.disabled = state.running || state.folderMode === "processed";
   if (!state.running) {
     elements.runMeta.textContent = hasFolder
       ? readyRunMeta()
@@ -433,12 +470,14 @@ function setRunning(running) {
   elements.startButton.disabled = running || !state.inputDir || processableFileCount() === 0;
   elements.chooseFolderButton.disabled = running;
   elements.clearFolderButton.disabled = running;
-  elements.chooseOutputButton.disabled = running;
+  elements.chooseOutputButton.disabled = running || state.folderMode === "processed";
+  elements.enhanceWithGemini.disabled = running || state.folderMode === "processed";
   elements.progressBar.classList.toggle("running", running);
   renderRunControls();
   if (running) {
     const ready = processableFileCount();
-    elements.runTitle.textContent = `Preparing ${ready} video${ready === 1 ? "" : "s"}...`;
+    const noun = itemNoun();
+    elements.runTitle.textContent = `Preparing ${ready} ${noun}${ready === 1 ? "" : "s"}...`;
     elements.statusPill.textContent = "Running";
     elements.statusPill.className = "status-pill running";
     elements.runMeta.textContent = runDescription();
@@ -501,7 +540,7 @@ function validateSettings(options = {}) {
     elements.runMeta.textContent = "Concurrent files must be between 1 and 8.";
     return null;
   }
-  if (elements.aiProvider.value === "gemini" && !state.geminiKeySaved && !elements.geminiApiKey.value.trim()) {
+  if (needsGemini() && !state.geminiKeySaved && !elements.geminiApiKey.value.trim()) {
     if (showDialogOnError) {
       showDialog(elements.settingsDialog);
     }
@@ -520,7 +559,7 @@ function handleProcessorEvent(event) {
     state.progressTotal = Number(event.attempted || 0);
     state.progressDone = 0;
     setProgress(0, state.progressTotal);
-    elements.runTitle.textContent = `Processing ${basename(state.inputDir)}`;
+    elements.runTitle.textContent = `${state.folderMode === "processed" ? "Enhancing" : "Processing"} ${basename(state.inputDir)}`;
     elements.runMeta.textContent = runDescription();
     renderRunControls();
     renderVideoDashboard();
@@ -611,18 +650,20 @@ function primeQueuedFiles(concurrentFiles) {
   names.forEach((name, index) => {
     const skipped = state.skippedFiles.has(name);
     const preparing = !skipped && activeSlots < concurrentFiles;
+    const skipReason = state.autoSkipReasons.get(name) || "Skipped by user";
     if (preparing) activeSlots += 1;
     state.files.set(name, {
       status: skipped ? "skipped" : preparing ? "preparing" : "queued",
       stage: skipped ? "Skipped" : preparing ? "Preparing" : "Queue",
-      detail: skipped ? "Skipped by user" : preparing ? "Preparing video" : "Waiting to start",
+      detail: skipped ? skipReason : preparing ? `Preparing ${itemNoun()}` : "Waiting to start",
       progress: skipped ? 100 : preparing ? 3 : 0,
     });
   });
 
   state.progressTotal = names.length;
   const activeLimit = Math.min(concurrentFiles, processableFileCount());
-  elements.runMeta.textContent = `Processing up to ${activeLimit} video${
+  const noun = itemNoun();
+  elements.runMeta.textContent = `${state.folderMode === "processed" ? "Enhancing" : "Processing"} up to ${activeLimit} ${noun}${
     activeLimit === 1 ? "" : "s"
   } at once.`;
   renderVideoDashboard();
@@ -633,10 +674,11 @@ function initializeQueuedFiles() {
   state.fileOrder = state.fileNames.length ? [...state.fileNames] : [];
   state.fileOrder.forEach((name) => {
     const skipped = state.skippedFiles.has(name);
+    const skipReason = state.autoSkipReasons.get(name) || "Skipped by user";
     state.files.set(name, {
       status: skipped ? "skipped" : "queued",
       stage: skipped ? "Skipped" : "Queue",
-      detail: skipped ? "Skipped by user" : "Waiting to start",
+      detail: skipped ? skipReason : "Waiting to start",
       progress: skipped ? 100 : 0,
     });
   });
@@ -703,7 +745,7 @@ function renderOverallProgress(entries) {
 function renderVideoList(entries) {
   elements.activeSummary.textContent = videoListSummaryText(countDashboardEntries(entries));
   if (entries.length === 0) {
-    elements.activeVideos.innerHTML = `<div class="video-placeholder">Choose a folder to see videos.</div>`;
+    elements.activeVideos.innerHTML = `<div class="video-placeholder">Choose a folder to see files.</div>`;
     return;
   }
 
@@ -854,7 +896,7 @@ function markUnfinishedVideosFailed(detail) {
 }
 
 function videoListSummaryText(summary) {
-  if (summary.total === 0) return "Choose a folder to see videos";
+  if (summary.total === 0) return "Choose a folder to see files";
   const parts = [];
   if (summary.completed) parts.push(`${summary.completed} complete`);
   if (summary.processing) parts.push(`${summary.processing} active`);
@@ -869,6 +911,7 @@ function videoActionFor(name, file) {
   if (!name || !file) return null;
   if (!state.running) {
     if (file.status === "skipped") {
+      if (state.autoSkipReasons.has(name)) return null;
       return { action: "unskip", label: "Use", className: "video-action-button" };
     }
     if (file.status === "queued") {
@@ -953,10 +996,23 @@ function processableFileCount() {
   return names.filter((name) => !state.skippedFiles.has(name)).length;
 }
 
+function manualSkippedFiles() {
+  return [...state.skippedFiles].filter((name) => !state.autoSkipReasons.has(name));
+}
+
+function needsGemini() {
+  return state.folderMode === "processed" || elements.enhanceWithGemini.checked;
+}
+
+function itemNoun() {
+  return state.folderMode === "processed" ? "lecture" : "video";
+}
+
 function readyRunMeta() {
   const ready = processableFileCount();
   const skipped = state.skippedFiles.size;
-  const readyText = `${ready} video${ready === 1 ? "" : "s"} ready`;
+  const noun = itemNoun();
+  const readyText = `${ready} ${noun}${ready === 1 ? "" : "s"} ready`;
   return skipped ? `${readyText} · ${skipped} skipped` : readyText;
 }
 
@@ -985,8 +1041,9 @@ function applySettings(settings) {
   setSelectValue(elements.transcriptionEngine, settings.transcriptionEngine, DEFAULT_SETTINGS.transcriptionEngine);
   setSelectValue(elements.whisperModel, settings.whisperModel, DEFAULT_SETTINGS.whisperModel);
   setSelectValue(elements.slideSensitivity, settings.slideSensitivity, DEFAULT_SETTINGS.slideSensitivity);
-  setSelectValue(elements.aiProvider, settings.aiProvider, DEFAULT_SETTINGS.aiProvider);
   setSelectValue(elements.aiModel, settings.aiModel, DEFAULT_SETTINGS.aiModel);
+  state.enhanceWithGeminiPreference = Boolean(settings.enhanceWithGemini);
+  elements.enhanceWithGemini.checked = state.enhanceWithGeminiPreference;
   elements.concurrentFiles.value = String(validConcurrentFiles(settings.concurrentFiles));
   elements.saveNormalized.checked = Boolean(settings.saveNormalized);
   syncSpeedSegments();
@@ -1004,7 +1061,7 @@ function saveCurrentSettings() {
     transcriptionEngine: elements.transcriptionEngine.value,
     whisperModel: elements.whisperModel.value,
     slideSensitivity: elements.slideSensitivity.value,
-    aiProvider: elements.aiProvider.value,
+    enhanceWithGemini: state.folderMode === "processed" ? state.enhanceWithGeminiPreference : elements.enhanceWithGemini.checked,
     aiModel: elements.aiModel.value,
     concurrentFiles,
     saveNormalized: elements.saveNormalized.checked,
@@ -1057,7 +1114,7 @@ async function refreshGeminiKeyStatus() {
 }
 
 function renderAiControls() {
-  const geminiSelected = elements.aiProvider.value === "gemini";
+  const geminiSelected = needsGemini();
   elements.aiModel.disabled = !geminiSelected;
   elements.geminiApiKey.disabled = !geminiSelected;
   elements.saveGeminiKeyButton.disabled = !geminiSelected;
@@ -1142,7 +1199,12 @@ function runDescription() {
   const ready = processableFileCount();
   const skipped = state.skippedFiles.size;
   const skippedText = skipped ? ` · ${skipped} skipped` : "";
-  return `${ready} video${ready === 1 ? "" : "s"} · ${concurrent} at a time · ${speed}${skippedText}`;
+  const noun = itemNoun();
+  if (state.folderMode === "processed") {
+    return `${ready} ${noun}${ready === 1 ? "" : "s"} · ${concurrent} at a time · Gemini${skippedText}`;
+  }
+  const aiText = needsGemini() ? " · Gemini" : "";
+  return `${ready} ${noun}${ready === 1 ? "" : "s"} · ${concurrent} at a time · ${speed}${aiText}${skippedText}`;
 }
 
 function startElapsedTimer() {

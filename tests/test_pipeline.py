@@ -4,11 +4,16 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from lecture_processor.config import AIProviderName, AudioQuality, BatchConfig, RecordingSpeed
+from lecture_processor.config import AIProviderName, AudioQuality, BatchConfig, RecordingSpeed, TranscriptionEngine
 from lecture_processor.control import update_control_file
 from lecture_processor.errors import LectureProcessorError, ProcessingStopped
 from lecture_processor.models import FileStatus, MediaInfo, TranscriptResult, TranscriptSegment
-from lecture_processor.pipeline import BatchProcessor, allocate_output_dirs, normalized_video_output_path
+from lecture_processor.pipeline import (
+    BatchProcessor,
+    allocate_output_dirs,
+    enrich_processed_batch,
+    normalized_video_output_path,
+)
 
 
 class FakeInspector:
@@ -158,6 +163,47 @@ class BatchProcessorTests(unittest.TestCase):
             skipped_events = [event for event in events if event.get("source") == "skip.mov"]
             self.assertEqual([event["kind"] for event in skipped_events], ["file_finished"])
             self.assertEqual(skipped_events[0]["status"], "skipped")
+
+    def test_completed_outputs_are_skipped_without_deleting_artifacts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "lecture.mov"
+            source.write_text("video", encoding="utf-8")
+            output = root / "out"
+            lecture_dir = output / "lecture"
+            html_dir = lecture_dir / "html"
+            html_dir.mkdir(parents=True)
+            (html_dir / "index.html").write_text("html", encoding="utf-8")
+            (lecture_dir / "lecture.json").write_text(
+                json.dumps(
+                    {
+                        "source": {"filename": "lecture.mov"},
+                        "media": {"duration_seconds": 120},
+                        "transcript": {"text": "hello lecture", "word_count": 2},
+                        "slides": [{"id": 1}],
+                        "processing": {"status": "completed"},
+                        "enrichment": {"title": "Existing", "executive_summary": "Already done."},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            config = BatchConfig(input_dir=root, output_dir=output)
+
+            summary = BatchProcessor(
+                config=config,
+                inspector=FakeInspector({}),
+                normalizer=FakeNormalizer(),
+                audio_extractor=FakeAudioExtractor(),
+                transcriber=FakeTranscriber(),
+                slide_extractor=FakeSlideExtractor(),
+            ).run()
+
+            self.assertEqual(summary.completed, 0)
+            self.assertEqual(summary.skipped, 1)
+            self.assertEqual(summary.results[0].message, "Already processed")
+            self.assertTrue((lecture_dir / "lecture.json").exists())
+            self.assertEqual(summary.results[0].word_count, 2)
+            self.assertEqual(summary.results[0].slide_count, 1)
 
     def test_user_stopped_file_removes_partial_output_and_continues(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -469,6 +515,49 @@ class BatchProcessorTests(unittest.TestCase):
             self.assertIn("Lecture Transcript", html)
             batch = json.loads((output / "batch.json").read_text(encoding="utf-8"))
             self.assertEqual(batch["summary"]["enriched"], 1)
+
+    def test_processed_batch_enrichment_skips_already_enhanced_lectures(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            pending_dir = root / "pending"
+            enhanced_dir = root / "enhanced"
+            pending_dir.mkdir()
+            enhanced_dir.mkdir()
+            base_artifact = {
+                "lecture_id": "lecture",
+                "source": {"filename": "lecture.mov"},
+                "media": {"duration_seconds": 120},
+                "transcript": {"text": "hello lecture", "word_count": 2, "segments": []},
+                "slides": [],
+                "processing": {"status": "completed"},
+                "enrichment": None,
+            }
+            (pending_dir / "lecture.json").write_text(json.dumps(base_artifact), encoding="utf-8")
+            enhanced_artifact = {
+                **base_artifact,
+                "lecture_id": "enhanced",
+                "source": {"filename": "enhanced.mov"},
+                "enrichment": {"title": "Enhanced", "executive_summary": "Already enhanced."},
+            }
+            (enhanced_dir / "lecture.json").write_text(json.dumps(enhanced_artifact), encoding="utf-8")
+            events = []
+            config = BatchConfig(
+                input_dir=root,
+                output_dir=root,
+                transcription_engine=TranscriptionEngine.NONE,
+                ai_provider=AIProviderName.MOCK,
+            )
+
+            summary = enrich_processed_batch(config, progress_callback=events.append)
+
+            self.assertEqual(summary.completed, 1)
+            self.assertEqual(summary.skipped, 1)
+            self.assertIn("Already enhanced", [result.message for result in summary.results])
+            pending = json.loads((pending_dir / "lecture.json").read_text(encoding="utf-8"))
+            self.assertEqual(pending["enrichment"]["provider"], "mock")
+            self.assertTrue((pending_dir / "html" / "index.html").exists())
+            self.assertTrue((root / "index.html").exists())
+            self.assertIn("batch_finished", [event["kind"] for event in events])
 
 
 if __name__ == "__main__":

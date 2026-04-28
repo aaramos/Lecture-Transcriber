@@ -56,6 +56,14 @@
           <button id="chooseOutputButton" class="secondary-button">Browse</button>
         </div>
 
+        <label class="enhance-toggle">
+          <input id="enhanceWithGemini" type="checkbox" />
+          <span>
+            <strong>Enhance with Gemini</strong>
+            <small>Add AI titles, summaries, outlines, and slide notes.</small>
+          </span>
+        </label>
+
         <button id="startButton" class="primary-button" disabled>Start</button>
       </section>
 
@@ -106,11 +114,11 @@
 
         <div class="video-section unified-video-section">
           <div class="video-section-head">
-            <h3>Videos</h3>
-            <span id="activeSummary">Choose a folder to see videos</span>
+            <h3>Files</h3>
+            <span id="activeSummary">Choose a folder to see files</span>
           </div>
           <div id="activeVideos" class="video-list">
-            <div class="video-placeholder">Choose a folder to see videos.</div>
+            <div class="video-placeholder">Choose a folder to see files.</div>
           </div>
         </div>
 
@@ -168,16 +176,6 @@
                 <option value="medium" selected>Medium</option>
                 <option value="high">High</option>
               </select>
-            </label>
-
-            <label>
-              Study Notes
-              <select id="aiProvider">
-                <option value="none">Local HTML only</option>
-                <option value="mock">Mock AI preview</option>
-                <option value="gemini">Gemini</option>
-              </select>
-              <span class="field-help">Gemini adds AI titles, summaries, outlines, and slide notes.</span>
             </label>
 
             <label>

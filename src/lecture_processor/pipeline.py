@@ -8,7 +8,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Callable, Dict, Iterator, List, Optional
 
-from .artifacts import utc_now_iso, write_batch_artifact, write_lecture_artifact
+from .artifacts import LECTURE_ARTIFACT_NAME, load_json, utc_now_iso, write_batch_artifact, write_lecture_artifact
 from .ai.enrichment import enrich_lecture_artifact
 from .config import BatchConfig, RecordingSpeed, TranscriptionEngine
 from .control import ProcessingControl, default_control_file
@@ -23,6 +23,8 @@ from .transcription import Transcriber
 from .writers import write_processing_log, write_text_atomic, write_transcript
 
 OUTPUT_LOCK_FILE = ".lecture_processor.lock"
+ALREADY_PROCESSED_MESSAGE = "Already processed"
+ALREADY_ENHANCED_MESSAGE = "Already enhanced"
 
 
 class BatchProcessor:
@@ -72,7 +74,11 @@ class BatchProcessor:
             skip_files = set(self.config.skip_files) | self.control.skipped_files()
             process_files = []
             for path in files:
-                if path.name in skip_files:
+                processed_result = completed_output_result(path, output_dirs[path])
+                if processed_result:
+                    results.append(processed_result)
+                    self._emit_file_finished(processed_result, results, len(files))
+                elif path.name in skip_files:
                     result = self._skipped_file_result(path, output_dirs[path], "Skipped by user")
                     results.append(result)
                     self._emit_file_finished(result, results, len(files))
@@ -396,7 +402,6 @@ class BatchProcessor:
                 remove_temp_path(temp_normalized)
 
     def _skipped_file_result(self, source: Path, output_dir: Path, message: str) -> FileResult:
-        remove_temp_path(output_dir)
         return FileResult(
             source=source,
             output_dir=output_dir,
@@ -454,6 +459,172 @@ def discover_mov_files(folder: Path) -> List[Path]:
     )
 
 
+def discover_lecture_artifacts(folder: Path) -> List[Path]:
+    if not folder.exists() or not folder.is_dir():
+        return []
+    root_artifact = folder / LECTURE_ARTIFACT_NAME
+    if root_artifact.exists():
+        return [root_artifact]
+    return sorted(
+        (item / LECTURE_ARTIFACT_NAME for item in folder.iterdir() if (item / LECTURE_ARTIFACT_NAME).exists()),
+        key=lambda item: item.parent.name.lower(),
+    )
+
+
+def completed_output_result(source: Path, output_dir: Path) -> Optional[FileResult]:
+    artifact = _load_completed_artifact(output_dir)
+    if not artifact:
+        return None
+    artifact_source = str(artifact.get("source", {}).get("filename") or "")
+    if artifact_source and artifact_source != source.name:
+        return None
+    return _file_result_from_artifact(
+        source=source,
+        output_dir=output_dir,
+        artifact=artifact,
+        status=FileStatus.SKIPPED,
+        message=ALREADY_PROCESSED_MESSAGE,
+    )
+
+
+def enrich_processed_batch(
+    config: BatchConfig,
+    *,
+    progress_callback: Optional[Callable[[Dict], None]] = None,
+) -> BatchSummary:
+    config.validate()
+    artifacts = discover_lecture_artifacts(config.input_dir)
+    if not artifacts:
+        raise LectureProcessorError("No processed lectures found. Choose a folder with lecture.json files.")
+
+    with output_dir_lock(config.output_dir):
+        batch_started_at = utc_now_iso()
+        cleanup_processor_temp_files(config.output_dir)
+        results: List[FileResult] = []
+        skip_files = set(config.skip_files)
+        _emit(progress_callback, "batch_started", attempted=len(artifacts), output_dir=str(config.output_dir))
+        for lecture_json_path in artifacts:
+            result = _enrich_processed_lecture(lecture_json_path, config, skip_files, progress_callback)
+            results.append(result)
+            _emit_file_finished(progress_callback, result, results, len(artifacts))
+
+        results.sort(key=lambda item: item.source.name.lower())
+        summary = BatchSummary(
+            attempted=len(results),
+            completed=sum(1 for item in results if item.status is FileStatus.COMPLETED),
+            failed=sum(1 for item in results if item.status is FileStatus.FAILED),
+            skipped=sum(1 for item in results if item.status is FileStatus.SKIPPED),
+            stopped=sum(1 for item in results if item.status is FileStatus.STOPPED),
+            results=results,
+        )
+        write_batch_summary(config.output_dir, summary)
+        write_batch_artifact(
+            output_dir=config.output_dir,
+            config=config,
+            summary=summary,
+            started_at=batch_started_at,
+            finished_at=utc_now_iso(),
+        )
+        if config.render_html:
+            render_batch_index(config.output_dir, summary)
+        _emit(
+            progress_callback,
+            "batch_finished",
+            attempted=summary.attempted,
+            completed=summary.completed,
+            failed=summary.failed,
+            skipped=summary.skipped,
+            stopped=summary.stopped,
+        )
+        return summary
+
+
+def _enrich_processed_lecture(
+    lecture_json_path: Path,
+    config: BatchConfig,
+    skip_files: set,
+    progress_callback: Optional[Callable[[Dict], None]],
+) -> FileResult:
+    started = time.monotonic()
+    output_dir = lecture_json_path.parent
+    artifact = load_json(lecture_json_path)
+    source = _source_path_from_artifact(artifact, output_dir)
+    if source.name in skip_files or output_dir.name in skip_files:
+        return _file_result_from_artifact(
+            source=source,
+            output_dir=output_dir,
+            artifact=artifact,
+            status=FileStatus.SKIPPED,
+            message="Skipped by user",
+            elapsed_seconds=time.monotonic() - started,
+        )
+    if artifact.get("processing", {}).get("status") != FileStatus.COMPLETED.value:
+        return _file_result_from_artifact(
+            source=source,
+            output_dir=output_dir,
+            artifact=artifact,
+            status=FileStatus.SKIPPED,
+            message="Not completed",
+            elapsed_seconds=time.monotonic() - started,
+        )
+    if artifact.get("enrichment"):
+        return _file_result_from_artifact(
+            source=source,
+            output_dir=output_dir,
+            artifact=artifact,
+            status=FileStatus.SKIPPED,
+            message=ALREADY_ENHANCED_MESSAGE,
+            elapsed_seconds=time.monotonic() - started,
+        )
+
+    _emit(progress_callback, "file_started", source=source.name)
+    try:
+        _emit(progress_callback, "step_started", source=source.name, step="Enrich")
+        step_started = time.monotonic()
+        enriched_artifact = enrich_lecture_artifact(lecture_json_path, config, progress_callback=progress_callback)
+        _emit(
+            progress_callback,
+            "step_finished",
+            source=source.name,
+            step="Enrich",
+            elapsed_seconds=round(time.monotonic() - step_started, 1),
+        )
+        html_path = None
+        rendered = False
+        if config.render_html:
+            _emit(progress_callback, "step_started", source=source.name, step="Render")
+            step_started = time.monotonic()
+            html_path = render_lecture_page(lecture_json_path)
+            rendered = True
+            _emit(
+                progress_callback,
+                "step_finished",
+                source=source.name,
+                step="Render",
+                elapsed_seconds=round(time.monotonic() - step_started, 1),
+            )
+        return _file_result_from_artifact(
+            source=source,
+            output_dir=output_dir,
+            artifact=enriched_artifact,
+            status=FileStatus.COMPLETED,
+            message="Enhanced",
+            html_path=html_path,
+            rendered=rendered,
+            elapsed_seconds=time.monotonic() - started,
+        )
+    except Exception as exc:
+        return _file_result_from_artifact(
+            source=source,
+            output_dir=output_dir,
+            artifact=artifact,
+            status=FileStatus.FAILED,
+            message=str(exc),
+            failure_step="Enrich",
+            elapsed_seconds=time.monotonic() - started,
+        )
+
+
 def safe_folder_name(stem: str) -> str:
     value = re.sub(r"[^A-Za-z0-9._-]+", "_", stem).strip("._-")
     return value or "lecture"
@@ -473,6 +644,101 @@ def allocate_output_dirs(files: List[Path], output_root: Path) -> dict:
 
 def normalized_video_output_path(source: Path, output_dir: Path) -> Path:
     return output_dir / f"{safe_folder_name(source.stem)}.mp4"
+
+
+def _load_completed_artifact(output_dir: Path) -> Optional[Dict]:
+    path = output_dir / LECTURE_ARTIFACT_NAME
+    if not path.exists():
+        return None
+    try:
+        artifact = load_json(path)
+    except Exception:
+        return None
+    if artifact.get("processing", {}).get("status") != FileStatus.COMPLETED.value:
+        return None
+    return artifact
+
+
+def _file_result_from_artifact(
+    *,
+    source: Path,
+    output_dir: Path,
+    artifact: Dict,
+    status: FileStatus,
+    message: str,
+    html_path: Optional[Path] = None,
+    rendered: Optional[bool] = None,
+    elapsed_seconds: float = 0.0,
+    failure_step: Optional[str] = None,
+) -> FileResult:
+    enrichment = artifact.get("enrichment") or {}
+    transcript = artifact.get("transcript") or {}
+    slides = artifact.get("slides") or []
+    lecture_json_path = output_dir / LECTURE_ARTIFACT_NAME
+    existing_html_path = output_dir / "html" / "index.html"
+    html_path = html_path or (existing_html_path if existing_html_path.exists() else None)
+    rendered_value = rendered if rendered is not None else html_path is not None
+    return FileResult(
+        source=source,
+        output_dir=output_dir,
+        status=status,
+        duration_seconds=float(artifact.get("media", {}).get("duration_seconds") or 0.0),
+        normalized_duration_seconds=artifact.get("media", {}).get("normalized_duration_seconds"),
+        elapsed_seconds=elapsed_seconds,
+        word_count=int(transcript.get("word_count") or len(str(transcript.get("text") or "").split())),
+        slide_count=len(slides),
+        failure_step=failure_step,
+        message=message,
+        lecture_json_path=lecture_json_path if lecture_json_path.exists() else None,
+        html_path=html_path,
+        enriched=bool(enrichment),
+        rendered=rendered_value,
+        title=enrichment.get("title"),
+        short_summary=enrichment.get("executive_summary"),
+    )
+
+
+def _source_path_from_artifact(artifact: Dict, output_dir: Path) -> Path:
+    source = artifact.get("source") or {}
+    filename = source.get("filename") or f"{output_dir.name}.mov"
+    absolute_path = source.get("absolute_path")
+    if absolute_path:
+        return Path(str(absolute_path))
+    return output_dir / str(filename)
+
+
+def _emit(progress_callback: Optional[Callable[[Dict], None]], kind: str, **payload) -> None:
+    if not progress_callback:
+        return
+    try:
+        progress_callback({"kind": kind, **payload})
+    except Exception:
+        pass
+
+
+def _emit_file_finished(
+    progress_callback: Optional[Callable[[Dict], None]],
+    result: FileResult,
+    results: List[FileResult],
+    attempted: int,
+) -> None:
+    _emit(
+        progress_callback,
+        "file_finished",
+        source=result.source.name,
+        status=result.status.value,
+        message=result.message,
+        completed=sum(1 for item in results if item.status is FileStatus.COMPLETED),
+        failed=sum(1 for item in results if item.status is FileStatus.FAILED),
+        skipped=sum(1 for item in results if item.status is FileStatus.SKIPPED),
+        stopped=sum(1 for item in results if item.status is FileStatus.STOPPED),
+        attempted=len(results),
+        total=attempted,
+        word_count=result.word_count,
+        slide_count=result.slide_count,
+        enriched=result.enriched,
+        rendered=result.rendered,
+    )
 
 
 def reset_output_dir(output_dir: Path) -> None:

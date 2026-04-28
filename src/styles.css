@@ -141,6 +141,7 @@ label,
 .drop-zone,
 .speed-panel,
 .output-row,
+.enhance-toggle,
 .activity,
 .settings-dialog,
 .confirm-dialog {
@@ -209,9 +210,37 @@ label,
 }
 
 .speed-panel,
-.output-row {
+.output-row,
+.enhance-toggle {
   padding: 14px;
   gap: 14px;
+}
+
+.enhance-toggle {
+  display: flex;
+  align-items: center;
+  cursor: pointer;
+}
+
+.enhance-toggle input {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+}
+
+.enhance-toggle span {
+  display: grid;
+  gap: 2px;
+}
+
+.enhance-toggle strong {
+  color: var(--text);
+  font-size: 14px;
+}
+
+.enhance-toggle small {
+  color: var(--muted);
+  font-size: 12px;
 }
 
 .segmented {

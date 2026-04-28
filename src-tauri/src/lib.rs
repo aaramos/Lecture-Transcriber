@@ -45,13 +45,21 @@ struct AppState {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct FolderScan {
+    folder_mode: String,
     mov_count: usize,
     mov_files: Vec<String>,
+    processed_count: usize,
+    lecture_files: Vec<String>,
+    already_processed_files: Vec<String>,
+    already_enhanced_files: Vec<String>,
+    output_dir: String,
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ProcessRequest {
+    #[serde(default = "default_process_mode")]
+    mode: String,
     input_dir: String,
     output_dir: String,
     recording_speed: String,
@@ -111,6 +119,16 @@ struct FileControlResponse {
     status: String,
 }
 
+#[derive(Clone)]
+struct ProcessedLectureScan {
+    source_name: String,
+    enhanced: bool,
+}
+
+fn default_process_mode() -> String {
+    "process".to_string()
+}
+
 #[tauri::command]
 fn choose_folder() -> Result<Option<String>, String> {
     Ok(rfd::FileDialog::new()
@@ -121,19 +139,48 @@ fn choose_folder() -> Result<Option<String>, String> {
 #[tauri::command]
 fn default_output_dir(input_dir: String) -> Result<String, String> {
     let input = PathBuf::from(input_dir);
-    let name = input
-        .file_name()
-        .and_then(|value| value.to_str())
-        .ok_or_else(|| "Invalid input folder.".to_string())?;
-    let parent = input.parent().unwrap_or_else(|| Path::new("."));
-    Ok(parent
-        .join(format!("{name}_processed"))
+    Ok(default_output_dir_for_path(&input)
         .to_string_lossy()
         .to_string())
 }
 
+fn default_output_dir_for_path(input: &Path) -> PathBuf {
+    let name = input
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("output");
+    let parent = input.parent().unwrap_or_else(|| Path::new("."));
+    parent.join(format!("{name}_processed"))
+}
+
 #[tauri::command]
-fn scan_folder(input_dir: String) -> Result<FolderScan, String> {
+fn scan_folder(input_dir: String, output_dir: Option<String>) -> Result<FolderScan, String> {
+    let input_path = PathBuf::from(&input_dir);
+    let processed_lectures = scan_processed_lectures(&input_path)?;
+    if !processed_lectures.is_empty() {
+        let mut lecture_files = processed_lectures
+            .iter()
+            .map(|lecture| lecture.source_name.clone())
+            .collect::<Vec<_>>();
+        lecture_files.sort_by_key(|value| value.to_lowercase());
+        let mut already_enhanced_files = processed_lectures
+            .iter()
+            .filter(|lecture| lecture.enhanced)
+            .map(|lecture| lecture.source_name.clone())
+            .collect::<Vec<_>>();
+        already_enhanced_files.sort_by_key(|value| value.to_lowercase());
+        return Ok(FolderScan {
+            folder_mode: "processed".to_string(),
+            mov_count: 0,
+            mov_files: Vec::new(),
+            processed_count: lecture_files.len(),
+            lecture_files,
+            already_processed_files: Vec::new(),
+            already_enhanced_files,
+            output_dir: input_path.to_string_lossy().to_string(),
+        });
+    }
+
     let entries =
         std::fs::read_dir(&input_dir).map_err(|error| format!("Could not read folder: {error}"))?;
     let mut mov_files = entries
@@ -150,10 +197,165 @@ fn scan_folder(input_dir: String) -> Result<FolderScan, String> {
         .filter_map(|entry| entry.file_name().to_str().map(|value| value.to_string()))
         .collect::<Vec<_>>();
     mov_files.sort_by_key(|value| value.to_lowercase());
+    let output_path = output_dir
+        .filter(|value| !value.trim().is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| default_output_dir_for_path(&input_path));
+    let already_processed_files =
+        already_processed_files_for_source(&input_path, &output_path, &mov_files);
     Ok(FolderScan {
+        folder_mode: "source".to_string(),
         mov_count: mov_files.len(),
         mov_files,
+        processed_count: 0,
+        lecture_files: Vec::new(),
+        already_processed_files,
+        already_enhanced_files: Vec::new(),
+        output_dir: output_path.to_string_lossy().to_string(),
     })
+}
+
+fn scan_processed_lectures(folder: &Path) -> Result<Vec<ProcessedLectureScan>, String> {
+    if !folder.is_dir() {
+        return Ok(Vec::new());
+    }
+    let mut lecture_jsons = Vec::new();
+    let root_artifact = folder.join("lecture.json");
+    if root_artifact.exists() {
+        lecture_jsons.push(root_artifact);
+    } else {
+        let entries =
+            std::fs::read_dir(folder).map_err(|error| format!("Could not read folder: {error}"))?;
+        for entry in entries.filter_map(Result::ok) {
+            let path = entry.path().join("lecture.json");
+            if path.exists() {
+                lecture_jsons.push(path);
+            }
+        }
+    }
+    lecture_jsons.sort_by_key(|path| {
+        path.parent()
+            .and_then(|value| value.file_name())
+            .and_then(|value| value.to_str())
+            .unwrap_or_default()
+            .to_lowercase()
+    });
+
+    let mut lectures = Vec::new();
+    for path in lecture_jsons {
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(payload) = serde_json::from_str::<serde_json::Value>(&text) else {
+            continue;
+        };
+        if payload
+            .get("processing")
+            .and_then(|value| value.get("status"))
+            .and_then(|value| value.as_str())
+            != Some("completed")
+        {
+            continue;
+        }
+        let source_name = payload
+            .get("source")
+            .and_then(|value| value.get("filename"))
+            .and_then(|value| value.as_str())
+            .map(str::to_string)
+            .or_else(|| {
+                path.parent()
+                    .and_then(|value| value.file_name())
+                    .and_then(|value| value.to_str())
+                    .map(|value| format!("{value}.mov"))
+            })
+            .unwrap_or_else(|| "lecture.mov".to_string());
+        let enhanced = !payload
+            .get("enrichment")
+            .map(|value| value.is_null())
+            .unwrap_or(true);
+        lectures.push(ProcessedLectureScan {
+            source_name,
+            enhanced,
+        });
+    }
+    Ok(lectures)
+}
+
+fn already_processed_files_for_source(
+    input_dir: &Path,
+    output_dir: &Path,
+    mov_files: &[String],
+) -> Vec<String> {
+    let mut seen = std::collections::BTreeMap::<String, usize>::new();
+    let mut processed = Vec::new();
+    for filename in mov_files {
+        let source = input_dir.join(filename);
+        let stem = source
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .unwrap_or(filename);
+        let base = safe_folder_name(stem);
+        let key = base.to_lowercase();
+        let count = seen.entry(key).or_insert(0);
+        *count += 1;
+        let folder_name = if *count == 1 {
+            base
+        } else {
+            format!("{}_{}", base, *count)
+        };
+        let lecture_json = output_dir.join(folder_name).join("lecture.json");
+        if completed_artifact_matches_source(&lecture_json, filename) {
+            processed.push(filename.clone());
+        }
+    }
+    processed
+}
+
+fn completed_artifact_matches_source(lecture_json: &Path, source_filename: &str) -> bool {
+    let Ok(text) = std::fs::read_to_string(lecture_json) else {
+        return false;
+    };
+    let Ok(payload) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return false;
+    };
+    if payload
+        .get("processing")
+        .and_then(|value| value.get("status"))
+        .and_then(|value| value.as_str())
+        != Some("completed")
+    {
+        return false;
+    }
+    payload
+        .get("source")
+        .and_then(|value| value.get("filename"))
+        .and_then(|value| value.as_str())
+        .map(|value| value == source_filename)
+        .unwrap_or(true)
+}
+
+fn safe_folder_name(stem: &str) -> String {
+    let mut value = String::new();
+    let mut last_was_separator = false;
+    for character in stem.chars() {
+        if character.is_ascii_alphanumeric()
+            || character == '.'
+            || character == '_'
+            || character == '-'
+        {
+            value.push(character);
+            last_was_separator = false;
+        } else if !last_was_separator {
+            value.push('_');
+            last_was_separator = true;
+        }
+    }
+    let trimmed = value.trim_matches(&['.', '_', '-'][..]).to_string();
+    if trimmed.is_empty() {
+        "lecture".to_string()
+    } else {
+        trimmed
+    }
 }
 
 #[tauri::command]
@@ -297,13 +499,14 @@ fn run_process_batch(
     active_process: Arc<Mutex<Option<ActiveProcess>>>,
     request: ProcessRequest,
 ) -> Result<ProcessResponse, String> {
-    if request.recording_speed == "2x" && !request.confirm_normalization {
+    let enhance_mode = request.mode == "enhance";
+    if !enhance_mode && request.recording_speed == "2x" && !request.confirm_normalization {
         return Err("2x normalization requires confirmation.".to_string());
     }
     if request.concurrent_files == 0 || request.concurrent_files > 8 {
         return Err("Concurrent files must be between 1 and 8.".to_string());
     }
-    if request.output_dir.trim().is_empty() {
+    if !enhance_mode && request.output_dir.trim().is_empty() {
         return Err("Choose an output folder before starting.".to_string());
     }
     let ai_api_key = if request.ai_provider == "gemini" {
@@ -331,43 +534,56 @@ fn run_process_batch(
         ));
     }
 
-    let control_file = Path::new(&request.output_dir).join(CONTROL_FILE);
-    let _ = std::fs::remove_file(&control_file);
-    if !request.skipped_files.is_empty() {
-        let skip_refs = request
-            .skipped_files
-            .iter()
-            .map(String::as_str)
-            .collect::<Vec<_>>();
-        update_control_file(&control_file, &skip_refs, &[])?;
-    }
+    let mut args = if enhance_mode {
+        vec![
+            "enrich-batch".to_string(),
+            request.input_dir.clone(),
+            "--ai-provider".to_string(),
+            request.ai_provider.clone(),
+            "--ai-model".to_string(),
+            request.ai_model.clone(),
+            "--concurrent".to_string(),
+            request.concurrent_files.to_string(),
+        ]
+    } else {
+        let control_file = Path::new(&request.output_dir).join(CONTROL_FILE);
+        let _ = std::fs::remove_file(&control_file);
+        if !request.skipped_files.is_empty() {
+            let skip_refs = request
+                .skipped_files
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>();
+            update_control_file(&control_file, &skip_refs, &[])?;
+        }
 
-    let mut args = vec![
-        "process".to_string(),
-        request.input_dir.clone(),
-        "--output".to_string(),
-        request.output_dir.clone(),
-        "--recording-speed".to_string(),
-        request.recording_speed.clone(),
-        "--concurrent".to_string(),
-        request.concurrent_files.to_string(),
-        "--audio-quality".to_string(),
-        request.audio_quality.clone(),
-        "--transcription-engine".to_string(),
-        request.transcription_engine.clone(),
-        "--whisper-model".to_string(),
-        request.whisper_model.clone(),
-        "--slide-sensitivity".to_string(),
-        request.slide_sensitivity.clone(),
-        "--ai-provider".to_string(),
-        request.ai_provider.clone(),
-        "--ai-model".to_string(),
-        request.ai_model.clone(),
-        "--min-duration".to_string(),
-        request.min_duration.to_string(),
-        "--control-file".to_string(),
-        control_file.to_string_lossy().to_string(),
-    ];
+        vec![
+            "process".to_string(),
+            request.input_dir.clone(),
+            "--output".to_string(),
+            request.output_dir.clone(),
+            "--recording-speed".to_string(),
+            request.recording_speed.clone(),
+            "--concurrent".to_string(),
+            request.concurrent_files.to_string(),
+            "--audio-quality".to_string(),
+            request.audio_quality.clone(),
+            "--transcription-engine".to_string(),
+            request.transcription_engine.clone(),
+            "--whisper-model".to_string(),
+            request.whisper_model.clone(),
+            "--slide-sensitivity".to_string(),
+            request.slide_sensitivity.clone(),
+            "--ai-provider".to_string(),
+            request.ai_provider.clone(),
+            "--ai-model".to_string(),
+            request.ai_model.clone(),
+            "--min-duration".to_string(),
+            request.min_duration.to_string(),
+            "--control-file".to_string(),
+            control_file.to_string_lossy().to_string(),
+        ]
+    };
 
     for file in request
         .skipped_files
@@ -379,7 +595,7 @@ fn run_process_batch(
     }
     args.push("--json-events".to_string());
 
-    if is_apple_silicon() {
+    if !enhance_mode && is_apple_silicon() {
         args.push("--apple-silicon".to_string());
         args.push("--slide-backend".to_string());
         args.push("ffmpeg".to_string());
@@ -389,23 +605,26 @@ fn run_process_batch(
         .ok()
         .filter(|value| !value.trim().is_empty())
         .or_else(|| default_whisper_cpp_model_dir(&project_root, &request.whisper_model));
-    if let Some(model_dir) = whisper_cpp_model_dir {
-        args.push("--whisper-cpp-model-dir".to_string());
-        args.push(model_dir);
+    if !enhance_mode {
+        if let Some(model_dir) = whisper_cpp_model_dir {
+            args.push("--whisper-cpp-model-dir".to_string());
+            args.push(model_dir);
+        }
     }
 
-    if env::var("LECTURE_PROCESSOR_REQUIRE_WHISPER_CPP_COREML")
-        .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
+    if !enhance_mode
+        && env::var("LECTURE_PROCESSOR_REQUIRE_WHISPER_CPP_COREML")
+            .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
     {
         args.push("--require-whisper-cpp-coreml".to_string());
     }
 
-    if request.confirm_normalization {
+    if !enhance_mode && request.confirm_normalization {
         args.push("--confirm-normalization".to_string());
     }
 
-    if !request.save_normalized_video {
+    if !enhance_mode && !request.save_normalized_video {
         args.push("--no-save-normalized-video".to_string());
     }
 
@@ -513,7 +732,11 @@ fn run_process_batch(
         },
         stdout: stdout_text,
         stderr: stderr_text,
-        output_dir: request.output_dir,
+        output_dir: if enhance_mode {
+            request.input_dir
+        } else {
+            request.output_dir
+        },
         cancelled,
     })
 }
