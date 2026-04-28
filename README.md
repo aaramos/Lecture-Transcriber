@@ -9,9 +9,13 @@ The implementation has two layers: a Python processing core and a Tauri desktop 
 - Scans a folder for `.mov` files.
 - Skips files shorter than 60 seconds.
 - Optionally normalizes 2x recordings to 1x playback with FFmpeg.
+- Extracts a temporary clean 16 kHz mono WAV for transcription, then deletes it after use.
 - Runs transcription through one controlled Whisper lane.
 - Extracts slide images from visual scene changes.
 - Writes per-file output folders, transcripts, SRT files, slides, and processing logs.
+- Writes structured `lecture.json` and `batch.json` artifacts for study-page rendering.
+- Generates offline HTML study pages for each lecture and a batch index page.
+- Optionally enriches study pages with mock AI output or Gemini-generated titles, summaries, outlines, and slide notes.
 - Continues the batch if one file fails.
 - Prints a final attempted/completed/failed/skipped summary.
 - Provides a desktop UI for selecting or dropping folders, speed, output location, and processing settings.
@@ -46,7 +50,7 @@ Apple Silicon acceleration adds one more optional setup step:
 scripts/setup-whisper-cpp-coreml.sh large-v3
 ```
 
-The CoreML setup script builds `pywhispercpp` with CoreML support, downloads the matching `ggml-*.bin` model, and generates the matching `*-encoder.mlmodelc` encoder bundle. Keep the `.bin` file and `.mlmodelc` folder together in the same model directory. The desktop app automatically uses `.models/whisper-cpp` when the selected Whisper model is present there, and it disables whisper.cpp flash attention by default because that path can crash inside Metal on Apple Silicon.
+The CoreML setup script builds `pywhispercpp` with CoreML support, downloads the matching `ggml-*.bin` model, and generates the matching `*-encoder.mlmodelc` encoder bundle. Keep the `.bin` file and `.mlmodelc` folder together in the same model directory. `faster-whisper` is the default transcription engine because it has been more stable in local testing. whisper.cpp remains available as an explicit experimental backend, and the app disables whisper.cpp flash attention by default because that path can crash inside Metal on Apple Silicon.
 
 FFmpeg is installed locally in `.tools/darwin_arm64`; the app auto-discovers that path when system `ffmpeg` and `ffprobe` are not available.
 
@@ -123,17 +127,42 @@ lecture-processor process /path/to/lectures \
   --output /path/to/output \
   --concurrent 4 \
   --whisper-model large-v3 \
-  --transcription-engine auto \
+  --transcription-engine faster-whisper \
   --ffmpeg-hwaccel auto \
   --slide-backend auto \
   --slide-sensitivity medium
 ```
 
+To generate local HTML only, use the default `--ai-provider none`. To preview the AI study-note flow without an API call:
+
+```bash
+lecture-processor process /path/to/lectures \
+  --transcription-engine none \
+  --ai-provider mock
+```
+
+To use Gemini enrichment from the CLI, install the AI optional dependency and provide a Gemini API key:
+
+```bash
+python3 -m pip install -e ".[ai]"
+GEMINI_API_KEY=... lecture-processor process /path/to/lectures \
+  --ai-provider gemini \
+  --ai-model gemini-2.5-flash-lite
+```
+
+The desktop app stores the Gemini key in macOS Keychain from Settings and passes it only to the processor process.
+
 `--audio-quality high` uses FFmpeg's `rubberband` filter when the installed FFmpeg build includes it. The bundled local FFmpeg does not, so the processor automatically falls back to `atempo` instead of failing the batch.
+
+## Transcription Reliability
+
+Before Whisper runs, the processor creates a hidden temporary `.transcription_audio.wav` in the lecture output folder. That file is mono, 16 kHz PCM audio with basic speech cleanup/normalization when the installed FFmpeg build supports it. The file is removed immediately after transcription, and startup cleanup removes stale copies from interrupted runs.
+
+`faster-whisper` uses English transcription settings with voice-activity filtering, previous-text conditioning disabled, and mild anti-repetition controls. Those settings are meant to reduce the repeated ending loops found in Module 6 while keeping the output faithful to the lecture audio.
 
 ## Performance Backends
 
-On Apple Silicon, the Tauri shell detects the platform and passes `--apple-silicon` to the Python processor. That makes `auto` mode prefer `whisper.cpp` through `pywhispercpp` when it is installed, use FFmpeg VideoToolbox hardware decode for normalization, and use FFmpeg for slide-frame extraction instead of OpenCV.
+On Apple Silicon, the Tauri shell detects the platform and passes `--apple-silicon` to the Python processor. That uses FFmpeg VideoToolbox hardware decode for normalization and FFmpeg for slide-frame extraction instead of OpenCV. Transcription still defaults to `faster-whisper`; select `whisper.cpp` explicitly when testing CoreML/Metal acceleration.
 
 Useful speed controls:
 
@@ -165,8 +194,13 @@ Each source file gets its own output folder:
 
 ```text
 OutputFolder/
+├── index.html
+├── batch.json
 └── Lecture1/
     ├── Lecture1.mp4
+    ├── lecture.json
+    ├── html/
+    │   └── index.html
     ├── transcript.txt
     ├── transcript.srt
     ├── slides/

@@ -7,14 +7,19 @@ from typing import Optional
 
 OUTPUT_LOCK_FILE = ".lecture_processor.lock"
 NORMALIZED_WORK_FILE = ".normalized_work.mp4"
+TRANSCRIPTION_AUDIO_FILE = ".transcription_audio.wav"
 FFMPEG_TEMP_SUFFIX = ".ffmpeg.tmp"
 SLIDE_TEMP_PREFIX = "lecture-slides-"
 ATOMIC_TEMP_FILES = {
+    ".batch.json.tmp",
     ".batch_error.txt.tmp",
     ".batch_summary.txt.tmp",
+    ".index.html.tmp",
+    ".lecture.json.tmp",
     ".processing_log.txt.tmp",
     ".transcript.srt.tmp",
     ".transcript.txt.tmp",
+    "..lecture_processor_control.json.tmp",
 }
 
 
@@ -75,6 +80,7 @@ def _iter_output_temp_files(output_dir: Path):
         for filename in filenames:
             if (
                 filename == NORMALIZED_WORK_FILE
+                or filename == TRANSCRIPTION_AUDIO_FILE
                 or filename in ATOMIC_TEMP_FILES
                 or filename.endswith(FFMPEG_TEMP_SUFFIX)
             ):

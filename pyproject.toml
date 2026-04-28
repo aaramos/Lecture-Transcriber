@@ -29,6 +29,9 @@ apple-silicon = [
   "coremltools>=8.0",
   "ane_transformers"
 ]
+ai = [
+  "google-genai>=1.0.0"
+]
 dev = []
 
 [project.scripts]

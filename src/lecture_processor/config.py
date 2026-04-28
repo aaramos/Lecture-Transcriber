@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
+from typing import Optional, Tuple
 
 from .errors import LectureProcessorError
 
@@ -41,6 +42,12 @@ class SlideBackend(str, Enum):
     OPENCV = "opencv"
 
 
+class AIProviderName(str, Enum):
+    NONE = "none"
+    MOCK = "mock"
+    GEMINI = "gemini"
+
+
 @dataclass(frozen=True)
 class BatchConfig:
     input_dir: Path
@@ -52,7 +59,7 @@ class BatchConfig:
     save_normalized_video: bool = True
     audio_quality: AudioQuality = AudioQuality.FAST
     slide_sensitivity: SlideSensitivity = SlideSensitivity.MEDIUM
-    transcription_engine: TranscriptionEngine = TranscriptionEngine.AUTO
+    transcription_engine: TranscriptionEngine = TranscriptionEngine.FASTER_WHISPER
     whisper_model: str = "large-v3"
     whisper_cpp_model_dir: str = ""
     require_whisper_cpp_coreml: bool = False
@@ -61,6 +68,11 @@ class BatchConfig:
     ffmpeg_hwaccel: FfmpegHwAccel = FfmpegHwAccel.AUTO
     slide_backend: SlideBackend = SlideBackend.AUTO
     apple_silicon: bool = False
+    ai_provider: AIProviderName = AIProviderName.NONE
+    ai_model: str = ""
+    render_html: bool = True
+    skip_files: Tuple[str, ...] = ()
+    control_file: Optional[Path] = None
 
     def validate(self) -> None:
         if not self.input_dir.exists():
@@ -81,6 +93,8 @@ class BatchConfig:
                 "2x normalization can create half-speed output if the files are already 1x. "
                 "Re-run with --confirm-normalization after confirming the batch was recorded at 2x."
             )
+        if self.ai_provider is AIProviderName.GEMINI and not self.ai_model:
+            object.__setattr__(self, "ai_model", "gemini-2.5-flash-lite")
 
     @property
     def normalized_timestamp_scale(self) -> float:

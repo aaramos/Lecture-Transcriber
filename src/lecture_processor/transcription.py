@@ -15,6 +15,13 @@ class Transcriber(Protocol):
 
 
 class NullTranscriber:
+    metadata = {
+        "resolved_engine": "none",
+        "model": "",
+        "coreml_used": False,
+        "language": "en",
+    }
+
     def transcribe(self, media_path: Path) -> TranscriptResult:
         return TranscriptResult(
             text="",
@@ -33,14 +40,43 @@ class LockedTranscriber:
         with self._lock:
             return self._transcriber.transcribe(media_path)
 
+    @property
+    def metadata(self) -> dict:
+        return getattr(self._transcriber, "metadata", {})
+
 
 class FasterWhisperTranscriber:
+    TRANSCRIBE_OPTIONS = {
+        "language": "en",
+        "task": "transcribe",
+        "beam_size": 5,
+        "best_of": 5,
+        "temperature": [0.0, 0.2, 0.4],
+        "compression_ratio_threshold": 2.2,
+        "log_prob_threshold": -1.0,
+        "no_speech_threshold": 0.6,
+        "condition_on_previous_text": False,
+        "vad_filter": True,
+        "vad_parameters": {"min_silence_duration_ms": 500},
+        "repetition_penalty": 1.05,
+        "no_repeat_ngram_size": 5,
+    }
+
     def __init__(self, model_name: str) -> None:
         module = importlib.import_module("faster_whisper")
         self._model = module.WhisperModel(model_name)
+        self.metadata = {
+            "resolved_engine": "faster-whisper",
+            "model": model_name,
+            "coreml_used": False,
+            "language": "en",
+            "audio_input": "clean_16khz_mono_wav",
+            "condition_on_previous_text": False,
+            "vad_filter": True,
+        }
 
     def transcribe(self, media_path: Path) -> TranscriptResult:
-        segments_iter, _info = self._model.transcribe(str(media_path))
+        segments_iter, _info = self._model.transcribe(str(media_path), **self.TRANSCRIBE_OPTIONS)
         segments = []
         text_parts = []
         for segment in segments_iter:
@@ -64,6 +100,12 @@ class OpenAIWhisperTranscriber:
     def __init__(self, model_name: str) -> None:
         module = importlib.import_module("whisper")
         self._model = module.load_model(model_name)
+        self.metadata = {
+            "resolved_engine": "openai-whisper",
+            "model": model_name,
+            "coreml_used": False,
+            "language": "en",
+        }
 
     def transcribe(self, media_path: Path) -> TranscriptResult:
         result = self._model.transcribe(str(media_path))
@@ -91,8 +133,8 @@ class WhisperCppTranscriber:
     ) -> None:
         configure_whisper_cpp_runtime_env()
         module = importlib.import_module("pywhispercpp.model")
+        system_info = str(module.Model.system_info())
         if require_coreml:
-            system_info = str(module.Model.system_info())
             if "COREML = 1" not in system_info:
                 raise DependencyMissingError(
                     "pywhispercpp is installed, but it was not built with CoreML support. "
@@ -111,6 +153,12 @@ class WhisperCppTranscriber:
             model_kwargs["n_threads"] = n_threads
 
         self._model = module.Model(model_name, **model_kwargs)
+        self.metadata = {
+            "resolved_engine": "whisper-cpp",
+            "model": model_name,
+            "coreml_used": "COREML = 1" in system_info,
+            "language": "en",
+        }
 
     def transcribe(self, media_path: Path) -> TranscriptResult:
         segments_raw = self._model.transcribe(str(media_path))

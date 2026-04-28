@@ -7,32 +7,43 @@ if (!invoke) {
 const STEP_LABELS = {
   Probe: "Checking video",
   Normalize: "Normalizing",
+  Audio: "Preparing audio",
   Transcribe: "Transcribing",
   Slides: "Extracting slides",
+  Enrich: "Creating study notes",
+  Render: "Building HTML",
 };
 
 const STEP_START_PROGRESS = {
   Probe: 8,
   Normalize: 22,
-  Transcribe: 48,
+  Audio: 44,
+  Transcribe: 54,
   Slides: 82,
+  Enrich: 88,
+  Render: 96,
 };
 
 const STEP_DONE_PROGRESS = {
   Probe: 18,
   Normalize: 42,
+  Audio: 52,
   Transcribe: 78,
   Slides: 96,
+  Enrich: 94,
+  Render: 100,
 };
 
-const SETTINGS_STORAGE_KEY = "lectureProcessor.settings.v1";
+const SETTINGS_STORAGE_KEY = "lectureProcessor.settings.v2";
 const LAST_OUTPUT_STORAGE_KEY = "lectureProcessor.lastOutputDir.v1";
 const DEFAULT_SETTINGS = Object.freeze({
   recordingSpeed: "1x",
   audioQuality: "fast",
-  transcriptionEngine: "auto",
+  transcriptionEngine: "faster-whisper",
   whisperModel: "large-v3",
   slideSensitivity: "medium",
+  aiProvider: "none",
+  aiModel: "gemini-2.5-flash-lite",
   concurrentFiles: 4,
   saveNormalized: true,
 });
@@ -52,8 +63,10 @@ const state = {
   runStartedAt: 0,
   elapsedTimer: null,
   finishedFileReports: 0,
+  geminiKeySaved: false,
   files: new Map(),
   fileOrder: [],
+  skippedFiles: new Set(),
 };
 
 const elements = {
@@ -81,9 +94,7 @@ const elements = {
   elapsedTime: document.querySelector("#elapsedTime"),
   progressBar: document.querySelector("#progressBar"),
   activeVideos: document.querySelector("#activeVideos"),
-  queueList: document.querySelector("#queueList"),
   activeSummary: document.querySelector("#activeSummary"),
-  queueSummary: document.querySelector("#queueSummary"),
   completedCount: document.querySelector("#completedCount"),
   processingCount: document.querySelector("#processingCount"),
   waitingCount: document.querySelector("#waitingCount"),
@@ -94,6 +105,11 @@ const elements = {
   transcriptionEngine: document.querySelector("#transcriptionEngine"),
   whisperModel: document.querySelector("#whisperModel"),
   slideSensitivity: document.querySelector("#slideSensitivity"),
+  aiProvider: document.querySelector("#aiProvider"),
+  aiModel: document.querySelector("#aiModel"),
+  geminiApiKey: document.querySelector("#geminiApiKey"),
+  saveGeminiKeyButton: document.querySelector("#saveGeminiKeyButton"),
+  geminiKeyStatus: document.querySelector("#geminiKeyStatus"),
   concurrentFiles: document.querySelector("#concurrentFiles"),
   saveNormalized: document.querySelector("#saveNormalized"),
   restoreDefaultsButton: document.querySelector("#restoreDefaultsButton"),
@@ -102,6 +118,7 @@ const elements = {
 
 window.__TAURI__?.event?.listen?.("processor-event", (event) => handleProcessorEvent(event.payload));
 loadPersistedSettings();
+refreshGeminiKeyStatus();
 cleanupTempFilesAtLaunch();
 setupDragAndDrop();
 
@@ -137,6 +154,12 @@ elements.cancelRunButton.addEventListener("click", cancelBatch);
 elements.openOutputButton.addEventListener("click", openOutput);
 elements.settingsButton.addEventListener("click", () => showDialog(elements.settingsDialog));
 elements.restoreDefaultsButton.addEventListener("click", restoreDefaultSettings);
+elements.saveGeminiKeyButton.addEventListener("click", () => saveGeminiKey());
+elements.activeVideos.addEventListener("click", (event) => {
+  const button = event.target.closest("[data-video-action]");
+  if (!button) return;
+  handleVideoAction(button.dataset.videoAction, button.dataset.source);
+});
 elements.confirmCheckbox.addEventListener("change", () => {
   elements.confirmContinue.disabled = !elements.confirmCheckbox.checked;
 });
@@ -150,9 +173,14 @@ elements.concurrentFiles.addEventListener("input", () => {
   elements.transcriptionEngine,
   elements.whisperModel,
   elements.slideSensitivity,
+  elements.aiProvider,
+  elements.aiModel,
   elements.saveNormalized,
 ].forEach((element) => {
-  element.addEventListener("change", saveCurrentSettings);
+  element.addEventListener("change", () => {
+    saveCurrentSettings();
+    renderAiControls();
+  });
 });
 
 elements.speedSegments.forEach((button) => {
@@ -192,14 +220,15 @@ async function scanFolder() {
     const scan = await invoke("scan_folder", { inputDir: state.inputDir });
     state.fileCount = scan.movCount;
     state.fileNames = scan.movFiles || [];
-    state.files.clear();
-    state.fileOrder = [];
+    state.skippedFiles.clear();
+    initializeQueuedFiles();
     setFolderError(scan.movCount === 0 ? "No .mov files found. Try a different folder." : "");
   } catch (error) {
     state.fileCount = 0;
     state.fileNames = [];
     state.files.clear();
     state.fileOrder = [];
+    state.skippedFiles.clear();
     setFolderError(String(error));
   }
 }
@@ -211,24 +240,30 @@ function clearFolder() {
   state.fileNames = [];
   state.files.clear();
   state.fileOrder = [];
+  state.skippedFiles.clear();
   setFolderError("");
   render();
 }
 
 async function startBatch() {
-  if (state.running || !state.inputDir || state.fileCount === 0) return;
+  if (state.running || !state.inputDir || processableFileCount() === 0) return;
 
   if (state.recordingSpeed === "2x") {
     const confirmed = await confirmNormalization();
     if (!confirmed) return;
   }
 
-  const concurrentFiles = validateSettings();
-  if (!concurrentFiles) return;
+  if (elements.aiProvider.value === "gemini" && elements.geminiApiKey.value.trim()) {
+    const saved = await saveGeminiKey({ quiet: true });
+    if (!saved) return;
+  }
+  await refreshGeminiKeyStatus();
+  const finalConcurrentFiles = validateSettings();
+  if (!finalConcurrentFiles) return;
 
   resetResults();
   setRunning(true);
-  primeQueuedFiles(concurrentFiles);
+  primeQueuedFiles(finalConcurrentFiles);
   renderVideoDashboard();
   await waitForPaint();
 
@@ -237,13 +272,16 @@ async function startBatch() {
     outputDir: state.outputDir,
     recordingSpeed: state.recordingSpeed,
     confirmNormalization: state.recordingSpeed === "2x",
-    concurrentFiles,
+    concurrentFiles: finalConcurrentFiles,
     saveNormalizedVideo: elements.saveNormalized.checked,
     audioQuality: elements.audioQuality.value,
     transcriptionEngine: elements.transcriptionEngine.value,
     whisperModel: elements.whisperModel.value,
     slideSensitivity: elements.slideSensitivity.value,
+    aiProvider: elements.aiProvider.value,
+    aiModel: elements.aiModel.value,
     minDuration: 60,
+    skippedFiles: [...state.skippedFiles],
   };
   rememberOutputDir(request.outputDir);
 
@@ -312,7 +350,7 @@ function applyProcessorResult(result) {
 
   let unfinished = 0;
   if (result.cancelled) {
-    unfinished = markRemainingVideosCanceled();
+    unfinished = markRemainingVideosStopped();
   } else {
     unfinished = markUnfinishedVideosFailed("Processor ended before reporting this video complete.");
   }
@@ -322,30 +360,33 @@ function applyProcessorResult(result) {
   const exitCode = Number(result.exitCode || 0);
   const hasFailures = counts.failed > 0 || exitCode !== 0;
   const hasSkips = counts.skipped > 0;
+  const hasStopped = counts.stopped > 0;
   const failedBeforeFileResults = exitCode !== 0 && state.finishedFileReports === 0;
   const allReported =
     counts.processing === 0 &&
     counts.waiting === 0 &&
-    counts.canceled === 0 &&
+    counts.stopped === 0 &&
     counts.failed === 0 &&
     counts.completed + counts.skipped === (state.progressTotal || state.fileCount || counts.total);
 
   if (result.cancelled) {
-    elements.runTitle.textContent = "Batch canceled";
-    elements.statusPill.textContent = "Canceled";
+    elements.runTitle.textContent = "Batch stopped";
+    elements.statusPill.textContent = "Stopped";
     elements.statusPill.className = "status-pill warning";
     elements.runMeta.textContent = "Processing was stopped. Completed files remain in the output folder.";
-  } else if (exitCode === 0 && allReported && !hasSkips) {
+  } else if (exitCode === 0 && allReported && !hasSkips && !hasStopped) {
     elements.runTitle.textContent = "Batch finished";
     elements.statusPill.textContent = "Complete";
     elements.statusPill.className = "status-pill complete";
     elements.runMeta.textContent = "All videos finished. Open the output folder for transcripts, videos, and slides.";
   } else {
     elements.runTitle.textContent = failedBeforeFileResults
-      ? "Batch failed"
-      : hasFailures
-        ? "Batch finished with issues"
-        : "Batch finished with skips";
+        ? "Batch failed"
+        : hasFailures
+          ? "Batch finished with issues"
+          : hasStopped
+            ? "Batch finished with stopped files"
+            : "Batch finished with skips";
     elements.statusPill.textContent = failedBeforeFileResults ? "Failed" : hasFailures ? "Review" : "Complete";
     elements.statusPill.className = failedBeforeFileResults
       ? "status-pill failed"
@@ -363,7 +404,7 @@ function finalRunSummary(counts, unfinished, exitCode) {
   if (counts.completed) parts.push(`${counts.completed} complete`);
   if (counts.failed) parts.push(`${counts.failed} failed`);
   if (counts.skipped) parts.push(`${counts.skipped} skipped`);
-  if (counts.canceled) parts.push(`${counts.canceled} canceled`);
+  if (counts.stopped) parts.push(`${counts.stopped} stopped`);
   if (unfinished) parts.push(`${unfinished} did not report a final result`);
   if (exitCode !== 0 && counts.failed === 0) parts.push(`processor exited with code ${exitCode}`);
   return `${parts.join(" · ") || "Run needs review"}. Open the output folder for batch_summary.txt or batch_error.txt.`;
@@ -377,10 +418,10 @@ function render() {
     : "No folder selected";
   elements.outputPath.textContent = state.outputDir || "-";
   elements.clearFolderButton.classList.toggle("hidden", !hasFolder);
-  elements.startButton.disabled = state.running || !hasFolder || state.fileCount === 0;
+  elements.startButton.disabled = state.running || !hasFolder || processableFileCount() === 0;
   if (!state.running) {
     elements.runMeta.textContent = hasFolder
-      ? `${state.fileCount} video${state.fileCount === 1 ? "" : "s"} ready`
+      ? readyRunMeta()
       : "Select a folder to begin.";
   }
   renderVideoDashboard();
@@ -389,14 +430,15 @@ function render() {
 
 function setRunning(running) {
   state.running = running;
-  elements.startButton.disabled = running || !state.inputDir || state.fileCount === 0;
+  elements.startButton.disabled = running || !state.inputDir || processableFileCount() === 0;
   elements.chooseFolderButton.disabled = running;
   elements.clearFolderButton.disabled = running;
   elements.chooseOutputButton.disabled = running;
   elements.progressBar.classList.toggle("running", running);
   renderRunControls();
   if (running) {
-    elements.runTitle.textContent = `Preparing ${state.fileCount} video${state.fileCount === 1 ? "" : "s"}...`;
+    const ready = processableFileCount();
+    elements.runTitle.textContent = `Preparing ${ready} video${ready === 1 ? "" : "s"}...`;
     elements.statusPill.textContent = "Running";
     elements.statusPill.className = "status-pill running";
     elements.runMeta.textContent = runDescription();
@@ -416,7 +458,7 @@ function setFolderError(message) {
 function resetResults() {
   elements.completedCount.textContent = "0";
   elements.processingCount.textContent = "0";
-  elements.waitingCount.textContent = String(state.fileCount || 0);
+  elements.waitingCount.textContent = String(processableFileCount() || 0);
   elements.failedCount.textContent = "0";
   elements.skippedCount.textContent = "0";
   elements.canceledCount.textContent = "0";
@@ -459,6 +501,14 @@ function validateSettings(options = {}) {
     elements.runMeta.textContent = "Concurrent files must be between 1 and 8.";
     return null;
   }
+  if (elements.aiProvider.value === "gemini" && !state.geminiKeySaved && !elements.geminiApiKey.value.trim()) {
+    if (showDialogOnError) {
+      showDialog(elements.settingsDialog);
+    }
+    elements.runMeta.textContent = "Gemini needs an API key saved in Keychain.";
+    elements.geminiApiKey.focus();
+    return null;
+  }
   return value;
 }
 
@@ -475,6 +525,9 @@ function handleProcessorEvent(event) {
     renderRunControls();
     renderVideoDashboard();
   } else if (event.kind === "file_started") {
+    if (["skipped", "stopping", "stopped"].includes(state.files.get(event.source)?.status)) {
+      return;
+    }
     updateFile(event.source, {
       status: "running",
       stage: "Preparing",
@@ -482,6 +535,9 @@ function handleProcessorEvent(event) {
       progress: 5,
     });
   } else if (event.kind === "step_started") {
+    if (["skipped", "stopping", "stopped"].includes(state.files.get(event.source)?.status)) {
+      return;
+    }
     updateFile(event.source, {
       status: "running",
       stage: STEP_LABELS[event.step] || event.step,
@@ -489,6 +545,9 @@ function handleProcessorEvent(event) {
       progress: STEP_START_PROGRESS[event.step] || 12,
     });
   } else if (event.kind === "step_finished") {
+    if (["skipped", "stopping", "stopped"].includes(state.files.get(event.source)?.status)) {
+      return;
+    }
     updateFile(event.source, {
       stage: `${STEP_LABELS[event.step] || event.step} complete`,
       detail: `${Number(event.elapsed_seconds || 0).toFixed(1)}s`,
@@ -526,8 +585,8 @@ function updateFile(source, patch) {
   }
   const previous = state.files.get(source) || {
     status: "queued",
-    stage: "Waiting",
-    detail: "Waiting",
+    stage: "Queue",
+    detail: "Waiting to start",
     progress: 0,
   };
   state.files.set(source, { ...previous, ...patch });
@@ -536,13 +595,9 @@ function updateFile(source, patch) {
 
 function renderVideoDashboard() {
   const entries = dashboardEntries();
-  const activeEntries = entries.filter(([_name, file]) => isActiveStatus(file.status));
-  const queueEntries = entries.filter(([_name, file]) => !isActiveStatus(file.status));
-
   renderCounts(entries);
   renderOverallProgress(entries);
-  renderActiveVideos(activeEntries);
-  renderQueue(queueEntries);
+  renderVideoList(entries);
 }
 
 function primeQueuedFiles(concurrentFiles) {
@@ -552,20 +607,39 @@ function primeQueuedFiles(concurrentFiles) {
     : Array.from({ length: state.fileCount }, (_value, index) => `File ${index + 1}`);
 
   state.fileOrder = names;
+  let activeSlots = 0;
   names.forEach((name, index) => {
+    const skipped = state.skippedFiles.has(name);
+    const preparing = !skipped && activeSlots < concurrentFiles;
+    if (preparing) activeSlots += 1;
     state.files.set(name, {
-      status: index < concurrentFiles ? "preparing" : "queued",
-      stage: index < concurrentFiles ? "Preparing" : "Waiting",
-      detail: index < concurrentFiles ? "Preparing video" : "Waiting",
-      progress: index < concurrentFiles ? 3 : 0,
+      status: skipped ? "skipped" : preparing ? "preparing" : "queued",
+      stage: skipped ? "Skipped" : preparing ? "Preparing" : "Queue",
+      detail: skipped ? "Skipped by user" : preparing ? "Preparing video" : "Waiting to start",
+      progress: skipped ? 100 : preparing ? 3 : 0,
     });
   });
 
   state.progressTotal = names.length;
-  elements.runMeta.textContent = `Processing up to ${Math.min(concurrentFiles, names.length)} video${
-    Math.min(concurrentFiles, names.length) === 1 ? "" : "s"
+  const activeLimit = Math.min(concurrentFiles, processableFileCount());
+  elements.runMeta.textContent = `Processing up to ${activeLimit} video${
+    activeLimit === 1 ? "" : "s"
   } at once.`;
   renderVideoDashboard();
+}
+
+function initializeQueuedFiles() {
+  state.files.clear();
+  state.fileOrder = state.fileNames.length ? [...state.fileNames] : [];
+  state.fileOrder.forEach((name) => {
+    const skipped = state.skippedFiles.has(name);
+    state.files.set(name, {
+      status: skipped ? "skipped" : "queued",
+      stage: skipped ? "Skipped" : "Queue",
+      detail: skipped ? "Skipped by user" : "Waiting to start",
+      progress: skipped ? 100 : 0,
+    });
+  });
 }
 
 function dashboardEntries() {
@@ -574,8 +648,8 @@ function dashboardEntries() {
       name,
       state.files.get(name) || {
         status: "queued",
-        stage: "Waiting",
-        detail: "Waiting",
+        stage: "Queue",
+        detail: "Waiting to start",
         progress: 0,
       },
     ]);
@@ -586,8 +660,8 @@ function dashboardEntries() {
       name,
       {
         status: "queued",
-        stage: "Ready",
-        detail: "Ready",
+        stage: "Queue",
+        detail: "Waiting to start",
         progress: 0,
       },
     ]);
@@ -597,14 +671,14 @@ function dashboardEntries() {
 }
 
 function renderCounts(entries) {
-  const { completed, processing, failed, skipped, canceled, waiting } = countDashboardEntries(entries);
+  const { completed, processing, failed, skipped, stopped, waiting } = countDashboardEntries(entries);
 
   elements.completedCount.textContent = String(completed);
   elements.processingCount.textContent = String(processing);
   elements.waitingCount.textContent = String(waiting);
   elements.failedCount.textContent = String(failed);
   elements.skippedCount.textContent = String(skipped);
-  elements.canceledCount.textContent = String(canceled);
+  elements.canceledCount.textContent = String(stopped);
 }
 
 function countDashboardEntries(entries) {
@@ -614,7 +688,7 @@ function countDashboardEntries(entries) {
     processing: entries.filter(([_name, file]) => isActiveStatus(file.status)).length,
     failed: entries.filter(([_name, file]) => file.status === "failed").length,
     skipped: entries.filter(([_name, file]) => file.status === "skipped").length,
-    canceled: entries.filter(([_name, file]) => file.status === "canceled").length,
+    stopped: entries.filter(([_name, file]) => file.status === "stopped").length,
     waiting: entries.filter(([_name, file]) => file.status === "queued").length,
   };
 }
@@ -626,71 +700,35 @@ function renderOverallProgress(entries) {
   setProgressPercent(percent);
 }
 
-function renderActiveVideos(entries) {
-  elements.activeSummary.textContent =
-    entries.length === 0
-      ? state.running
-        ? "Waiting for active videos"
-        : "No videos processing"
-      : `${entries.length} processing`;
-
+function renderVideoList(entries) {
+  elements.activeSummary.textContent = videoListSummaryText(countDashboardEntries(entries));
   if (entries.length === 0) {
-    elements.activeVideos.innerHTML = `<div class="video-placeholder">${
-      state.running ? "Waiting for the next video to start." : "No videos processing."
-    }</div>`;
+    elements.activeVideos.innerHTML = `<div class="video-placeholder">Choose a folder to see videos.</div>`;
     return;
   }
 
   elements.activeVideos.innerHTML = entries
     .map(([name, file]) => {
-      const percent = clampPercent(file.progress || 0);
-      const status = escapeHtml(file.status || "running");
-      return `
-        <div class="active-video-row ${status}">
-          <span class="video-name">${escapeHtml(name)}</span>
-          <span class="video-stage">${escapeHtml(file.stage || "Working")}</span>
-          <span class="video-bar-track" aria-hidden="true">
-            <span class="video-bar" style="width: ${percent}%"></span>
-          </span>
-          <span class="video-percent">${percent}%</span>
-        </div>
-      `;
-    })
-    .join("");
-}
-
-function renderQueue(entries) {
-  const waiting = entries.filter(([_name, file]) => file.status === "queued").length;
-  const completed = entries.filter(([_name, file]) => file.status === "completed").length;
-  const canceled = entries.filter(([_name, file]) => file.status === "canceled").length;
-  const failed = entries.filter(([_name, file]) => file.status === "failed").length;
-  const skipped = entries.filter(([_name, file]) => file.status === "skipped").length;
-  elements.queueSummary.textContent = queueSummaryText({
-    entries: entries.length,
-    completed,
-    canceled,
-    failed,
-    skipped,
-    waiting,
-  });
-
-  if (entries.length === 0) {
-    elements.queueList.innerHTML = `<div class="video-placeholder">${
-      state.fileNames.length ? "All listed videos are active." : "Choose a folder to see videos."
-    }</div>`;
-    return;
-  }
-
-  elements.queueList.innerHTML = entries
-    .map(([name, file]) => {
       const status = escapeHtml(file.status || "queued");
-      const detail = file.detail && file.detail !== statusLabel(file.status) ? file.detail : "";
+      const percent = clampPercent(file.progress || 0);
+      const active = isActiveStatus(file.status);
+      const detail = fileFinishedDetailFromState(file);
+      const action = videoActionFor(name, file);
       return `
-        <div class="queue-video-row ${status}">
+        <div class="video-row ${status}">
           <span class="video-status-dot" aria-hidden="true"></span>
-          <span class="video-name">${escapeHtml(name)}</span>
-          <span class="queue-status">${escapeHtml(statusLabel(file.status))}</span>
-          ${detail ? `<span class="queue-detail">${escapeHtml(detail)}</span>` : ""}
+          <span class="video-name" title="${escapeHtml(name)}">${escapeHtml(name)}</span>
+          <span class="video-stage">${escapeHtml(file.stage || statusLabel(file.status))}</span>
+          ${
+            active
+              ? `<span class="video-progress-cell"><span class="video-bar-track" aria-hidden="true"><span class="video-bar" style="width: ${percent}%"></span></span><span class="video-percent">${percent}%</span></span>`
+              : `<span class="video-detail">${escapeHtml(detail)}</span>`
+          }
+          ${
+            action
+              ? `<button class="${action.className}" type="button" data-video-action="${action.action}" data-source="${escapeHtml(name)}">${action.label}</button>`
+              : `<span class="video-row-spacer" aria-hidden="true"></span>`
+          }
         </div>
       `;
     })
@@ -720,22 +758,36 @@ function fileFinishedDetail(event, failedStage) {
   if (event.status === "skipped") {
     return event.message || "Skipped";
   }
+  if (event.status === "stopped") {
+    return event.message || "Stopped by user";
+  }
   return event.message || statusLabel(event.status);
 }
 
+function fileFinishedDetailFromState(file) {
+  if (!file) return "";
+  if (file.status === "completed") return file.detail || "Complete";
+  if (file.status === "failed") return file.detail || "Needs review";
+  if (file.status === "skipped") return file.detail || "Skipped by user";
+  if (file.status === "stopped") return file.detail || "Stopped by user";
+  if (file.status === "queued") return file.detail || "Waiting to start";
+  return file.detail || statusLabel(file.status);
+}
+
 function isActiveStatus(status) {
-  return status === "preparing" || status === "running";
+  return status === "preparing" || status === "running" || status === "stopping";
 }
 
 function statusLabel(status) {
   if (status === "completed") return "Complete";
   if (status === "failed") return "Failed";
   if (status === "skipped") return "Skipped";
-  if (status === "canceled") return "Canceled";
+  if (status === "stopped") return "Stopped";
+  if (status === "stopping") return "Stopping";
   if (status === "preparing") return "Preparing";
   if (status === "running") return "Processing";
-  if (status === "queued") return state.running ? "Waiting" : "Ready";
-  return "Ready";
+  if (status === "queued") return "Queue";
+  return "Queue";
 }
 
 function clampPercent(value) {
@@ -753,22 +805,23 @@ function updateActiveVideosForCancel() {
     if (isActiveStatus(file.status)) {
       state.files.set(name, {
         ...file,
-        stage: "Canceling",
-        detail: "Stopping",
+        status: "stopping",
+        stage: "Stopping",
+        detail: "Stopping batch",
       });
     }
   }
   renderVideoDashboard();
 }
 
-function markRemainingVideosCanceled() {
+function markRemainingVideosStopped() {
   let changed = 0;
   for (const [name, file] of dashboardEntries()) {
     if (isActiveStatus(file.status) || file.status === "queued") {
       state.files.set(name, {
         ...file,
-        status: "canceled",
-        stage: "Canceled",
+        status: "stopped",
+        stage: "Stopped",
         detail: "Stopped by user",
         progress: 100,
       });
@@ -800,15 +853,111 @@ function markUnfinishedVideosFailed(detail) {
   return changed;
 }
 
-function queueSummaryText(summary) {
-  if (summary.entries === 0) return "No videos queued";
+function videoListSummaryText(summary) {
+  if (summary.total === 0) return "Choose a folder to see videos";
   const parts = [];
   if (summary.completed) parts.push(`${summary.completed} complete`);
-  if (summary.canceled) parts.push(`${summary.canceled} canceled`);
+  if (summary.processing) parts.push(`${summary.processing} active`);
+  if (summary.waiting) parts.push(`${summary.waiting} queued`);
   if (summary.failed) parts.push(`${summary.failed} failed`);
   if (summary.skipped) parts.push(`${summary.skipped} skipped`);
-  if (summary.waiting) parts.push(`${summary.waiting} waiting`);
-  return parts.length ? parts.join(" · ") : "All videos active";
+  if (summary.stopped) parts.push(`${summary.stopped} stopped`);
+  return parts.length ? parts.join(" · ") : "No videos ready";
+}
+
+function videoActionFor(name, file) {
+  if (!name || !file) return null;
+  if (!state.running) {
+    if (file.status === "skipped") {
+      return { action: "unskip", label: "Use", className: "video-action-button" };
+    }
+    if (file.status === "queued") {
+      return { action: "skip", label: "Skip", className: "video-action-button" };
+    }
+    return null;
+  }
+
+  if (file.status === "queued") {
+    return { action: "skip", label: "Skip", className: "video-action-button" };
+  }
+  if (file.status === "preparing" || file.status === "running") {
+    return { action: "stop", label: "Stop", className: "video-action-button danger" };
+  }
+  return null;
+}
+
+async function handleVideoAction(action, source) {
+  if (!source || !action) return;
+  if (!state.running) {
+    if (action === "skip") {
+      state.skippedFiles.add(source);
+      updateFile(source, {
+        status: "skipped",
+        stage: "Skipped",
+        detail: "Skipped by user",
+        progress: 100,
+      });
+      render();
+    } else if (action === "unskip") {
+      state.skippedFiles.delete(source);
+      updateFile(source, {
+        status: "queued",
+        stage: "Queue",
+        detail: "Waiting to start",
+        progress: 0,
+      });
+      render();
+    }
+    return;
+  }
+
+  if (action === "skip") {
+    updateFile(source, {
+      status: "skipped",
+      stage: "Skipped",
+      detail: "Skipped by user",
+      progress: 100,
+    });
+    await updateFileControl("skip", source);
+  } else if (action === "stop") {
+    updateFile(source, {
+      status: "stopping",
+      stage: "Stopping",
+      detail: "Stopping and removing partial output",
+    });
+    await updateFileControl("stop", source);
+  }
+}
+
+async function updateFileControl(action, source) {
+  try {
+    await invoke("update_file_control", {
+      request: {
+        outputDir: state.outputDir,
+        source,
+        action,
+      },
+    });
+  } catch (error) {
+    updateFile(source, {
+      status: "failed",
+      stage: "Control failed",
+      detail: `Could not ${action} file: ${error}`,
+      progress: 100,
+    });
+  }
+}
+
+function processableFileCount() {
+  const names = state.fileNames.length ? state.fileNames : state.fileOrder;
+  return names.filter((name) => !state.skippedFiles.has(name)).length;
+}
+
+function readyRunMeta() {
+  const ready = processableFileCount();
+  const skipped = state.skippedFiles.size;
+  const readyText = `${ready} video${ready === 1 ? "" : "s"} ready`;
+  return skipped ? `${readyText} · ${skipped} skipped` : readyText;
 }
 
 function loadPersistedSettings() {
@@ -836,9 +985,12 @@ function applySettings(settings) {
   setSelectValue(elements.transcriptionEngine, settings.transcriptionEngine, DEFAULT_SETTINGS.transcriptionEngine);
   setSelectValue(elements.whisperModel, settings.whisperModel, DEFAULT_SETTINGS.whisperModel);
   setSelectValue(elements.slideSensitivity, settings.slideSensitivity, DEFAULT_SETTINGS.slideSensitivity);
+  setSelectValue(elements.aiProvider, settings.aiProvider, DEFAULT_SETTINGS.aiProvider);
+  setSelectValue(elements.aiModel, settings.aiModel, DEFAULT_SETTINGS.aiModel);
   elements.concurrentFiles.value = String(validConcurrentFiles(settings.concurrentFiles));
   elements.saveNormalized.checked = Boolean(settings.saveNormalized);
   syncSpeedSegments();
+  renderAiControls();
   renderNormalizationWarning();
 }
 
@@ -852,6 +1004,8 @@ function saveCurrentSettings() {
     transcriptionEngine: elements.transcriptionEngine.value,
     whisperModel: elements.whisperModel.value,
     slideSensitivity: elements.slideSensitivity.value,
+    aiProvider: elements.aiProvider.value,
+    aiModel: elements.aiModel.value,
     concurrentFiles,
     saveNormalized: elements.saveNormalized.checked,
   };
@@ -861,6 +1015,52 @@ function saveCurrentSettings() {
   } catch {
     // Settings persistence is helpful, not required for processing.
   }
+}
+
+async function saveGeminiKey(options = {}) {
+  const { quiet = false } = options;
+  const key = elements.geminiApiKey.value.trim();
+  if (!key) {
+    if (!quiet) {
+      elements.geminiKeyStatus.textContent = "Paste a key first";
+    }
+    return false;
+  }
+
+  elements.saveGeminiKeyButton.disabled = true;
+  try {
+    await invoke("save_api_key", { provider: "gemini", apiKey: key });
+    elements.geminiApiKey.value = "";
+    state.geminiKeySaved = true;
+    elements.geminiKeyStatus.textContent = "Key saved";
+    return true;
+  } catch (error) {
+    state.geminiKeySaved = false;
+    elements.geminiKeyStatus.textContent = `Could not save key: ${error}`;
+    return false;
+  } finally {
+    elements.saveGeminiKeyButton.disabled = false;
+    renderAiControls();
+  }
+}
+
+async function refreshGeminiKeyStatus() {
+  try {
+    const result = await invoke("has_api_key", { provider: "gemini" });
+    state.geminiKeySaved = Boolean(result?.saved);
+    elements.geminiKeyStatus.textContent = state.geminiKeySaved ? "Key saved" : "No key saved";
+  } catch {
+    state.geminiKeySaved = false;
+    elements.geminiKeyStatus.textContent = "Key status unavailable";
+  }
+  renderAiControls();
+}
+
+function renderAiControls() {
+  const geminiSelected = elements.aiProvider.value === "gemini";
+  elements.aiModel.disabled = !geminiSelected;
+  elements.geminiApiKey.disabled = !geminiSelected;
+  elements.saveGeminiKeyButton.disabled = !geminiSelected;
 }
 
 async function cleanupTempFilesAtLaunch() {
@@ -939,7 +1139,10 @@ function showDialog(dialog) {
 function runDescription() {
   const speed = state.recordingSpeed === "2x" ? "2x to 1x" : "1x";
   const concurrent = Number.parseInt(elements.concurrentFiles.value, 10) || 1;
-  return `${state.fileCount} video${state.fileCount === 1 ? "" : "s"} · ${concurrent} at a time · ${speed}`;
+  const ready = processableFileCount();
+  const skipped = state.skippedFiles.size;
+  const skippedText = skipped ? ` · ${skipped} skipped` : "";
+  return `${ready} video${ready === 1 ? "" : "s"} · ${concurrent} at a time · ${speed}${skippedText}`;
 }
 
 function startElapsedTimer() {

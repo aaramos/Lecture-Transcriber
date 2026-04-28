@@ -4,8 +4,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from lecture_processor.config import AudioQuality, BatchConfig, RecordingSpeed
-from lecture_processor.errors import LectureProcessorError
+from lecture_processor.config import AIProviderName, AudioQuality, BatchConfig, RecordingSpeed
+from lecture_processor.control import update_control_file
+from lecture_processor.errors import LectureProcessorError, ProcessingStopped
 from lecture_processor.models import FileStatus, MediaInfo, TranscriptResult, TranscriptSegment
 from lecture_processor.pipeline import BatchProcessor, allocate_output_dirs, normalized_video_output_path
 
@@ -28,17 +29,29 @@ class FakeNormalizer:
     def __init__(self):
         self.calls = []
 
-    def normalize(self, source, destination, media_info, recording_speed, audio_quality):
+    def normalize(self, source, destination, media_info, recording_speed, audio_quality, stop_requested=None):
         self.calls.append((source, destination, media_info, recording_speed, audio_quality))
         destination.write_text("normalized", encoding="utf-8")
+        return destination
+
+
+class FakeAudioExtractor:
+    def __init__(self):
+        self.calls = []
+
+    def extract(self, source, destination, media_info, stop_requested=None):
+        self.calls.append((source, destination, media_info))
+        destination.write_text("audio", encoding="utf-8")
         return destination
 
 
 class FakeTranscriber:
     def __init__(self, fail_for=None):
         self.fail_for = set(fail_for or [])
+        self.inputs = []
 
     def transcribe(self, media_path):
+        self.inputs.append(media_path)
         if (
             media_path.name in self.fail_for
             or media_path.stem in self.fail_for
@@ -57,11 +70,25 @@ class FakeSlideExtractor:
     def __init__(self):
         self.scales = []
 
-    def extract(self, media_path, output_dir, timestamp_scale=1.0):
+    def extract(self, media_path, output_dir, timestamp_scale=1.0, stop_requested=None):
         self.scales.append(timestamp_scale)
         output_dir.mkdir(parents=True, exist_ok=True)
         (output_dir / "slide_0001_00-00-05.png").write_text("png", encoding="utf-8")
         return 1
+
+
+class StopDuringNormalizer:
+    def __init__(self, stop_for=None):
+        self.stop_for = set(stop_for or [])
+
+    def normalize(self, source, destination, media_info, recording_speed, audio_quality, stop_requested=None):
+        if source.name not in self.stop_for:
+            destination.write_text("normalized", encoding="utf-8")
+            return destination
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        (destination.parent / "partial.txt").write_text("partial", encoding="utf-8")
+        destination.write_text("partial video", encoding="utf-8")
+        raise ProcessingStopped("Stopped by user")
 
 
 class BatchProcessorTests(unittest.TestCase):
@@ -86,6 +113,7 @@ class BatchProcessorTests(unittest.TestCase):
                 config=config,
                 inspector=FakeInspector({"tiny.mov": 18.0}),
                 normalizer=FakeNormalizer(),
+                audio_extractor=FakeAudioExtractor(),
                 transcriber=FakeTranscriber(),
                 slide_extractor=FakeSlideExtractor(),
             ).run()
@@ -93,6 +121,72 @@ class BatchProcessorTests(unittest.TestCase):
             self.assertEqual(summary.skipped, 1)
             self.assertEqual(summary.results[0].status, FileStatus.SKIPPED)
             self.assertTrue((output / "tiny" / "processing_log.txt").exists())
+            self.assertTrue((output / "tiny" / "lecture.json").exists())
+
+    def test_user_skipped_files_do_not_create_output_artifacts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for name in ["skip.mov", "keep.mov"]:
+                (root / name).write_text("video", encoding="utf-8")
+            output = root / "out"
+            control_file = output / ".lecture_processor_control.json"
+            update_control_file(control_file, skip=["skip.mov"])
+            events = []
+            normalizer = FakeNormalizer()
+            config = BatchConfig(
+                input_dir=root,
+                output_dir=output,
+                control_file=control_file,
+                recording_speed=RecordingSpeed.DOUBLE,
+                confirm_normalization=True,
+            )
+
+            summary = BatchProcessor(
+                config=config,
+                inspector=FakeInspector({"skip.mov": 120.0, "keep.mov": 120.0}),
+                normalizer=normalizer,
+                audio_extractor=FakeAudioExtractor(),
+                transcriber=FakeTranscriber(),
+                slide_extractor=FakeSlideExtractor(),
+                progress_callback=events.append,
+            ).run()
+
+            self.assertEqual(summary.completed, 1)
+            self.assertEqual(summary.skipped, 1)
+            self.assertEqual([call[0].name for call in normalizer.calls], ["keep.mov"])
+            self.assertFalse((output / "skip").exists())
+            skipped_events = [event for event in events if event.get("source") == "skip.mov"]
+            self.assertEqual([event["kind"] for event in skipped_events], ["file_finished"])
+            self.assertEqual(skipped_events[0]["status"], "skipped")
+
+    def test_user_stopped_file_removes_partial_output_and_continues(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for name in ["stop.mov", "keep.mov"]:
+                (root / name).write_text("video", encoding="utf-8")
+            output = root / "out"
+            config = BatchConfig(
+                input_dir=root,
+                output_dir=output,
+                recording_speed=RecordingSpeed.DOUBLE,
+                confirm_normalization=True,
+                concurrent_files=1,
+            )
+
+            summary = BatchProcessor(
+                config=config,
+                inspector=FakeInspector({"stop.mov": 120.0, "keep.mov": 120.0}),
+                normalizer=StopDuringNormalizer(stop_for={"stop.mov"}),
+                audio_extractor=FakeAudioExtractor(),
+                transcriber=FakeTranscriber(),
+                slide_extractor=FakeSlideExtractor(),
+            ).run()
+
+            self.assertEqual(summary.stopped, 1)
+            self.assertEqual(summary.completed, 1)
+            self.assertEqual(summary.failed, 0)
+            self.assertFalse((output / "stop").exists())
+            self.assertTrue((output / "keep" / "keep.mp4").exists())
 
     def test_2x_without_saved_normalized_video_scales_timestamps(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -114,6 +208,7 @@ class BatchProcessorTests(unittest.TestCase):
                 config=config,
                 inspector=FakeInspector({"lecture.mov": 120.0}),
                 normalizer=FakeNormalizer(),
+                audio_extractor=FakeAudioExtractor(),
                 transcriber=FakeTranscriber(),
                 slide_extractor=slides,
             ).run()
@@ -124,6 +219,37 @@ class BatchProcessorTests(unittest.TestCase):
             self.assertIn("00:00:05,000 --> 00:00:10,000", srt)
             self.assertFalse((output / "lecture" / ".normalized_work.mp4").exists())
             self.assertFalse((output / "lecture" / "normalized_video.mp4").exists())
+            self.assertTrue((output / "lecture" / "lecture.json").exists())
+            self.assertTrue((output / "lecture" / "html" / "index.html").exists())
+            self.assertTrue((output / "batch.json").exists())
+            self.assertTrue((output / "index.html").exists())
+
+    def test_transcription_uses_clean_temporary_audio(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "lecture.mov"
+            source.write_text("video", encoding="utf-8")
+            output = root / "out"
+            audio_extractor = FakeAudioExtractor()
+            transcriber = FakeTranscriber()
+            config = BatchConfig(input_dir=root, output_dir=output)
+
+            summary = BatchProcessor(
+                config=config,
+                inspector=FakeInspector({"lecture.mov": 120.0}),
+                normalizer=FakeNormalizer(),
+                audio_extractor=audio_extractor,
+                transcriber=transcriber,
+                slide_extractor=FakeSlideExtractor(),
+            ).run()
+
+            self.assertEqual(summary.completed, 1)
+            self.assertEqual(audio_extractor.calls[0][1].name, ".transcription_audio.wav")
+            self.assertEqual(transcriber.inputs[0].name, ".transcription_audio.wav")
+            self.assertFalse((output / "lecture" / ".transcription_audio.wav").exists())
+            log = (output / "lecture" / "processing_log.txt").read_text(encoding="utf-8")
+            self.assertIn("Audio", log)
+            self.assertIn("16 kHz mono WAV", log)
 
     def test_temp_normalized_video_is_removed_after_downstream_failure(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -143,12 +269,14 @@ class BatchProcessorTests(unittest.TestCase):
                 config=config,
                 inspector=FakeInspector({"lecture.mov": 120.0}),
                 normalizer=FakeNormalizer(),
+                audio_extractor=FakeAudioExtractor(),
                 transcriber=FakeTranscriber(fail_for={"lecture"}),
                 slide_extractor=FakeSlideExtractor(),
             ).run()
 
             self.assertEqual(summary.failed, 1)
             self.assertFalse((output / "lecture" / ".normalized_work.mp4").exists())
+            self.assertFalse((output / "lecture" / ".transcription_audio.wav").exists())
             self.assertTrue((output / "lecture" / "processing_log.txt").exists())
 
     def test_saved_normalized_video_keeps_source_lecture_name(self):
@@ -168,6 +296,7 @@ class BatchProcessorTests(unittest.TestCase):
                 config=config,
                 inspector=FakeInspector({"Lecture 1: Intro.mov": 120.0}),
                 normalizer=FakeNormalizer(),
+                audio_extractor=FakeAudioExtractor(),
                 transcriber=FakeTranscriber(),
                 slide_extractor=FakeSlideExtractor(),
             ).run()
@@ -192,6 +321,7 @@ class BatchProcessorTests(unittest.TestCase):
                 config=config,
                 inspector=FakeInspector({"bad.mov": 120.0, "good.mov": 120.0}),
                 normalizer=FakeNormalizer(),
+                audio_extractor=FakeAudioExtractor(),
                 transcriber=FakeTranscriber(fail_for={"bad"}),
                 slide_extractor=FakeSlideExtractor(),
             ).run()
@@ -215,6 +345,7 @@ class BatchProcessorTests(unittest.TestCase):
             orphan = output / "old-run"
             orphan.mkdir(parents=True)
             (orphan / ".normalized_work.mp4").write_text("temporary", encoding="utf-8")
+            (orphan / ".transcription_audio.wav").write_text("temporary", encoding="utf-8")
             (orphan / ".transcript.txt.tmp").write_text("temporary", encoding="utf-8")
             (orphan / ".lecture.mp4.ffmpeg.tmp").write_text("temporary", encoding="utf-8")
             config = BatchConfig(input_dir=root, output_dir=output)
@@ -223,11 +354,13 @@ class BatchProcessorTests(unittest.TestCase):
                 config=config,
                 inspector=FakeInspector({"lecture.mov": 120.0}),
                 normalizer=FakeNormalizer(),
+                audio_extractor=FakeAudioExtractor(),
                 transcriber=FakeTranscriber(),
                 slide_extractor=FakeSlideExtractor(),
             ).run()
 
             self.assertFalse((orphan / ".normalized_work.mp4").exists())
+            self.assertFalse((orphan / ".transcription_audio.wav").exists())
             self.assertFalse((orphan / ".transcript.txt.tmp").exists())
             self.assertFalse((orphan / ".lecture.mp4.ffmpeg.tmp").exists())
 
@@ -246,6 +379,7 @@ class BatchProcessorTests(unittest.TestCase):
                     config=config,
                     inspector=FakeInspector({"lecture.mov": 120.0}),
                     normalizer=FakeNormalizer(),
+                    audio_extractor=FakeAudioExtractor(),
                     transcriber=FakeTranscriber(),
                     slide_extractor=FakeSlideExtractor(),
                 ).run()
@@ -266,6 +400,7 @@ class BatchProcessorTests(unittest.TestCase):
                 config=config,
                 inspector=FakeInspector({"lecture.mov": 120.0}),
                 normalizer=FakeNormalizer(),
+                audio_extractor=FakeAudioExtractor(),
                 transcriber=FakeTranscriber(),
                 slide_extractor=FakeSlideExtractor(),
             ).run()
@@ -291,6 +426,7 @@ class BatchProcessorTests(unittest.TestCase):
                 config=config,
                 inspector=FakeInspector({"lecture.mov": 120.0}),
                 normalizer=FakeNormalizer(),
+                audio_extractor=FakeAudioExtractor(),
                 transcriber=FakeTranscriber(),
                 slide_extractor=FakeSlideExtractor(),
                 progress_callback=events.append,
@@ -304,6 +440,33 @@ class BatchProcessorTests(unittest.TestCase):
             self.assertEqual(events[-1]["kind"], "batch_finished")
             finished = [event for event in events if event["kind"] == "file_finished"][0]
             self.assertEqual(finished["status"], "completed")
+
+    def test_mock_enrichment_adds_ai_title_and_html(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "lecture.mov"
+            source.write_text("video", encoding="utf-8")
+            output = root / "out"
+            config = BatchConfig(input_dir=root, output_dir=output, ai_provider=AIProviderName.MOCK)
+
+            summary = BatchProcessor(
+                config=config,
+                inspector=FakeInspector({"lecture.mov": 120.0}),
+                normalizer=FakeNormalizer(),
+                audio_extractor=FakeAudioExtractor(),
+                transcriber=FakeTranscriber(),
+                slide_extractor=FakeSlideExtractor(),
+            ).run()
+
+            self.assertEqual(summary.completed, 1)
+            self.assertTrue(summary.results[0].enriched)
+            lecture_json = json.loads((output / "lecture" / "lecture.json").read_text(encoding="utf-8"))
+            self.assertEqual(lecture_json["enrichment"]["provider"], "mock")
+            self.assertIn("Hello Lecture", lecture_json["enrichment"]["title"])
+            html = (output / "lecture" / "html" / "index.html").read_text(encoding="utf-8")
+            self.assertIn("Lecture Study Page", html)
+            batch = json.loads((output / "batch.json").read_text(encoding="utf-8"))
+            self.assertEqual(batch["summary"]["enriched"], 1)
 
 
 if __name__ == "__main__":

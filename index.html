@@ -100,26 +100,16 @@
           </div>
           <div>
             <span id="canceledCount">0</span>
-            <label>Canceled</label>
+            <label>Stopped</label>
           </div>
         </div>
 
-        <div class="video-section">
+        <div class="video-section unified-video-section">
           <div class="video-section-head">
-            <h3>Active Videos</h3>
-            <span id="activeSummary">No videos processing</span>
+            <h3>Videos</h3>
+            <span id="activeSummary">Choose a folder to see videos</span>
           </div>
-          <div id="activeVideos" class="active-videos">
-            <div class="video-placeholder">No videos processing.</div>
-          </div>
-        </div>
-
-        <div class="video-section queue-section">
-          <div class="video-section-head">
-            <h3>Video Queue</h3>
-            <span id="queueSummary">No videos queued</span>
-          </div>
-          <div id="queueList" class="queue-list">
+          <div id="activeVideos" class="video-list">
             <div class="video-placeholder">Choose a folder to see videos.</div>
           </div>
         </div>
@@ -156,7 +146,7 @@
               <select id="transcriptionEngine">
                 <option value="auto">Auto</option>
                 <option value="whisper-cpp">whisper.cpp</option>
-                <option value="faster-whisper">faster-whisper</option>
+                <option value="faster-whisper" selected>faster-whisper</option>
                 <option value="openai-whisper">openai-whisper</option>
                 <option value="none">None</option>
               </select>
@@ -181,6 +171,25 @@
             </label>
 
             <label>
+              Study Notes
+              <select id="aiProvider">
+                <option value="none">Local HTML only</option>
+                <option value="mock">Mock AI preview</option>
+                <option value="gemini">Gemini</option>
+              </select>
+              <span class="field-help">Gemini adds AI titles, summaries, outlines, and slide notes.</span>
+            </label>
+
+            <label>
+              Gemini Model
+              <select id="aiModel">
+                <option value="gemini-2.5-flash-lite">2.5 Flash-Lite</option>
+                <option value="gemini-2.5-flash">2.5 Flash</option>
+                <option value="gemini-2.5-pro">2.5 Pro</option>
+              </select>
+            </label>
+
+            <label>
               Concurrent Files
               <input id="concurrentFiles" type="number" min="1" max="8" value="4" />
               <span class="field-help">Use 1–2 on smaller laptops, 4 by default, 6–8 on high-memory workstations.</span>
@@ -190,6 +199,15 @@
               <input id="saveNormalized" type="checkbox" checked />
               <span>Save normalized video</span>
             </label>
+          </div>
+
+          <div class="key-row">
+            <label>
+              Gemini API Key
+              <input id="geminiApiKey" type="password" autocomplete="off" placeholder="Saved in macOS Keychain" />
+            </label>
+            <button id="saveGeminiKeyButton" class="secondary-button" type="button">Save Key</button>
+            <span id="geminiKeyStatus">No key saved</span>
           </div>
 
           <div class="warning">

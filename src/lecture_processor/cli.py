@@ -1,4 +1,5 @@
 import argparse
+import importlib.util
 import json
 import os
 import platform
@@ -9,6 +10,7 @@ import time
 from pathlib import Path
 
 from .config import (
+    AIProviderName,
     AudioQuality,
     BatchConfig,
     FfmpegHwAccel,
@@ -17,7 +19,10 @@ from .config import (
     SlideSensitivity,
     TranscriptionEngine,
 )
+from .ai.enrichment import enrich_lecture_artifact
 from .errors import LectureProcessorError
+from .gemini_export import export_gemini_test_package
+from .html_renderer import render_lecture_page
 from .media import ensure_media_tools, resolve_media_tool
 from .models import BatchSummary, FileStatus
 from .pipeline import BatchProcessor, discover_mov_files
@@ -47,16 +52,38 @@ def build_parser() -> argparse.ArgumentParser:
     process.add_argument(
         "--transcription-engine",
         choices=[item.value for item in TranscriptionEngine],
-        default="auto",
+        default="faster-whisper",
     )
     process.add_argument("--whisper-model", default="large-v3")
     process.add_argument("--whisper-cpp-model-dir", default="")
     process.add_argument("--require-whisper-cpp-coreml", action="store_true")
     process.add_argument("--apple-silicon", action="store_true")
     process.add_argument("--ffmpeg-hwaccel", choices=[item.value for item in FfmpegHwAccel], default="auto")
+    process.add_argument("--ai-provider", choices=[item.value for item in AIProviderName], default="none")
+    process.add_argument("--ai-model", default="")
+    process.add_argument("--no-render-html", action="store_true")
+    process.add_argument("--skip-file", action="append", default=[], help=argparse.SUPPRESS)
+    process.add_argument("--control-file", type=Path, default=None, help=argparse.SUPPRESS)
     process.add_argument("--ffmpeg", default="ffmpeg")
     process.add_argument("--ffprobe", default="ffprobe")
     process.add_argument("--json-events", action="store_true", help=argparse.SUPPRESS)
+
+    enrich = subparsers.add_parser("enrich", help="Enrich an existing lecture.json artifact")
+    enrich.add_argument("lecture_json", type=Path)
+    enrich.add_argument("--ai-provider", choices=["mock", "gemini"], default="mock")
+    enrich.add_argument("--ai-model", default="")
+    enrich.add_argument("--render-html", action="store_true")
+
+    render = subparsers.add_parser("render", help="Render an existing lecture.json artifact")
+    render.add_argument("lecture_json", type=Path)
+
+    export_gemini = subparsers.add_parser(
+        "export-gemini-test",
+        help="Create a prompt and zip package for manual Gemini testing",
+    )
+    export_gemini.add_argument("lecture", type=Path, help="Lecture folder or lecture.json")
+    export_gemini.add_argument("--output", type=Path)
+    export_gemini.add_argument("--max-slides", type=int, default=40)
     return parser
 
 
@@ -65,6 +92,12 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
     if args.command == "process":
         return _run_process(args)
+    if args.command == "enrich":
+        return _run_enrich(args)
+    if args.command == "render":
+        return _run_render(args)
+    if args.command == "export-gemini-test":
+        return _run_export_gemini_test(args)
     parser.error("Unknown command")
     return 2
 
@@ -94,10 +127,19 @@ def _run_process(args) -> int:
         ffprobe_path=args.ffprobe,
         ffmpeg_hwaccel=FfmpegHwAccel(args.ffmpeg_hwaccel),
         apple_silicon=apple_silicon,
+        ai_provider=AIProviderName(args.ai_provider),
+        ai_model=args.ai_model,
+        render_html=not args.no_render_html,
+        skip_files=tuple(args.skip_file or ()),
+        control_file=args.control_file,
     )
 
     try:
         config.validate()
+        if config.ai_provider is AIProviderName.GEMINI and not _gemini_api_key_available():
+            raise LectureProcessorError("Gemini enrichment requires a saved or exported GEMINI_API_KEY.")
+        if config.ai_provider is AIProviderName.GEMINI and not _gemini_dependency_available():
+            raise LectureProcessorError("Gemini support is not installed. Install with: python3 -m pip install -e '.[ai]'")
         if not discover_mov_files(config.input_dir):
             raise LectureProcessorError("No .mov files found. Try a different folder.")
         needs_ffmpeg = (
@@ -115,7 +157,7 @@ def _run_process(args) -> int:
         transcriber = build_transcriber(
             config.transcription_engine,
             config.whisper_model,
-            prefer_whisper_cpp=config.apple_silicon,
+            prefer_whisper_cpp=False,
             whisper_cpp_model_dir=config.whisper_cpp_model_dir,
             require_whisper_cpp_coreml=config.require_whisper_cpp_coreml,
         )
@@ -150,6 +192,65 @@ def _run_process(args) -> int:
     return 1 if summary.failed else 0
 
 
+def _run_enrich(args) -> int:
+    lecture_json = args.lecture_json.expanduser().resolve()
+    if not lecture_json.exists():
+        print(f"Error: lecture artifact not found: {lecture_json}", file=sys.stderr)
+        return 2
+    provider = AIProviderName(args.ai_provider)
+    if provider is AIProviderName.GEMINI and not _gemini_api_key_available():
+        print("Error: Gemini enrichment requires GEMINI_API_KEY.", file=sys.stderr)
+        return 2
+    if provider is AIProviderName.GEMINI and not _gemini_dependency_available():
+        print("Error: Gemini support is not installed. Install with: python3 -m pip install -e '.[ai]'", file=sys.stderr)
+        return 2
+    config = BatchConfig(
+        input_dir=lecture_json.parent,
+        output_dir=lecture_json.parent,
+        transcription_engine=TranscriptionEngine.NONE,
+        ai_provider=provider,
+        ai_model=args.ai_model,
+    )
+    try:
+        artifact = enrich_lecture_artifact(lecture_json, config)
+        if args.render_html:
+            html_path = render_lecture_page(lecture_json)
+            print(f"Rendered: {html_path}")
+        print(f"Enriched: {artifact.get('enrichment', {}).get('title', lecture_json.name)}")
+        return 0
+    except Exception as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+
+def _run_render(args) -> int:
+    lecture_json = args.lecture_json.expanduser().resolve()
+    if not lecture_json.exists():
+        print(f"Error: lecture artifact not found: {lecture_json}", file=sys.stderr)
+        return 2
+    try:
+        html_path = render_lecture_page(lecture_json)
+    except Exception as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+    print(f"Rendered: {html_path}")
+    return 0
+
+
+def _run_export_gemini_test(args) -> int:
+    try:
+        zip_path = export_gemini_test_package(
+            args.lecture,
+            output_path=args.output,
+            max_slides=args.max_slides,
+        )
+    except Exception as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+    print(f"Gemini test package: {zip_path}")
+    return 0
+
+
 def _build_event_printer(enabled: bool):
     if not enabled:
         return None
@@ -177,6 +278,17 @@ def _detect_apple_silicon() -> bool:
     except OSError:
         return False
     return completed.returncode == 0 and completed.stdout.strip() == "1"
+
+
+def _gemini_api_key_available() -> bool:
+    return bool(os.environ.get("GEMINI_API_KEY") or os.environ.get("LECTURE_PROCESSOR_GEMINI_API_KEY"))
+
+
+def _gemini_dependency_available() -> bool:
+    try:
+        return importlib.util.find_spec("google.genai") is not None
+    except ModuleNotFoundError:
+        return False
 
 
 def _default_output_dir(input_dir: Path) -> Path:
@@ -237,6 +349,7 @@ def _format_summary(summary: BatchSummary, output_dir: Path) -> str:
         f"Completed: {summary.completed}",
         f"Failed:    {summary.failed}",
         f"Skipped:   {summary.skipped}",
+        f"Stopped:   {summary.stopped}",
         "",
         "Files:",
     ]

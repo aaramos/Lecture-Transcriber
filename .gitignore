@@ -1,5 +1,6 @@
 __pycache__/
 *.py[cod]
+.DS_Store
 .pytest_cache/
 .playwright-cli/
 .mypy_cache/
@@ -7,6 +8,7 @@ __pycache__/
 .venv/
 .tools/
 .models/
+handoff/
 node_modules/
 venv/
 dist/

@@ -72,6 +72,30 @@ class CliTests(unittest.TestCase):
                 else:
                     os.environ["PATH"] = previous_path
 
+    def test_export_gemini_test_command_writes_zip(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            lecture = Path(tmp) / "lecture"
+            lecture.mkdir()
+            (lecture / "lecture.json").write_text(
+                json.dumps(
+                    {
+                        "lecture_id": "lecture",
+                        "media": {"duration_seconds": 0.0},
+                        "transcript": {"text": "", "segments": []},
+                        "slides": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            stdout = io.StringIO()
+
+            with redirect_stdout(stdout):
+                exit_code = main(["export-gemini-test", str(lecture)])
+
+            self.assertEqual(exit_code, 0)
+            self.assertTrue((lecture / "gemini_test_package.zip").exists())
+            self.assertIn("Gemini test package:", stdout.getvalue())
+
 
 if __name__ == "__main__":
     unittest.main()

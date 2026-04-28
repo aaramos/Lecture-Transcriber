@@ -1,0 +1,142 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://lecture-processor.local/schemas/lecture-v1.0.0.json",
+  "title": "Lecture Artifact",
+  "type": "object",
+  "required": ["schema_version", "lecture_id", "source", "media", "transcript", "slides", "processing", "enrichment"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "pattern": "^1\\.\\d+\\.\\d+$"
+    },
+    "lecture_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._-]+$",
+      "minLength": 1
+    },
+    "source": {
+      "type": "object",
+      "required": ["filename", "absolute_path", "byte_size", "sha256", "modified_at"],
+      "additionalProperties": false,
+      "properties": {
+        "filename": {"type": "string", "minLength": 1},
+        "absolute_path": {"type": "string", "minLength": 1},
+        "byte_size": {"type": "integer", "minimum": 0},
+        "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "modified_at": {"type": "string", "format": "date-time"}
+      }
+    },
+    "media": {
+      "type": "object",
+      "required": ["duration_seconds", "has_audio"],
+      "additionalProperties": false,
+      "properties": {
+        "duration_seconds": {"type": "number", "minimum": 0},
+        "intended_frame_rate": {"type": "number", "minimum": 0},
+        "is_vfr": {"type": "boolean"},
+        "has_audio": {"type": "boolean"},
+        "recording_speed_input": {"type": "string", "enum": ["1x", "2x"]},
+        "recording_speed_output": {"type": "string", "enum": ["1x", "2x"]},
+        "normalized_path": {"type": ["string", "null"]},
+        "normalized_duration_seconds": {"type": ["number", "null"], "minimum": 0}
+      }
+    },
+    "transcript": {
+      "type": "object",
+      "required": ["engine", "model", "language", "word_count", "text", "segments"],
+      "additionalProperties": false,
+      "properties": {
+        "engine": {"type": "string", "enum": ["whisper-cpp", "faster-whisper", "openai-whisper", "none"]},
+        "model": {"type": "string"},
+        "coreml_used": {"type": "boolean"},
+        "language": {"type": "string", "minLength": 2, "maxLength": 5},
+        "word_count": {"type": "integer", "minimum": 0},
+        "text": {"type": "string"},
+        "segments": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["id", "start", "end", "text"],
+            "additionalProperties": false,
+            "properties": {
+              "id": {"type": "integer", "minimum": 0},
+              "start": {"type": "number", "minimum": 0},
+              "end": {"type": "number", "minimum": 0},
+              "text": {"type": "string"}
+            }
+          }
+        }
+      }
+    },
+    "slides": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "filename", "relative_path", "timestamp_seconds", "image", "linked_segment_ids"],
+        "additionalProperties": false,
+        "properties": {
+          "id": {"type": "integer", "minimum": 1},
+          "filename": {"type": "string"},
+          "relative_path": {"type": "string"},
+          "thumbnail_path": {"type": ["string", "null"]},
+          "timestamp_seconds": {"type": "number", "minimum": 0},
+          "image": {
+            "type": "object",
+            "required": ["width", "height", "byte_size", "sha256"],
+            "additionalProperties": false,
+            "properties": {
+              "width": {"type": "integer", "minimum": 1},
+              "height": {"type": "integer", "minimum": 1},
+              "byte_size": {"type": "integer", "minimum": 0},
+              "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+            }
+          },
+          "linked_segment_ids": {
+            "type": "array",
+            "items": {"type": "integer", "minimum": 0}
+          }
+        }
+      }
+    },
+    "processing": {
+      "type": "object",
+      "required": ["started_at", "finished_at"],
+      "additionalProperties": false,
+      "properties": {
+        "started_at": {"type": "string", "format": "date-time"},
+        "finished_at": {"type": "string", "format": "date-time"},
+        "elapsed_seconds": {"type": "number", "minimum": 0},
+        "host": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "platform": {"type": "string"},
+            "machine": {"type": "string"},
+            "apple_silicon": {"type": "boolean"},
+            "chip": {"type": ["string", "null"]},
+            "ram_gb": {"type": ["integer", "null"], "minimum": 0},
+            "hostname": {"type": "string"}
+          }
+        },
+        "status": {"type": "string", "enum": ["completed", "failed", "skipped", "stopped"]},
+        "failure_step": {"type": ["string", "null"]},
+        "failure_message": {"type": ["string", "null"]},
+        "stage_timings": {
+          "type": "object",
+          "additionalProperties": {"type": "number", "minimum": 0}
+        },
+        "warnings": {
+          "type": "array",
+          "items": {"type": "string"}
+        }
+      }
+    },
+    "enrichment": {
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "enrichment-v1.0.0.json"}
+      ]
+    }
+  }
+}

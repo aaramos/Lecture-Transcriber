@@ -5,19 +5,27 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::Duration;
 use tauri::Emitter;
 
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 
 const EVENT_PREFIX: &str = "__LECTURE_PROCESSOR_EVENT__ ";
+const KEYCHAIN_SERVICE: &str = "Lecture Processor";
 const SLIDE_TEMP_PREFIX: &str = "lecture-slides-";
 const OUTPUT_LOCK_FILE: &str = ".lecture_processor.lock";
+const CONTROL_FILE: &str = ".lecture_processor_control.json";
 const NORMALIZED_WORK_FILE: &str = ".normalized_work.mp4";
+const TRANSCRIPTION_AUDIO_FILE: &str = ".transcription_audio.wav";
 const FFMPEG_TEMP_SUFFIX: &str = ".ffmpeg.tmp";
-const ATOMIC_TEMP_FILES: [&str; 5] = [
+const ATOMIC_TEMP_FILES: [&str; 9] = [
+    ".batch.json.tmp",
     ".batch_error.txt.tmp",
     ".batch_summary.txt.tmp",
+    ".index.html.tmp",
+    ".lecture.json.tmp",
+    "..lecture_processor_control.json.tmp",
     ".processing_log.txt.tmp",
     ".transcript.srt.tmp",
     ".transcript.txt.tmp",
@@ -54,7 +62,10 @@ struct ProcessRequest {
     transcription_engine: String,
     whisper_model: String,
     slide_sensitivity: String,
+    ai_provider: String,
+    ai_model: String,
     min_duration: f64,
+    skipped_files: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -78,6 +89,26 @@ struct CancelResponse {
 #[serde(rename_all = "camelCase")]
 struct CleanupTempResponse {
     deleted: usize,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ApiKeyStatus {
+    saved: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FileControlRequest {
+    output_dir: String,
+    source: String,
+    action: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FileControlResponse {
+    status: String,
 }
 
 #[tauri::command]
@@ -145,6 +176,39 @@ fn cleanup_temp_files(output_dir: Option<String>) -> Result<CleanupTempResponse,
 }
 
 #[tauri::command]
+fn save_api_key(provider: String, api_key: String) -> Result<(), String> {
+    let account = keychain_account(&provider)?;
+    let value = api_key.trim();
+    if value.is_empty() {
+        return Err("API key cannot be empty.".to_string());
+    }
+    let status = Command::new("security")
+        .args([
+            "add-generic-password",
+            "-a",
+            &account,
+            "-s",
+            KEYCHAIN_SERVICE,
+            "-w",
+            value,
+            "-U",
+        ])
+        .status()
+        .map_err(|error| format!("Could not save API key to Keychain: {error}"))?;
+    if !status.success() {
+        return Err("Could not save API key to Keychain.".to_string());
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn has_api_key(provider: String) -> Result<ApiKeyStatus, String> {
+    Ok(ApiKeyStatus {
+        saved: read_api_key(&provider)?.is_some(),
+    })
+}
+
+#[tauri::command]
 async fn process_batch(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
@@ -158,19 +222,7 @@ async fn process_batch(
 
 #[tauri::command]
 fn cancel_batch(state: tauri::State<'_, AppState>) -> Result<CancelResponse, String> {
-    let process_to_cancel = {
-        let mut active = state
-            .active_process
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        if let Some(process) = active.as_mut() {
-            let previous_cancelled = process.cancelled;
-            process.cancelled = true;
-            Some((process.pid, previous_cancelled))
-        } else {
-            None
-        }
-    };
+    let process_to_cancel = mark_active_process_cancelled(&state.active_process);
 
     let Some((pid, previous_cancelled)) = process_to_cancel else {
         return Ok(CancelResponse {
@@ -198,6 +250,48 @@ fn cancel_batch(state: tauri::State<'_, AppState>) -> Result<CancelResponse, Str
     })
 }
 
+#[tauri::command]
+fn update_file_control(request: FileControlRequest) -> Result<FileControlResponse, String> {
+    let output_dir = PathBuf::from(&request.output_dir);
+    if output_dir.as_os_str().is_empty() {
+        return Err("Output folder is not set.".to_string());
+    }
+    if request.source.trim().is_empty() {
+        return Err("Video name is missing.".to_string());
+    }
+
+    let control_file = output_dir.join(CONTROL_FILE);
+    match request.action.as_str() {
+        "skip" => update_control_file(&control_file, &[request.source.as_str()], &[])?,
+        "stop" => update_control_file(&control_file, &[], &[request.source.as_str()])?,
+        _ => return Err("Unsupported file control action.".to_string()),
+    }
+    Ok(FileControlResponse {
+        status: request.action,
+    })
+}
+
+fn mark_active_process_cancelled(
+    active_process: &Arc<Mutex<Option<ActiveProcess>>>,
+) -> Option<(u32, bool)> {
+    let mut active = active_process
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    if let Some(process) = active.as_mut() {
+        let previous_cancelled = process.cancelled;
+        process.cancelled = true;
+        Some((process.pid, previous_cancelled))
+    } else {
+        None
+    }
+}
+
+fn terminate_active_process_for_shutdown(active_process: &Arc<Mutex<Option<ActiveProcess>>>) {
+    if let Some((pid, _previous_cancelled)) = mark_active_process_cancelled(active_process) {
+        let _ = terminate_process_tree(pid);
+    }
+}
+
 fn run_process_batch(
     app: tauri::AppHandle,
     active_process: Arc<Mutex<Option<ActiveProcess>>>,
@@ -212,6 +306,14 @@ fn run_process_batch(
     if request.output_dir.trim().is_empty() {
         return Err("Choose an output folder before starting.".to_string());
     }
+    let ai_api_key = if request.ai_provider == "gemini" {
+        Some(
+            read_api_key("gemini")?
+                .ok_or_else(|| "Gemini needs an API key saved in Settings.".to_string())?,
+        )
+    } else {
+        None
+    };
     if active_process
         .lock()
         .unwrap_or_else(|error| error.into_inner())
@@ -227,6 +329,17 @@ fn run_process_batch(
             "Processor CLI was not found at {}. Run . ./scripts/dev-env.sh and install dependencies.",
             cli.display()
         ));
+    }
+
+    let control_file = Path::new(&request.output_dir).join(CONTROL_FILE);
+    let _ = std::fs::remove_file(&control_file);
+    if !request.skipped_files.is_empty() {
+        let skip_refs = request
+            .skipped_files
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        update_control_file(&control_file, &skip_refs, &[])?;
     }
 
     let mut args = vec![
@@ -246,10 +359,25 @@ fn run_process_batch(
         request.whisper_model.clone(),
         "--slide-sensitivity".to_string(),
         request.slide_sensitivity.clone(),
+        "--ai-provider".to_string(),
+        request.ai_provider.clone(),
+        "--ai-model".to_string(),
+        request.ai_model.clone(),
         "--min-duration".to_string(),
         request.min_duration.to_string(),
-        "--json-events".to_string(),
+        "--control-file".to_string(),
+        control_file.to_string_lossy().to_string(),
     ];
+
+    for file in request
+        .skipped_files
+        .iter()
+        .filter(|value| !value.trim().is_empty())
+    {
+        args.push("--skip-file".to_string());
+        args.push(file.clone());
+    }
+    args.push("--json-events".to_string());
 
     if is_apple_silicon() {
         args.push("--apple-silicon".to_string());
@@ -295,6 +423,9 @@ fn run_process_batch(
     }
     if env::var_os("PYWHISPERCPP_USE_GPU").is_none() {
         command.env("PYWHISPERCPP_USE_GPU", "0");
+    }
+    if let Some(api_key) = ai_api_key {
+        command.env("GEMINI_API_KEY", api_key);
     }
 
     #[cfg(unix)]
@@ -407,10 +538,29 @@ fn terminate_process_tree(pid: u32) -> Result<(), String> {
         .args(["-TERM", &process_group])
         .status()
         .map_err(|error| format!("Could not request cancellation: {error}"))?;
-    if status.success() {
+    if !status.success() && !process_group_is_running(pid) {
         return Ok(());
     }
-    Err("Could not request cancellation for the running batch.".to_string())
+    if !status.success() {
+        return Err("Could not request cancellation for the running batch.".to_string());
+    }
+
+    for _ in 0..20 {
+        if !process_group_is_running(pid) {
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+
+    let kill_status = Command::new("kill")
+        .args(["-KILL", &process_group])
+        .status()
+        .map_err(|error| format!("Could not force-stop the running batch: {error}"))?;
+    if kill_status.success() || !process_group_is_running(pid) {
+        Ok(())
+    } else {
+        Err("Could not force-stop the running batch.".to_string())
+    }
 }
 
 #[cfg(windows)]
@@ -458,6 +608,37 @@ fn platform_open_command(path: &str) -> Command {
         command.arg(path);
         command
     }
+}
+
+fn keychain_account(provider: &str) -> Result<String, String> {
+    match provider {
+        "gemini" => Ok("gemini_api_key".to_string()),
+        _ => Err(format!("Unsupported API key provider: {provider}")),
+    }
+}
+
+fn read_api_key(provider: &str) -> Result<Option<String>, String> {
+    let account = keychain_account(provider)?;
+    let output = Command::new("security")
+        .args([
+            "find-generic-password",
+            "-a",
+            &account,
+            "-s",
+            KEYCHAIN_SERVICE,
+            "-w",
+        ])
+        .output()
+        .map_err(|error| format!("Could not read API key from Keychain: {error}"))?;
+    if output.status.success() {
+        let key = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        return Ok((!key.is_empty()).then_some(key));
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if stderr.contains("could not be found") || stderr.contains("-25300") {
+        return Ok(None);
+    }
+    Err("Could not read API key from Keychain.".to_string())
 }
 
 fn is_apple_silicon() -> bool {
@@ -548,6 +729,58 @@ fn cleanup_temp_files_impl(output_dir: Option<&Path>) -> usize {
     deleted
 }
 
+fn update_control_file(path: &Path, skip: &[&str], stop: &[&str]) -> Result<(), String> {
+    let mut skip_set = std::collections::BTreeSet::new();
+    let mut stop_set = std::collections::BTreeSet::new();
+
+    if path.exists() {
+        let text = std::fs::read_to_string(path)
+            .map_err(|error| format!("Could not read file control state: {error}"))?;
+        if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&text) {
+            if let Some(values) = payload.get("skip").and_then(|value| value.as_array()) {
+                skip_set.extend(
+                    values
+                        .iter()
+                        .filter_map(|value| value.as_str())
+                        .map(str::to_string),
+                );
+            }
+            if let Some(values) = payload.get("stop").and_then(|value| value.as_array()) {
+                stop_set.extend(
+                    values
+                        .iter()
+                        .filter_map(|value| value.as_str())
+                        .map(str::to_string),
+                );
+            }
+        }
+    }
+
+    skip_set.extend(skip.iter().map(|value| value.to_string()));
+    stop_set.extend(stop.iter().map(|value| value.to_string()));
+
+    let payload = serde_json::json!({
+        "skip": skip_set.into_iter().collect::<Vec<_>>(),
+        "stop": stop_set.into_iter().collect::<Vec<_>>(),
+    });
+    let temp_path = path.with_file_name(format!(
+        ".{}.tmp",
+        path.file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or(CONTROL_FILE)
+    ));
+    std::fs::create_dir_all(path.parent().unwrap_or_else(|| Path::new(".")))
+        .map_err(|error| format!("Could not create output folder for file control: {error}"))?;
+    std::fs::write(
+        &temp_path,
+        serde_json::to_string_pretty(&payload).unwrap_or_default(),
+    )
+    .map_err(|error| format!("Could not write file control state: {error}"))?;
+    std::fs::rename(&temp_path, path)
+        .map_err(|error| format!("Could not save file control state: {error}"))?;
+    Ok(())
+}
+
 fn cleanup_slide_temp_dirs() -> usize {
     let temp_dir = env::temp_dir();
     let Ok(entries) = std::fs::read_dir(temp_dir) else {
@@ -620,6 +853,7 @@ fn is_output_temp_file(path: &Path) -> bool {
         return false;
     };
     name == NORMALIZED_WORK_FILE
+        || name == TRANSCRIPTION_AUDIO_FILE
         || name.ends_with(FFMPEG_TEMP_SUFFIX)
         || ATOMIC_TEMP_FILES.contains(&name)
 }
@@ -669,6 +903,15 @@ fn pid_is_running(pid: u32) -> bool {
         .unwrap_or(false)
 }
 
+#[cfg(unix)]
+fn process_group_is_running(pid: u32) -> bool {
+    Command::new("kill")
+        .args(["-0", &format!("-{pid}")])
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
 #[cfg(not(unix))]
 fn pid_is_running(_pid: u32) -> bool {
     false
@@ -676,8 +919,20 @@ fn pid_is_running(_pid: u32) -> bool {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let state = AppState::default();
+    let window_close_active_process = Arc::clone(&state.active_process);
+    let app_exit_active_process = Arc::clone(&state.active_process);
+
     tauri::Builder::default()
-        .manage(AppState::default())
+        .manage(state)
+        .on_window_event(move |_window, event| {
+            if matches!(
+                event,
+                tauri::WindowEvent::CloseRequested { .. } | tauri::WindowEvent::Destroyed
+            ) {
+                terminate_active_process_for_shutdown(&window_close_active_process);
+            }
+        })
         .setup(|_app| {
             let _ = cleanup_temp_files_impl(None);
             Ok(())
@@ -688,9 +943,20 @@ pub fn run() {
             scan_folder,
             open_path,
             cleanup_temp_files,
+            save_api_key,
+            has_api_key,
             process_batch,
-            cancel_batch
+            cancel_batch,
+            update_file_control
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(move |_app_handle, event| {
+            if matches!(
+                event,
+                tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit
+            ) {
+                terminate_active_process_for_shutdown(&app_exit_active_process);
+            }
+        });
 }

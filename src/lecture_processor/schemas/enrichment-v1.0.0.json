@@ -1,0 +1,77 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://lecture-processor.local/schemas/enrichment-v1.0.0.json",
+  "title": "Lecture AI Enrichment",
+  "type": "object",
+  "required": [
+    "schema_version", "provider", "model", "started_at", "finished_at",
+    "title", "executive_summary", "outline", "slide_analysis", "warnings"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {"type": "string", "pattern": "^1\\.\\d+\\.\\d+$"},
+    "provider": {"type": "string", "enum": ["anthropic", "gemini", "grok", "mock"]},
+    "model": {"type": "string", "minLength": 1},
+    "prompt_version": {"type": "string"},
+    "started_at": {"type": "string", "format": "date-time"},
+    "finished_at": {"type": "string", "format": "date-time"},
+    "elapsed_seconds": {"type": "number", "minimum": 0},
+    "input_token_estimate": {"type": "integer", "minimum": 0},
+    "output_token_estimate": {"type": "integer", "minimum": 0},
+    "title": {"type": "string", "minLength": 1, "maxLength": 200},
+    "executive_summary": {"type": "string", "minLength": 1, "maxLength": 2000},
+    "outline": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "heading", "slide_ids"],
+        "additionalProperties": false,
+        "properties": {
+          "id": {"type": "integer", "minimum": 1},
+          "heading": {"type": "string", "minLength": 1, "maxLength": 200},
+          "slide_ids": {
+            "type": "array",
+            "items": {"type": "integer", "minimum": 1}
+          }
+        }
+      }
+    },
+    "slide_analysis": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["slide_id", "summary", "tags", "instructor_commentary"],
+        "additionalProperties": false,
+        "properties": {
+          "slide_id": {"type": "integer", "minimum": 1},
+          "descriptive_filename": {"type": ["string", "null"], "maxLength": 200},
+          "summary": {"type": "string", "minLength": 1, "maxLength": 1000},
+          "tags": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1, "maxLength": 40},
+            "maxItems": 10
+          },
+          "instructor_commentary": {"type": "string", "maxLength": 2000}
+        }
+      }
+    },
+    "resources": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["title", "url", "summary", "source_quality"],
+        "additionalProperties": false,
+        "properties": {
+          "title": {"type": "string", "minLength": 1, "maxLength": 200},
+          "url": {"type": "string", "format": "uri"},
+          "summary": {"type": "string", "minLength": 1, "maxLength": 500},
+          "source_quality": {"type": "string", "enum": ["academic", "official", "industry", "reference", "other"]}
+        }
+      }
+    },
+    "warnings": {
+      "type": "array",
+      "items": {"type": "string"}
+    }
+  }
+}

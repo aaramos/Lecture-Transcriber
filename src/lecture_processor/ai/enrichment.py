@@ -1,0 +1,107 @@
+import os
+import time
+from pathlib import Path
+from typing import Callable, Dict, Optional
+
+from lecture_processor.artifacts import load_json, save_json, utc_now_iso
+from lecture_processor.config import AIProviderName, BatchConfig
+
+from .providers.registry import build_provider, provider_info
+from .providers.base import AnalyzeLectureRequest, AnalyzeLectureResponse
+
+
+def enrich_lecture_artifact(
+    lecture_json_path: Path,
+    config: BatchConfig,
+    *,
+    progress_callback: Optional[Callable[[Dict], None]] = None,
+) -> Dict:
+    if config.ai_provider is AIProviderName.NONE:
+        return load_json(lecture_json_path)
+
+    artifact = load_json(lecture_json_path)
+    _emit(progress_callback, "enrichment_started", source=artifact["source"]["filename"])
+    started = time.monotonic()
+    started_at = utc_now_iso()
+    info = provider_info(config.ai_provider.value)
+    provider = build_provider(
+        config.ai_provider.value,
+        api_key=_api_key_for(config.ai_provider),
+        model=config.ai_model or info.default_model,
+    )
+    response = provider.analyze_lecture(_request_from_artifact(artifact))
+    finished_at = utc_now_iso()
+    enrichment = _enrichment_payload(
+        response,
+        provider=config.ai_provider.value,
+        model=config.ai_model or info.default_model,
+        started_at=started_at,
+        finished_at=finished_at,
+        elapsed_seconds=time.monotonic() - started,
+    )
+    artifact["enrichment"] = enrichment
+    save_json(lecture_json_path, artifact)
+    _emit(
+        progress_callback,
+        "enrichment_finished",
+        source=artifact["source"]["filename"],
+        title=enrichment["title"],
+        elapsed_seconds=round(enrichment["elapsed_seconds"], 1),
+    )
+    return artifact
+
+
+def _request_from_artifact(artifact: Dict) -> AnalyzeLectureRequest:
+    duration = float(artifact.get("media", {}).get("duration_seconds") or 0.0) / 60.0
+    return AnalyzeLectureRequest(
+        lecture_id=artifact["lecture_id"],
+        transcript_text=artifact.get("transcript", {}).get("text") or "",
+        segments=list(artifact.get("transcript", {}).get("segments") or []),
+        slides=list(artifact.get("slides") or []),
+        duration_minutes=duration,
+    )
+
+
+def _enrichment_payload(
+    response: AnalyzeLectureResponse,
+    *,
+    provider: str,
+    model: str,
+    started_at: str,
+    finished_at: str,
+    elapsed_seconds: float,
+) -> Dict:
+    return {
+        "schema_version": "1.0.0",
+        "provider": provider,
+        "model": model,
+        "prompt_version": "v1",
+        "started_at": started_at,
+        "finished_at": finished_at,
+        "elapsed_seconds": round(elapsed_seconds, 3),
+        "input_token_estimate": response.input_token_estimate,
+        "output_token_estimate": response.output_token_estimate,
+        "title": response.title,
+        "executive_summary": response.executive_summary,
+        "outline": response.outline,
+        "slide_analysis": response.slide_analysis,
+        "resources": response.resources,
+        "warnings": response.warnings,
+    }
+
+
+def _api_key_for(provider: AIProviderName) -> str:
+    if provider is AIProviderName.MOCK:
+        return ""
+    if provider is AIProviderName.GEMINI:
+        return os.environ.get("GEMINI_API_KEY") or os.environ.get("LECTURE_PROCESSOR_GEMINI_API_KEY") or ""
+    return ""
+
+
+def _emit(progress_callback: Optional[Callable[[Dict], None]], kind: str, **payload) -> None:
+    if not progress_callback:
+        return
+    try:
+        progress_callback({"kind": kind, **payload})
+    except Exception:
+        pass

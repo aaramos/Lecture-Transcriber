@@ -1,18 +1,22 @@
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 from subprocess import CompletedProcess
 
 from lecture_processor.config import AudioQuality, FfmpegHwAccel, RecordingSpeed
-from lecture_processor.errors import DependencyMissingError, ProcessingError
+from lecture_processor.errors import DependencyMissingError, ProcessingError, ProcessingStopped
 from lecture_processor.media import (
+    CleanAudioExtractor,
     MediaNormalizer,
     _audio_filter_for,
+    _clean_audio_filter_for,
     _hwaccel_args,
     _has_audio_stream,
     _require_command,
+    _run_interruptible,
     ensure_media_tools,
 )
 from lecture_processor.models import MediaInfo
@@ -61,6 +65,75 @@ class MediaDependencyTests(unittest.TestCase):
         )
 
         self.assertEqual(audio_filter, "rubberband=tempo=0.5")
+
+    def test_clean_audio_filter_uses_available_speech_filters(self):
+        audio_filter = _clean_audio_filter_for(
+            "ffmpeg",
+            filter_available=lambda _ffmpeg, filter_name: filter_name in {"highpass", "loudnorm"},
+        )
+
+        self.assertEqual(audio_filter, "highpass=f=80,loudnorm=I=-18:TP=-2:LRA=11")
+
+    def test_clean_audio_extractor_writes_mono_wav_and_removes_temp_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ffmpeg = Path(tmp) / "ffmpeg"
+            ffmpeg.write_text("binary", encoding="utf-8")
+            source = Path(tmp) / "lecture.mp4"
+            source.write_text("video", encoding="utf-8")
+            destination = Path(tmp) / "out" / ".transcription_audio.wav"
+            captured = {}
+
+            def runner(command, capture_output, text):
+                captured["command"] = command
+                Path(command[-1]).write_text("audio", encoding="utf-8")
+                return CompletedProcess(command, 0, "", "")
+
+            CleanAudioExtractor(
+                ffmpeg_path=str(ffmpeg),
+                runner=runner,
+                filter_available=lambda _ffmpeg, filter_name: filter_name == "loudnorm",
+            ).extract(
+                source=source,
+                destination=destination,
+                media_info=MediaInfo(path=source, duration_seconds=120.0, has_audio=True),
+            )
+
+            command = captured["command"]
+            self.assertIn("-vn", command)
+            self.assertEqual(command[command.index("-map") + 1], "0:a:0")
+            self.assertEqual(command[command.index("-ac") + 1], "1")
+            self.assertEqual(command[command.index("-ar") + 1], "16000")
+            self.assertEqual(command[command.index("-af") + 1], "loudnorm=I=-18:TP=-2:LRA=11")
+            self.assertEqual(command[-3:-1], ["-f", "wav"])
+            self.assertTrue(destination.exists())
+            self.assertFalse((destination.parent / "..transcription_audio.wav.ffmpeg.tmp").exists())
+
+    def test_clean_audio_extractor_rejects_video_without_audio(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ffmpeg = Path(tmp) / "ffmpeg"
+            ffmpeg.write_text("binary", encoding="utf-8")
+
+            with self.assertRaises(ProcessingError):
+                CleanAudioExtractor(ffmpeg_path=str(ffmpeg)).extract(
+                    source=Path("lecture.mp4"),
+                    destination=Path(tmp) / ".transcription_audio.wav",
+                    media_info=MediaInfo(path=Path("lecture.mp4"), duration_seconds=120.0, has_audio=False),
+                )
+
+    def test_interruptible_runner_stops_child_process(self):
+        calls = 0
+
+        def stop_requested():
+            nonlocal calls
+            calls += 1
+            return calls > 1
+
+        with self.assertRaises(ProcessingStopped):
+            _run_interruptible(
+                [sys.executable, "-c", "import time; time.sleep(10)"],
+                subprocess.run,
+                stop_requested=stop_requested,
+            )
 
     def test_normalization_command_handles_video_without_audio(self):
         with tempfile.TemporaryDirectory() as tmp:

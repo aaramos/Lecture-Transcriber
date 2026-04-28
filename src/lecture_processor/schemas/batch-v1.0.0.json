@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://lecture-processor.local/schemas/batch-v1.0.0.json",
+  "title": "Batch Artifact",
+  "type": "object",
+  "required": ["schema_version", "batch_id", "input_dir", "output_dir", "started_at", "finished_at", "config", "lectures", "summary"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {"type": "string", "pattern": "^1\\.\\d+\\.\\d+$"},
+    "batch_id": {"type": "string", "minLength": 1},
+    "input_dir": {"type": "string", "minLength": 1},
+    "output_dir": {"type": "string", "minLength": 1},
+    "started_at": {"type": "string", "format": "date-time"},
+    "finished_at": {"type": "string", "format": "date-time"},
+    "config": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "recording_speed": {"type": "string", "enum": ["1x", "2x"]},
+        "audio_quality": {"type": "string", "enum": ["fast", "high"]},
+        "transcription_engine": {"type": "string"},
+        "whisper_model": {"type": "string"},
+        "slide_sensitivity": {"type": "string", "enum": ["low", "medium", "high"]},
+        "concurrent_files": {"type": "integer", "minimum": 1, "maximum": 8},
+        "ai_provider": {"type": ["string", "null"]},
+        "ai_model": {"type": ["string", "null"]}
+      }
+    },
+    "lectures": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["lecture_id", "source_filename", "status", "lecture_json_path"],
+        "additionalProperties": false,
+        "properties": {
+          "lecture_id": {"type": "string"},
+          "source_filename": {"type": "string"},
+          "status": {"type": "string", "enum": ["completed", "failed", "skipped", "stopped"]},
+          "elapsed_seconds": {"type": "number", "minimum": 0},
+          "word_count": {"type": "integer", "minimum": 0},
+          "slide_count": {"type": "integer", "minimum": 0},
+          "enriched": {"type": "boolean"},
+          "rendered": {"type": "boolean"},
+          "title": {"type": ["string", "null"]},
+          "short_summary": {"type": ["string", "null"]},
+          "lecture_json_path": {"type": "string"},
+          "html_path": {"type": ["string", "null"]},
+          "thumbnail_relative_path": {"type": ["string", "null"]},
+          "duration_minutes": {"type": ["number", "null"], "minimum": 0},
+          "failure_step": {"type": ["string", "null"]},
+          "failure_message": {"type": ["string", "null"]}
+        }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "required": ["attempted", "completed", "failed", "skipped"],
+      "additionalProperties": false,
+      "properties": {
+        "attempted": {"type": "integer", "minimum": 0},
+        "completed": {"type": "integer", "minimum": 0},
+        "failed": {"type": "integer", "minimum": 0},
+        "skipped": {"type": "integer", "minimum": 0},
+        "stopped": {"type": "integer", "minimum": 0},
+        "enriched": {"type": "integer", "minimum": 0},
+        "rendered": {"type": "integer", "minimum": 0}
+      }
+    }
+  }
+}

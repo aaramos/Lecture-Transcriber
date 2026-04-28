@@ -8,3 +8,7 @@ class DependencyMissingError(LectureProcessorError):
 
 class ProcessingError(LectureProcessorError):
     """Raised when a media processing step fails."""
+
+
+class ProcessingStopped(LectureProcessorError):
+    """Raised when the user stops processing for a single file."""

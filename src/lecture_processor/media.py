@@ -1,12 +1,13 @@
 import json
 import shutil
 import subprocess
+import time
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
 from .config import AudioQuality, FfmpegHwAccel, RecordingSpeed
-from .errors import DependencyMissingError, ProcessingError
+from .errors import DependencyMissingError, ProcessingError, ProcessingStopped
 from .models import MediaInfo
 from .temp_cleanup import remove_temp_path
 
@@ -130,6 +131,7 @@ class MediaNormalizer:
         media_info: MediaInfo,
         recording_speed: RecordingSpeed,
         audio_quality: AudioQuality,
+        stop_requested: Callable[[], bool] = None,
     ) -> Path:
         if recording_speed is RecordingSpeed.NORMAL:
             return source
@@ -185,10 +187,18 @@ class MediaNormalizer:
             return command
 
         try:
-            completed = self._runner(build_command(temp_destination, hwaccel_args), capture_output=True, text=True)
+            completed = _run_interruptible(
+                build_command(temp_destination, hwaccel_args),
+                self._runner,
+                stop_requested,
+            )
             if completed.returncode != 0 and hwaccel_args and self.ffmpeg_hwaccel is FfmpegHwAccel.AUTO:
                 remove_temp_path(temp_destination)
-                completed = self._runner(build_command(temp_destination, []), capture_output=True, text=True)
+                completed = _run_interruptible(
+                    build_command(temp_destination, []),
+                    self._runner,
+                    stop_requested,
+                )
             if completed.returncode != 0:
                 raise ProcessingError(
                     f"ffmpeg normalization failed for {source.name}: "
@@ -198,6 +208,94 @@ class MediaNormalizer:
         finally:
             remove_temp_path(temp_destination)
         return destination
+
+
+class CleanAudioExtractor:
+    def __init__(
+        self,
+        ffmpeg_path: str = "ffmpeg",
+        runner: Callable = subprocess.run,
+        filter_available: Callable[[str, str], bool] = None,
+    ) -> None:
+        self.ffmpeg_path = ffmpeg_path
+        self._runner = runner
+        self._filter_available = filter_available
+
+    def extract(
+        self,
+        source: Path,
+        destination: Path,
+        media_info: MediaInfo,
+        stop_requested: Callable[[], bool] = None,
+    ) -> Path:
+        if not media_info.has_audio:
+            raise ProcessingError(f"No audio stream found for transcription in {source.name}")
+
+        ffmpeg = _require_command(self.ffmpeg_path)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        temp_destination = destination.with_name(f".{destination.name}.ffmpeg.tmp")
+        command = [
+            ffmpeg,
+            "-y",
+            "-i",
+            str(source),
+            "-map",
+            "0:a:0",
+            "-vn",
+            "-ac",
+            "1",
+            "-ar",
+            "16000",
+        ]
+        audio_filter = _clean_audio_filter_for(ffmpeg, self._filter_available)
+        if audio_filter:
+            command.extend(["-af", audio_filter])
+        command.extend([
+            "-c:a",
+            "pcm_s16le",
+            "-f",
+            "wav",
+            str(temp_destination),
+        ])
+
+        try:
+            completed = _run_interruptible(command, self._runner, stop_requested)
+            if completed.returncode != 0:
+                raise ProcessingError(
+                    f"ffmpeg audio extraction failed for {source.name}: "
+                    f"{completed.stderr.strip() or completed.stdout.strip()}"
+                )
+            temp_destination.replace(destination)
+        finally:
+            remove_temp_path(temp_destination)
+        return destination
+
+
+def _run_interruptible(command: list, runner: Callable, stop_requested: Callable[[], bool] = None):
+    if stop_requested is None:
+        return runner(command, capture_output=True, text=True)
+    if stop_requested():
+        raise ProcessingStopped("Stopped by user")
+
+    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        while process.poll() is None:
+            if stop_requested():
+                process.terminate()
+                try:
+                    stdout, stderr = process.communicate(timeout=2)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    stdout, stderr = process.communicate()
+                raise ProcessingStopped("Stopped by user") from None
+            time.sleep(0.1)
+        stdout, stderr = process.communicate()
+        return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+    except Exception:
+        if process.poll() is None:
+            process.kill()
+            process.communicate()
+        raise
 
 
 def _extract_duration(payload: Dict[str, Any]) -> float:
@@ -233,13 +331,29 @@ def _audio_filter_for(
     return "atempo=0.5"
 
 
+def _clean_audio_filter_for(
+    ffmpeg_path: str,
+    filter_available: Callable[[str, str], bool] = None,
+) -> Optional[str]:
+    checker = filter_available or _filter_available
+    filters = []
+    if checker(ffmpeg_path, "highpass"):
+        filters.append("highpass=f=80")
+    if checker(ffmpeg_path, "loudnorm"):
+        filters.append("loudnorm=I=-18:TP=-2:LRA=11")
+    return ",".join(filters) if filters else None
+
+
 @lru_cache(maxsize=None)
 def _filter_available(ffmpeg_path: str, filter_name: str) -> bool:
-    completed = subprocess.run(
-        [ffmpeg_path, "-hide_banner", "-filters"],
-        capture_output=True,
-        text=True,
-    )
+    try:
+        completed = subprocess.run(
+            [ffmpeg_path, "-hide_banner", "-filters"],
+            capture_output=True,
+            text=True,
+        )
+    except OSError:
+        return False
     if completed.returncode != 0:
         return False
     return any(line.split()[1:2] == [filter_name] for line in completed.stdout.splitlines())

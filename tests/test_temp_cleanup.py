@@ -14,16 +14,26 @@ class TempCleanupTests(unittest.TestCase):
             nested = output / "lecture"
             nested.mkdir(parents=True)
             (nested / ".normalized_work.mp4").write_text("temp", encoding="utf-8")
+            (nested / ".transcription_audio.wav").write_text("temp", encoding="utf-8")
             (nested / ".transcript.txt.tmp").write_text("temp", encoding="utf-8")
+            (nested / ".lecture.json.tmp").write_text("temp", encoding="utf-8")
+            (nested / ".index.html.tmp").write_text("temp", encoding="utf-8")
+            (nested / "..lecture_processor_control.json.tmp").write_text("temp", encoding="utf-8")
+            (nested / ".lecture_processor_control.json").write_text("control", encoding="utf-8")
             (nested / ".lecture.mp4.ffmpeg.tmp").write_text("temp", encoding="utf-8")
             (nested / "keep.tmp").write_text("not ours", encoding="utf-8")
 
             removed = cleanup_output_temp_files(output)
 
-            self.assertEqual(removed, 3)
+            self.assertEqual(removed, 7)
             self.assertFalse((nested / ".normalized_work.mp4").exists())
+            self.assertFalse((nested / ".transcription_audio.wav").exists())
             self.assertFalse((nested / ".transcript.txt.tmp").exists())
+            self.assertFalse((nested / ".lecture.json.tmp").exists())
+            self.assertFalse((nested / ".index.html.tmp").exists())
+            self.assertFalse((nested / "..lecture_processor_control.json.tmp").exists())
             self.assertFalse((nested / ".lecture.mp4.ffmpeg.tmp").exists())
+            self.assertTrue((nested / ".lecture_processor_control.json").exists())
             self.assertTrue((nested / "keep.tmp").exists())
 
     def test_output_cleanup_keeps_active_lock_and_removes_stale_lock(self):

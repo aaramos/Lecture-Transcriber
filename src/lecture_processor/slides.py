@@ -4,10 +4,11 @@ import shutil
 import subprocess
 import tempfile
 from pathlib import Path
+from typing import Callable
 
 from .config import FfmpegHwAccel, SlideBackend, SlideSensitivity
-from .errors import DependencyMissingError, ProcessingError
-from .media import _hwaccel_args, _require_command
+from .errors import DependencyMissingError, ProcessingError, ProcessingStopped
+from .media import _hwaccel_args, _require_command, _run_interruptible
 from .timecode import format_timestamp_for_filename
 
 
@@ -26,18 +27,30 @@ class SlideExtractor:
         self.ffmpeg_hwaccel = ffmpeg_hwaccel
         self.apple_silicon = apple_silicon
 
-    def extract(self, media_path: Path, output_dir: Path, timestamp_scale: float = 1.0) -> int:
+    def extract(
+        self,
+        media_path: Path,
+        output_dir: Path,
+        timestamp_scale: float = 1.0,
+        stop_requested: Callable[[], bool] = None,
+    ) -> int:
         if self.backend is SlideBackend.OPENCV:
-            return self._extract_opencv(media_path, output_dir, timestamp_scale)
+            return self._extract_opencv(media_path, output_dir, timestamp_scale, stop_requested)
 
         try:
-            return self._extract_ffmpeg(media_path, output_dir, timestamp_scale)
+            return self._extract_ffmpeg(media_path, output_dir, timestamp_scale, stop_requested)
         except (DependencyMissingError, ProcessingError):
             if self.backend is SlideBackend.FFMPEG:
                 raise
-            return self._extract_opencv(media_path, output_dir, timestamp_scale)
+            return self._extract_opencv(media_path, output_dir, timestamp_scale, stop_requested)
 
-    def _extract_ffmpeg(self, media_path: Path, output_dir: Path, timestamp_scale: float) -> int:
+    def _extract_ffmpeg(
+        self,
+        media_path: Path,
+        output_dir: Path,
+        timestamp_scale: float,
+        stop_requested: Callable[[], bool] = None,
+    ) -> int:
         try:
             image_module = importlib.import_module("PIL.Image")
             image_chops = importlib.import_module("PIL.ImageChops")
@@ -67,7 +80,7 @@ class SlideExtractor:
                 "fps=1/2",
                 str(frame_pattern),
             ]
-            completed = subprocess.run(command, capture_output=True, text=True)
+            completed = _run_interruptible(command, subprocess.run, stop_requested)
             if completed.returncode != 0:
                 raise ProcessingError(
                     f"ffmpeg slide extraction failed for {media_path.name}: "
@@ -78,6 +91,8 @@ class SlideExtractor:
             saved = 0
             try:
                 for sample_index, frame_path in enumerate(sorted(tmp_path.glob("frame_*.png"))):
+                    if stop_requested and stop_requested():
+                        raise ProcessingStopped("Stopped by user")
                     frame = None
                     try:
                         frame = image_module.open(frame_path).convert("RGB")
@@ -108,7 +123,13 @@ class SlideExtractor:
 
         return saved
 
-    def _extract_opencv(self, media_path: Path, output_dir: Path, timestamp_scale: float) -> int:
+    def _extract_opencv(
+        self,
+        media_path: Path,
+        output_dir: Path,
+        timestamp_scale: float,
+        stop_requested: Callable[[], bool] = None,
+    ) -> int:
         try:
             cv2 = importlib.import_module("cv2")
         except ImportError as exc:
@@ -131,6 +152,8 @@ class SlideExtractor:
 
         try:
             while True:
+                if stop_requested and stop_requested():
+                    raise ProcessingStopped("Stopped by user")
                 ok, frame = capture.read()
                 if not ok:
                     break

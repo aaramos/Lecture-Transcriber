@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 from .models import TranscriptResult
@@ -13,6 +14,10 @@ def write_transcript(output_dir: Path, transcript: TranscriptResult) -> None:
 def write_processing_log(output_dir: Path, lines: list) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     write_text_atomic(output_dir / "processing_log.txt", "\n".join(lines).rstrip() + "\n")
+
+
+def write_json_atomic(path: Path, payload: dict) -> None:
+    write_text_atomic(path, json.dumps(payload, indent=2, sort_keys=True) + "\n")
 
 
 def write_text_atomic(path: Path, text: str) -> None:

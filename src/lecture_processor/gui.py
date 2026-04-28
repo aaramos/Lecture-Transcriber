@@ -254,6 +254,7 @@ def _summary_text(summary) -> str:
         f"Completed: {summary.completed}",
         f"Failed:    {summary.failed}",
         f"Skipped:   {summary.skipped}",
+        f"Stopped:   {summary.stopped}",
         "",
     ]
     for result in summary.results:

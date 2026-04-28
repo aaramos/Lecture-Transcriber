@@ -8,6 +8,7 @@ class FileStatus(str, Enum):
     COMPLETED = "completed"
     FAILED = "failed"
     SKIPPED = "skipped"
+    STOPPED = "stopped"
 
 
 @dataclass(frozen=True)
@@ -67,10 +68,17 @@ class FileResult:
     status: FileStatus
     duration_seconds: float = 0.0
     normalized_duration_seconds: Optional[float] = None
+    elapsed_seconds: float = 0.0
     word_count: int = 0
     slide_count: int = 0
     failure_step: Optional[str] = None
     message: str = ""
+    lecture_json_path: Optional[Path] = None
+    html_path: Optional[Path] = None
+    enriched: bool = False
+    rendered: bool = False
+    title: Optional[str] = None
+    short_summary: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -80,3 +88,4 @@ class BatchSummary:
     failed: int
     skipped: int
     results: List[FileResult]
+    stopped: int = 0
