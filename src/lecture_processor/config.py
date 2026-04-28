@@ -63,11 +63,11 @@ class BatchConfig:
     concurrent_files: int = 4
     min_duration_seconds: float = 60.0
     save_normalized_video: bool = True
-    audio_quality: AudioQuality = AudioQuality.FAST
+    audio_quality: AudioQuality = AudioQuality.HIGH
     slide_sensitivity: SlideSensitivity = SlideSensitivity.MEDIUM
     transcription_engine: TranscriptionEngine = TranscriptionEngine.FASTER_WHISPER
-    transcription_quality: TranscriptionQuality = TranscriptionQuality.BALANCED
-    whisper_model: str = "large-v3"
+    transcription_quality: TranscriptionQuality = TranscriptionQuality.ACCURATE
+    whisper_model: str = "medium.en"
     whisper_cpp_model_dir: str = ""
     require_whisper_cpp_coreml: bool = False
     ffmpeg_path: str = "ffmpeg"
@@ -101,7 +101,7 @@ class BatchConfig:
                 "Re-run with --confirm-normalization after confirming the batch was recorded at 2x."
             )
         if self.ai_provider is AIProviderName.GEMINI and not self.ai_model:
-            object.__setattr__(self, "ai_model", "gemini-2.5-flash-lite")
+            object.__setattr__(self, "ai_model", "gemini-2.5-flash")
 
     @property
     def normalized_timestamp_scale(self) -> float:

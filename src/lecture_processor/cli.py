@@ -47,7 +47,7 @@ def build_parser() -> argparse.ArgumentParser:
     process.add_argument("--concurrent", type=int, default=4)
     process.add_argument("--min-duration", type=float, default=60.0)
     process.add_argument("--no-save-normalized-video", action="store_true")
-    process.add_argument("--audio-quality", choices=[item.value for item in AudioQuality], default="fast")
+    process.add_argument("--audio-quality", choices=[item.value for item in AudioQuality], default="high")
     process.add_argument("--slide-sensitivity", choices=[item.value for item in SlideSensitivity], default="medium")
     process.add_argument("--slide-backend", choices=[item.value for item in SlideBackend], default="auto")
     process.add_argument(
@@ -58,9 +58,9 @@ def build_parser() -> argparse.ArgumentParser:
     process.add_argument(
         "--transcription-quality",
         choices=[item.value for item in TranscriptionQuality],
-        default="balanced",
+        default="accurate",
     )
-    process.add_argument("--whisper-model", default="large-v3")
+    process.add_argument("--whisper-model", default="medium.en")
     process.add_argument("--whisper-cpp-model-dir", default="")
     process.add_argument("--require-whisper-cpp-coreml", action="store_true")
     process.add_argument("--apple-silicon", action="store_true")

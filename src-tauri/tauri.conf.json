@@ -28,6 +28,8 @@
     "active": true,
     "targets": ["app", "dmg"],
     "resources": [
+      "../.tools/darwin_arm64/ffmpeg",
+      "../.tools/darwin_arm64/ffprobe",
       "../pyproject.toml",
       "../README.md",
       "../src/**/*"

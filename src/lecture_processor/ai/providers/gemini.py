@@ -16,7 +16,7 @@ from .base import (
     ProviderInfo,
 )
 
-DEFAULT_GEMINI_MODEL = "gemini-2.5-flash-lite"
+DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
 TRANSCRIPT_CHUNK_MAX_CHARS = 12000
 SLIDE_BATCH_SIZE = 5
 
@@ -42,9 +42,8 @@ class GeminiProvider:
             name="gemini",
             display_name="Google Gemini",
             available_models=[
-                "gemini-2.5-flash-lite",
                 "gemini-2.5-flash",
-                "gemini-2.5-pro",
+                "gemini-2.5-flash-lite",
             ],
             default_model=DEFAULT_GEMINI_MODEL,
             docs_url="https://ai.google.dev/gemini-api/docs/models/gemini",

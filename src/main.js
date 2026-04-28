@@ -50,15 +50,21 @@ const SETTINGS_STORAGE_KEY = "lectureProcessor.settings.v2";
 const LAST_OUTPUT_STORAGE_KEY = "lectureProcessor.lastOutputDir.v1";
 const DEFAULT_SETTINGS = Object.freeze({
   recordingSpeed: "1x",
-  audioQuality: "fast",
+  audioQuality: "high",
   transcriptionEngine: "faster-whisper",
-  transcriptionQuality: "balanced",
-  whisperModel: "large-v3",
+  transcriptionQuality: "accurate",
+  whisperModel: "medium.en",
   slideSensitivity: "medium",
-  aiModel: "gemini-2.5-flash-lite",
+  aiModel: "gemini-2.5-flash",
   enhanceWithGemini: false,
   concurrentFiles: 2,
   saveNormalized: true,
+});
+const LEGACY_DEFAULT_MIGRATIONS = Object.freeze({
+  audioQuality: ["fast", DEFAULT_SETTINGS.audioQuality],
+  transcriptionQuality: ["balanced", DEFAULT_SETTINGS.transcriptionQuality],
+  whisperModel: ["large-v3", DEFAULT_SETTINGS.whisperModel],
+  aiModel: ["gemini-2.5-flash-lite", DEFAULT_SETTINGS.aiModel],
 });
 
 const state = {
@@ -320,7 +326,7 @@ async function startBatch() {
     if (!state.dependencyReady) return;
   }
 
-  if (state.recordingSpeed === "2x") {
+  if (requiresNormalizationConfirmation()) {
     const confirmed = await confirmNormalization();
     if (!confirmed) return;
   }
@@ -344,7 +350,7 @@ async function startBatch() {
     inputDir: state.inputDir,
     outputDir: state.outputDir,
     recordingSpeed: state.recordingSpeed,
-    confirmNormalization: state.recordingSpeed === "2x",
+    confirmNormalization: requiresNormalizationConfirmation(),
     concurrentFiles: finalConcurrentFiles,
     saveNormalizedVideo: elements.saveNormalized.checked,
     audioQuality: elements.audioQuality.value,
@@ -523,9 +529,9 @@ async function openOutput() {
   const path = state.lastOutputDir || state.outputDir;
   if (!path) return;
   try {
-    await invoke("open_path", { path });
+    await invoke("open_batch_output", { outputDir: path });
   } catch (error) {
-    elements.runMeta.textContent = `Could not open output folder: ${error}`;
+    elements.runMeta.textContent = `Could not open output: ${error}`;
   }
 }
 
@@ -582,6 +588,9 @@ function applyProcessorResult(result) {
   }
 
   elements.openOutputButton.disabled = !state.lastOutputDir;
+  if (!result.cancelled && exitCode === 0 && state.lastOutputDir) {
+    openOutput();
+  }
 }
 
 function finalRunSummary(counts, unfinished, exitCode) {
@@ -1417,6 +1426,10 @@ function needsGemini() {
   return state.folderMode === "processed" || elements.enhanceWithGemini.checked;
 }
 
+function requiresNormalizationConfirmation() {
+  return state.folderMode !== "processed" && state.recordingSpeed === "2x";
+}
+
 function itemNoun() {
   return state.folderMode === "processed" ? "lecture" : "video";
 }
@@ -1436,7 +1449,7 @@ function loadPersistedSettings() {
   } catch {
     stored = {};
   }
-  applySettings({ ...DEFAULT_SETTINGS, ...stored });
+  applySettings(migratePersistedSettings({ ...DEFAULT_SETTINGS, ...stored }));
 }
 
 function restoreDefaultSettings() {
@@ -1463,6 +1476,16 @@ function applySettings(settings) {
   syncSpeedSegments();
   renderAiControls();
   renderNormalizationWarning();
+}
+
+function migratePersistedSettings(settings) {
+  const migrated = { ...settings };
+  Object.entries(LEGACY_DEFAULT_MIGRATIONS).forEach(([key, [legacyValue, nextValue]]) => {
+    if (migrated[key] === legacyValue) {
+      migrated[key] = nextValue;
+    }
+  });
+  return migrated;
 }
 
 function saveCurrentSettings() {
@@ -1570,7 +1593,7 @@ function validConcurrentFiles(value) {
 }
 
 function renderNormalizationWarning() {
-  elements.normalizationWarning.classList.toggle("hidden", state.recordingSpeed !== "2x");
+  elements.normalizationWarning.classList.toggle("hidden", !requiresNormalizationConfirmation());
 }
 
 function setupDragAndDrop() {
@@ -1672,21 +1695,21 @@ function renderSystemMetrics(metrics) {
     elements.cpuMetric,
     elements.cpuMetricStatus,
     cpuPercent == null ? "--" : `${Math.round(cpuPercent)}%`,
-    cpuPercent == null ? metrics?.cpuStatus || "Unavailable" : "of CPU capacity",
+    cpuPercent == null ? metrics?.cpuStatus || "Unavailable" : "total capacity used",
     cpuPercent == null,
   );
   renderMetric(
     elements.gpuMetric,
     elements.gpuMetricStatus,
     gpuPercent == null ? "--" : `${Math.round(gpuPercent)}%`,
-    gpuPercent == null ? metrics?.gpuStatus || "Unavailable" : "of GPU capacity",
+    gpuPercent == null ? metrics?.gpuStatus || "Unavailable" : "total capacity used",
     gpuPercent == null,
   );
   renderMetric(
     elements.memoryMetric,
     elements.memoryMetricStatus,
     memoryUsedGb == null ? "--" : `${Number(memoryUsedGb).toFixed(1)} GB`,
-    memoryUsedGb == null ? metrics?.memoryStatus || "Unavailable" : "active + wired + compressed",
+    memoryUsedGb == null ? metrics?.memoryStatus || "Unavailable" : "used memory in GB",
     memoryUsedGb == null,
   );
 }

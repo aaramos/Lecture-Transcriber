@@ -431,12 +431,30 @@ fn safe_folder_name(stem: &str) -> String {
 
 #[tauri::command]
 fn open_path(path: String) -> Result<(), String> {
-    let mut command = platform_open_command(&path);
+    open_path_impl(Path::new(&path), "path")
+}
+
+#[tauri::command]
+fn open_batch_output(output_dir: String) -> Result<(), String> {
+    let output_path = PathBuf::from(output_dir);
+    open_path_impl(&output_path, "output folder")?;
+
+    let index_path = output_path.join("index.html");
+    if index_path.exists() {
+        open_path_impl(&index_path, "batch index page")?;
+    }
+
+    Ok(())
+}
+
+fn open_path_impl(path: &Path, description: &str) -> Result<(), String> {
+    let path_text = path.to_string_lossy();
+    let mut command = platform_open_command(&path_text);
     let status = command
         .status()
-        .map_err(|error| format!("Could not open output folder: {error}"))?;
+        .map_err(|error| format!("Could not open {description}: {error}"))?;
     if !status.success() {
-        return Err("Could not open output folder.".to_string());
+        return Err(format!("Could not open {description}."));
     }
     Ok(())
 }
@@ -1642,6 +1660,7 @@ pub fn run() {
             default_output_dir,
             scan_folder,
             open_path,
+            open_batch_output,
             cleanup_temp_files,
             save_api_key,
             has_api_key,

@@ -32,10 +32,10 @@ class LectureProcessorApp(tk.Tk):
         self.input_dir = tk.StringVar()
         self.output_dir = tk.StringVar()
         self.recording_speed = tk.StringVar(value=RecordingSpeed.NORMAL.value)
-        self.audio_quality = tk.StringVar(value=AudioQuality.FAST.value)
+        self.audio_quality = tk.StringVar(value=AudioQuality.HIGH.value)
         self.save_normalized = tk.BooleanVar(value=True)
         self.transcription_engine = tk.StringVar(value=TranscriptionEngine.AUTO.value)
-        self.whisper_model = tk.StringVar(value="large-v3")
+        self.whisper_model = tk.StringVar(value="medium.en")
         self.slide_sensitivity = tk.StringVar(value=SlideSensitivity.MEDIUM.value)
         self.concurrent_files = tk.IntVar(value=4)
 
@@ -97,7 +97,7 @@ class LectureProcessorApp(tk.Tk):
         ttk.Combobox(
             settings,
             textvariable=self.whisper_model,
-            values=["large-v3", "medium", "small"],
+            values=["medium.en", "large-v3", "medium", "small"],
             state="readonly",
         ).grid(row=3, column=0, sticky="ew", padx=(0, 8))
 
