@@ -47,8 +47,9 @@
       "required": ["engine", "model", "language", "word_count", "text", "segments"],
       "additionalProperties": false,
       "properties": {
-        "engine": {"type": "string", "enum": ["whisper-cpp", "faster-whisper", "openai-whisper", "none"]},
+        "engine": {"type": "string", "enum": ["whisper-cpp", "faster-whisper", "mlx-whisper", "openai-whisper", "none"]},
         "model": {"type": "string"},
+        "profile": {"type": "string", "enum": ["", "quality", "fast", "turbo"]},
         "quality": {"type": "string", "enum": ["accurate", "balanced", "fast"]},
         "compute_type": {"type": "string"},
         "coreml_used": {"type": "boolean"},

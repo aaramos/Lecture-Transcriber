@@ -1,5 +1,6 @@
 import json
 import os
+import threading
 import tempfile
 import unittest
 from pathlib import Path
@@ -43,9 +44,26 @@ class FakeNormalizer:
 class FakeAudioExtractor:
     def __init__(self):
         self.calls = []
+        self.transcription_calls = []
+        self.last_command_text = "ffmpeg -i fake -vn -ac 1 -ar 16000 fake.wav"
 
     def extract(self, source, destination, media_info, stop_requested=None):
         self.calls.append((source, destination, media_info))
+        destination.write_text("audio", encoding="utf-8")
+        return destination
+
+    def extract_for_transcription(
+        self,
+        source,
+        destination,
+        media_info,
+        recording_speed,
+        audio_quality,
+        stop_requested=None,
+    ):
+        self.transcription_calls.append((source, destination, media_info, recording_speed, audio_quality))
+        if recording_speed is RecordingSpeed.NORMAL:
+            return self.extract(source, destination, media_info, stop_requested=stop_requested)
         destination.write_text("audio", encoding="utf-8")
         return destination
 
@@ -80,6 +98,44 @@ class FakeSlideExtractor:
         output_dir.mkdir(parents=True, exist_ok=True)
         (output_dir / "slide_0001_00-00-05.png").write_text("png", encoding="utf-8")
         return 1
+
+
+class ParallelBarrierNormalizer:
+    def __init__(self, normalize_started, audio_started):
+        self.normalize_started = normalize_started
+        self.audio_started = audio_started
+        self.calls = []
+
+    def normalize(self, source, destination, media_info, recording_speed, audio_quality, stop_requested=None):
+        self.calls.append((source, destination, media_info, recording_speed, audio_quality))
+        self.normalize_started.set()
+        if not self.audio_started.wait(timeout=1):
+            raise RuntimeError("Audio did not start while Normalize was still running")
+        destination.write_text("normalized", encoding="utf-8")
+        return destination
+
+
+class ParallelBarrierAudioExtractor(FakeAudioExtractor):
+    def __init__(self, normalize_started, audio_started):
+        super().__init__()
+        self.normalize_started = normalize_started
+        self.audio_started = audio_started
+
+    def extract_for_transcription(
+        self,
+        source,
+        destination,
+        media_info,
+        recording_speed,
+        audio_quality,
+        stop_requested=None,
+    ):
+        self.transcription_calls.append((source, destination, media_info, recording_speed, audio_quality))
+        self.audio_started.set()
+        if not self.normalize_started.wait(timeout=1):
+            raise RuntimeError("Normalize did not start while Audio was still running")
+        destination.write_text("audio", encoding="utf-8")
+        return destination
 
 
 class StopDuringNormalizer:
@@ -241,6 +297,7 @@ class BatchProcessorTests(unittest.TestCase):
             source.write_text("video", encoding="utf-8")
             output = root / "out"
             slides = FakeSlideExtractor()
+            audio_extractor = FakeAudioExtractor()
             config = BatchConfig(
                 input_dir=root,
                 output_dir=output,
@@ -254,12 +311,15 @@ class BatchProcessorTests(unittest.TestCase):
                 config=config,
                 inspector=FakeInspector({"lecture.mov": 120.0}),
                 normalizer=FakeNormalizer(),
-                audio_extractor=FakeAudioExtractor(),
+                audio_extractor=audio_extractor,
                 transcriber=FakeTranscriber(),
                 slide_extractor=slides,
             ).run()
 
             self.assertEqual(summary.completed, 1)
+            self.assertEqual(audio_extractor.transcription_calls[0][0], source)
+            self.assertEqual(audio_extractor.transcription_calls[0][3], RecordingSpeed.DOUBLE)
+            self.assertEqual(audio_extractor.calls, [])
             self.assertEqual(slides.scales, [0.5])
             srt = (output / "lecture" / "transcript.srt").read_text(encoding="utf-8")
             self.assertIn("00:00:05,000 --> 00:00:10,000", srt)
@@ -269,6 +329,85 @@ class BatchProcessorTests(unittest.TestCase):
             self.assertTrue((output / "lecture" / "html" / "index.html").exists())
             self.assertTrue((output / "batch.json").exists())
             self.assertTrue((output / "index.html").exists())
+
+    def test_2x_saved_normalized_video_keeps_transcript_and_slides_on_1x_timeline(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "lecture.mov"
+            source.write_text("video", encoding="utf-8")
+            output = root / "out"
+            slides = FakeSlideExtractor()
+            audio_extractor = FakeAudioExtractor()
+            config = BatchConfig(
+                input_dir=root,
+                output_dir=output,
+                recording_speed=RecordingSpeed.DOUBLE,
+                confirm_normalization=True,
+                save_normalized_video=True,
+                audio_quality=AudioQuality.FAST,
+            )
+
+            summary = BatchProcessor(
+                config=config,
+                inspector=FakeInspector({"lecture.mov": 120.0}),
+                normalizer=FakeNormalizer(),
+                audio_extractor=audio_extractor,
+                transcriber=FakeTranscriber(),
+                slide_extractor=slides,
+            ).run()
+
+            self.assertEqual(summary.completed, 1)
+            self.assertEqual(audio_extractor.transcription_calls[0][0], source)
+            self.assertEqual(audio_extractor.transcription_calls[0][3], RecordingSpeed.DOUBLE)
+            self.assertEqual(slides.scales, [1.0])
+            srt = (output / "lecture" / "transcript.srt").read_text(encoding="utf-8")
+            self.assertIn("00:00:10,000 --> 00:00:20,000", srt)
+            self.assertTrue((output / "lecture" / "lecture.mp4").exists())
+
+    def test_2x_runs_normalize_and_audio_in_parallel_before_transcription(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "lecture.mov"
+            source.write_text("video", encoding="utf-8")
+            output = root / "out"
+            events = []
+            normalize_started = threading.Event()
+            audio_started = threading.Event()
+            normalizer = ParallelBarrierNormalizer(normalize_started, audio_started)
+            audio_extractor = ParallelBarrierAudioExtractor(normalize_started, audio_started)
+            transcriber = FakeTranscriber()
+            config = BatchConfig(
+                input_dir=root,
+                output_dir=output,
+                recording_speed=RecordingSpeed.DOUBLE,
+                confirm_normalization=True,
+                concurrent_files=1,
+            )
+
+            summary = BatchProcessor(
+                config=config,
+                inspector=FakeInspector({"lecture.mov": 120.0}),
+                normalizer=normalizer,
+                audio_extractor=audio_extractor,
+                transcriber=transcriber,
+                slide_extractor=FakeSlideExtractor(),
+                progress_callback=events.append,
+            ).run()
+
+            self.assertEqual(summary.completed, 1)
+            self.assertTrue(normalize_started.is_set())
+            self.assertTrue(audio_started.is_set())
+            self.assertEqual(transcriber.inputs[0].name, ".transcription_audio.wav")
+            timeline = [
+                (event["kind"], event["step"])
+                for event in events
+                if event["kind"] in {"step_started", "step_finished"}
+            ]
+            self.assertLess(timeline.index(("step_started", "Normalize")), timeline.index(("step_finished", "Normalize")))
+            self.assertLess(timeline.index(("step_started", "Audio")), timeline.index(("step_finished", "Normalize")))
+            log = (output / "lecture" / "processing_log.txt").read_text(encoding="utf-8")
+            self.assertIn("Normalize  OK", log)
+            self.assertIn("Audio      OK", log)
 
     def test_transcription_uses_clean_temporary_audio(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -294,8 +433,10 @@ class BatchProcessorTests(unittest.TestCase):
             self.assertEqual(transcriber.inputs[0].name, ".transcription_audio.wav")
             self.assertFalse((output / "lecture" / ".transcription_audio.wav").exists())
             log = (output / "lecture" / "processing_log.txt").read_text(encoding="utf-8")
+            self.assertIn("Profile:  quality (faster-whisper, medium.en)", log)
             self.assertIn("Audio", log)
             self.assertIn("16 kHz mono WAV", log)
+            self.assertIn("Audio cmd: ffmpeg -i fake -vn -ac 1 -ar 16000 fake.wav", log)
 
     def test_temp_normalized_video_is_removed_after_downstream_failure(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -481,11 +622,55 @@ class BatchProcessorTests(unittest.TestCase):
             kinds = [event["kind"] for event in events]
             self.assertIn("batch_started", kinds)
             self.assertIn("file_started", kinds)
+            self.assertIn("file_media", kinds)
             self.assertIn("step_started", kinds)
             self.assertIn("file_finished", kinds)
             self.assertEqual(events[-1]["kind"], "batch_finished")
+            started = [event for event in events if event["kind"] == "batch_started"][0]
+            self.assertEqual(started["transcription_profile"], "quality")
+            self.assertEqual(started["transcription_engine"], "faster-whisper")
+            media = [event for event in events if event["kind"] == "file_media"][0]
+            self.assertEqual(media["duration_seconds"], 120.0)
             finished = [event for event in events if event["kind"] == "file_finished"][0]
             self.assertEqual(finished["status"], "completed")
+            self.assertEqual(finished["duration_seconds"], 120.0)
+            self.assertGreater(finished["elapsed_seconds"], 0)
+
+    def test_2x_progress_uses_finished_lecture_duration_for_length_and_speed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "lecture.mov"
+            source.write_text("video", encoding="utf-8")
+            output = root / "out"
+            events = []
+            config = BatchConfig(
+                input_dir=root,
+                output_dir=output,
+                recording_speed=RecordingSpeed.DOUBLE,
+                confirm_normalization=True,
+                concurrent_files=1,
+            )
+
+            BatchProcessor(
+                config=config,
+                inspector=FakeInspector({"lecture.mov": 120.0}),
+                normalizer=FakeNormalizer(),
+                audio_extractor=FakeAudioExtractor(),
+                transcriber=FakeTranscriber(),
+                slide_extractor=FakeSlideExtractor(),
+                progress_callback=events.append,
+            ).run()
+
+            media = [event for event in events if event["kind"] == "file_media"][0]
+            self.assertEqual(media["source_duration_seconds"], 120.0)
+            self.assertEqual(media["duration_seconds"], 240.0)
+            finished = [event for event in events if event["kind"] == "file_finished"][0]
+            self.assertEqual(finished["source_duration_seconds"], 120.0)
+            self.assertEqual(finished["duration_seconds"], 240.0)
+            self.assertEqual(finished["lecture_duration_seconds"], 240.0)
+            self.assertEqual(finished["normalized_duration_seconds"], 240.0)
+            batch = json.loads((output / "batch.json").read_text(encoding="utf-8"))
+            self.assertEqual(batch["lectures"][0]["duration_minutes"], 4.0)
 
     def test_mock_enrichment_adds_ai_title_and_html(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -493,6 +678,7 @@ class BatchProcessorTests(unittest.TestCase):
             source = root / "lecture.mov"
             source.write_text("video", encoding="utf-8")
             output = root / "out"
+            events = []
             config = BatchConfig(input_dir=root, output_dir=output, ai_provider=AIProviderName.MOCK)
 
             summary = BatchProcessor(
@@ -502,6 +688,7 @@ class BatchProcessorTests(unittest.TestCase):
                 audio_extractor=FakeAudioExtractor(),
                 transcriber=FakeTranscriber(),
                 slide_extractor=FakeSlideExtractor(),
+                progress_callback=events.append,
             ).run()
 
             self.assertEqual(summary.completed, 1)
@@ -513,6 +700,9 @@ class BatchProcessorTests(unittest.TestCase):
             html = (output / "lecture" / "html" / "index.html").read_text(encoding="utf-8")
             self.assertIn("AI Study Notes", html)
             self.assertIn("Lecture Transcript", html)
+            enrichment_finished = [event for event in events if event["kind"] == "enrichment_finished"][0]
+            self.assertGreater(enrichment_finished["input_tokens"], 0)
+            self.assertGreater(enrichment_finished["output_tokens"], 0)
             batch = json.loads((output / "batch.json").read_text(encoding="utf-8"))
             self.assertEqual(batch["summary"]["enriched"], 1)
 

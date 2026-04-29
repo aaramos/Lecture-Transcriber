@@ -16,6 +16,7 @@ const KEYCHAIN_SERVICE: &str = "Lecture Processor";
 const SLIDE_TEMP_PREFIX: &str = "lecture-slides-";
 const OUTPUT_LOCK_FILE: &str = ".lecture_processor.lock";
 const CONTROL_FILE: &str = ".lecture_processor_control.json";
+const RUNTIME_VERSION_FILE: &str = ".processor_runtime_version";
 const NORMALIZED_WORK_FILE: &str = ".normalized_work.mp4";
 const TRANSCRIPTION_AUDIO_FILE: &str = ".transcription_audio.wav";
 const FFMPEG_TEMP_SUFFIX: &str = ".ffmpeg.tmp";
@@ -74,8 +75,9 @@ struct ProcessRequest {
     concurrent_files: u8,
     save_normalized_video: bool,
     audio_quality: String,
-    transcription_engine: String,
-    transcription_quality: String,
+    #[serde(default = "default_transcription_profile")]
+    transcription_profile: String,
+    #[serde(default = "default_whisper_model")]
     whisper_model: String,
     slide_sensitivity: String,
     ai_provider: String,
@@ -134,6 +136,22 @@ struct DependencyStatus {
     processor_cli: String,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProfileStatus {
+    id: String,
+    display_name: String,
+    description: String,
+    available: bool,
+    unavailable_reason: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProfileStatusResponse {
+    profiles: Vec<ProfileStatus>,
+}
+
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct DependencyEvent {
@@ -166,6 +184,14 @@ struct ProcessedLectureScan {
 
 fn default_process_mode() -> String {
     "process".to_string()
+}
+
+fn default_transcription_profile() -> String {
+    "quality".to_string()
+}
+
+fn default_whisper_model() -> String {
+    "medium.en".to_string()
 }
 
 #[tauri::command]
@@ -521,6 +547,40 @@ fn dependency_status(app: tauri::AppHandle) -> Result<DependencyStatus, String> 
 }
 
 #[tauri::command]
+fn transcription_profile_status(app: tauri::AppHandle) -> Result<ProfileStatusResponse, String> {
+    let turbo_reason = turbo_unavailable_reason(&app);
+    Ok(ProfileStatusResponse {
+        profiles: vec![
+            ProfileStatus {
+                id: "quality".to_string(),
+                display_name: "Quality".to_string(),
+                description: "Highest accuracy. Best for difficult audio. ~1.5-2x real-time.".to_string(),
+                available: true,
+                unavailable_reason: None,
+            },
+            ProfileStatus {
+                id: "fast".to_string(),
+                display_name: "Fast".to_string(),
+                description:
+                    "Recommended for most lectures. Minimal accuracy loss vs Quality, ~2-3x faster."
+                        .to_string(),
+                available: true,
+                unavailable_reason: None,
+            },
+            ProfileStatus {
+                id: "turbo".to_string(),
+                display_name: "Turbo".to_string(),
+                description:
+                    "Maximum speed using Apple Silicon acceleration. Excellent accuracy. Requires M-series Mac."
+                        .to_string(),
+                available: turbo_reason.is_none(),
+                unavailable_reason: turbo_reason,
+            },
+        ],
+    })
+}
+
+#[tauri::command]
 async fn setup_dependencies(app: tauri::AppHandle) -> Result<DependencyStatus, String> {
     let app_for_setup = app.clone();
     tauri::async_runtime::spawn_blocking(move || setup_dependencies_impl(app_for_setup))
@@ -600,6 +660,21 @@ fn metric_status(value: Option<f64>, fallback: &str) -> String {
 }
 
 fn sample_cpu_percent() -> Option<f64> {
+    sample_top_cpu_percent().or_else(sample_process_cpu_percent)
+}
+
+fn sample_top_cpu_percent() -> Option<f64> {
+    let output = Command::new("top")
+        .args(["-l", "1", "-n", "0"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    parse_top_cpu_percent(&String::from_utf8_lossy(&output.stdout))
+}
+
+fn sample_process_cpu_percent() -> Option<f64> {
     let output = Command::new("ps")
         .args(["-A", "-o", "%cpu="])
         .output()
@@ -617,6 +692,27 @@ fn sample_cpu_percent() -> Option<f64> {
     Some(round_one(
         (total_process_cpu / logical_cpus).clamp(0.0, 100.0),
     ))
+}
+
+fn parse_top_cpu_percent(text: &str) -> Option<f64> {
+    let line = text.lines().find(|line| line.contains("CPU usage:"))?;
+    if let Some(idle_percent) = parse_percent_before(line, "% idle") {
+        return Some(round_one((100.0 - idle_percent).clamp(0.0, 100.0)));
+    }
+
+    let user_percent = parse_percent_before(line, "% user")?;
+    let system_percent = parse_percent_before(line, "% sys")
+        .or_else(|| parse_percent_before(line, "% system"))
+        .unwrap_or(0.0);
+    Some(round_one((user_percent + system_percent).clamp(0.0, 100.0)))
+}
+
+fn parse_percent_before(line: &str, marker: &str) -> Option<f64> {
+    let before_marker = line.split(marker).next()?;
+    before_marker
+        .rsplit(|character: char| !(character.is_ascii_digit() || character == '.'))
+        .find(|value| !value.is_empty())
+        .and_then(|value| value.parse::<f64>().ok())
 }
 
 fn sample_memory_used_gb() -> Option<f64> {
@@ -718,7 +814,7 @@ fn round_one(value: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_accumulated_gpu_times, parse_vm_page_size, parse_vm_pages,
+        parse_accumulated_gpu_times, parse_top_cpu_percent, parse_vm_page_size, parse_vm_pages,
         processed_lecture_can_be_enriched,
     };
     use serde_json::json;
@@ -748,6 +844,16 @@ Pages occupied by compressor:                  87041.
         "#;
 
         assert_eq!(parse_accumulated_gpu_times(sample), vec![1200, 3400, 0]);
+    }
+
+    #[test]
+    fn parses_top_cpu_usage_as_activity_monitor_load() {
+        let sample = r#"
+Processes: 850 total, 4 running, 846 sleeping, 3787 threads
+CPU usage: 71.30% user, 24.79% sys, 3.89% idle
+        "#;
+
+        assert_eq!(parse_top_cpu_percent(sample), Some(96.1));
     }
 
     #[test]
@@ -862,12 +968,8 @@ fn run_process_batch(
             request.concurrent_files.to_string(),
             "--audio-quality".to_string(),
             request.audio_quality.clone(),
-            "--transcription-engine".to_string(),
-            request.transcription_engine.clone(),
-            "--transcription-quality".to_string(),
-            request.transcription_quality.clone(),
-            "--whisper-model".to_string(),
-            request.whisper_model.clone(),
+            "--transcription-profile".to_string(),
+            request.transcription_profile.clone(),
             "--slide-sensitivity".to_string(),
             request.slide_sensitivity.clone(),
             "--ai-provider".to_string(),
@@ -1181,23 +1283,28 @@ fn is_apple_silicon() -> bool {
 fn dependency_status_impl(app: &tauri::AppHandle) -> Result<DependencyStatus, String> {
     let runtime_dir = runtime_dir(app)?;
     let project_root = find_project_root(Some(app)).ok();
-    let processor_cli = project_root
-        .as_ref()
-        .and_then(|root| {
-            let cli = root.join(".venv/bin/lecture-processor");
-            cli.exists().then_some(cli)
-        })
+    let project_cli = project_root.as_ref().and_then(|root| {
+        let cli = root.join(".venv/bin/lecture-processor");
+        cli.exists().then_some(cli)
+    });
+    let processor_cli = project_cli
+        .clone()
         .unwrap_or_else(|| runtime_dir.join(".venv/bin/lecture-processor"));
-    let ready = processor_cli.exists();
+    let runtime_fresh = project_cli.is_some() || runtime_version_is_current(&runtime_dir);
+    let ready = processor_cli.exists() && runtime_fresh;
     Ok(DependencyStatus {
         ready,
         message: if ready {
             "Dependencies ready".to_string()
+        } else if processor_cli.exists() {
+            "Dependencies need update".to_string()
         } else {
             "Dependencies need setup".to_string()
         },
         detail: if ready {
             "The local processor runtime is available.".to_string()
+        } else if processor_cli.exists() {
+            "Update the processor runtime before starting a batch.".to_string()
         } else {
             "Install the processor runtime before starting a batch.".to_string()
         },
@@ -1269,16 +1376,18 @@ fn setup_dependencies_impl(app: tauri::AppHandle) -> Result<DependencyStatus, St
         &app,
         "running",
         "Installing dependencies",
-        "Downloading and installing transcription, slide, and AI packages.",
+        "Downloading and installing transcription, acceleration, slide, and AI packages.",
         58,
         2,
     );
-    let install_target = format!(
-        "{}[transcription,slides,ai]",
-        project_root.to_string_lossy()
-    );
+    let extras = if is_apple_silicon() {
+        "transcription,slides,ai,mlx"
+    } else {
+        "transcription,slides,ai"
+    };
+    let install_target = format!("{}[{extras}]", project_root.to_string_lossy());
     let mut install = Command::new(&venv_python);
-    install.args(["-m", "pip", "install"]).arg(install_target);
+    install.args(["-m", "pip", "install", "--upgrade"]).arg(install_target);
     run_setup_command(&mut install, "install processor dependencies")?;
 
     emit_dependency_event(
@@ -1295,6 +1404,8 @@ fn setup_dependencies_impl(app: tauri::AppHandle) -> Result<DependencyStatus, St
         .arg("--help")
         .env("PATH", tool_path(&app, &project_root));
     run_setup_command(&mut verify, "verify processor command")?;
+    fs::write(runtime_version_path(&runtime_dir), env!("CARGO_PKG_VERSION"))
+        .map_err(|error| format!("Could not save runtime version marker: {error}"))?;
 
     emit_dependency_event(
         &app,
@@ -1358,12 +1469,62 @@ fn runtime_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
         .join("runtime"))
 }
 
+fn runtime_version_path(runtime_dir: &Path) -> PathBuf {
+    runtime_dir.join(RUNTIME_VERSION_FILE)
+}
+
+fn runtime_version_is_current(runtime_dir: &Path) -> bool {
+    fs::read_to_string(runtime_version_path(runtime_dir))
+        .map(|value| value.trim() == env!("CARGO_PKG_VERSION"))
+        .unwrap_or(false)
+}
+
 fn processor_cli_path(app: &tauri::AppHandle, project_root: &Path) -> Result<PathBuf, String> {
     let project_cli = project_root.join(".venv/bin/lecture-processor");
     if project_cli.exists() {
         return Ok(project_cli);
     }
     Ok(runtime_dir(app)?.join(".venv/bin/lecture-processor"))
+}
+
+fn processor_python_path(app: &tauri::AppHandle, project_root: &Path) -> Result<PathBuf, String> {
+    let project_python = project_root.join(".venv/bin/python");
+    if project_python.exists() {
+        return Ok(project_python);
+    }
+    Ok(runtime_dir(app)?.join(".venv/bin/python"))
+}
+
+fn turbo_unavailable_reason(app: &tauri::AppHandle) -> Option<String> {
+    if !is_apple_silicon() {
+        return Some("Requires Apple Silicon.".to_string());
+    }
+    let project_root = match find_project_root(Some(app)) {
+        Ok(path) => path,
+        Err(_) => return Some("Install dependencies to enable Turbo.".to_string()),
+    };
+    let python = match processor_python_path(app, &project_root) {
+        Ok(path) => path,
+        Err(_) => return Some("Install dependencies to enable Turbo.".to_string()),
+    };
+    if !python.exists() {
+        return Some("Install dependencies to enable Turbo.".to_string());
+    }
+    let status = match Command::new(&python)
+        .args(["-c", "import mlx_whisper"])
+        .env("PATH", tool_path(app, &project_root))
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+    {
+        Ok(status) => status,
+        Err(_) => return Some("Requires Apple Silicon with MLX available.".to_string()),
+    };
+    if status.success() {
+        None
+    } else {
+        Some("Requires Apple Silicon with MLX available.".to_string())
+    }
 }
 
 fn find_project_root(app: Option<&tauri::AppHandle>) -> Result<PathBuf, String> {
@@ -1666,6 +1827,7 @@ pub fn run() {
             has_api_key,
             system_metrics,
             dependency_status,
+            transcription_profile_status,
             setup_dependencies,
             process_batch,
             cancel_batch,

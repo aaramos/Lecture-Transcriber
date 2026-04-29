@@ -5,8 +5,10 @@ from unittest import mock
 
 from lecture_processor.config import TranscriptionEngine, TranscriptionQuality
 from lecture_processor.errors import DependencyMissingError, ProcessingError
+from lecture_processor.profiles import FAST_PROFILE_ID, QUALITY_PROFILE_ID, TURBO_PROFILE_ID, get_profile
 from lecture_processor.transcription import (
     FasterWhisperTranscriber,
+    MLXWhisperTranscriber,
     NullTranscriber,
     _whisper_cpp_segment_times,
     build_transcriber,
@@ -23,6 +25,18 @@ class FakeFasterWhisperSegment:
     start = 1.0
     end = 3.0
     text = " hello lecture "
+
+
+class FakeMLXWhisperModule:
+    def __init__(self):
+        self.calls = []
+
+    def transcribe(self, media_path, **options):
+        self.calls.append({"media_path": media_path, "options": options})
+        return {
+            "text": "hello lecture",
+            "segments": [{"start": 1.0, "end": 3.0, "text": " hello lecture "}],
+        }
 
 
 class TranscriptionTests(unittest.TestCase):
@@ -65,7 +79,7 @@ class TranscriptionTests(unittest.TestCase):
 
         self.assertIsInstance(transcriber._transcriber, NullTranscriber)
 
-    def test_faster_whisper_uses_balanced_english_transcription_options_by_default(self):
+    def test_faster_whisper_uses_quality_english_transcription_options_by_default(self):
         captured = {}
 
         class FakeWhisperModel:
@@ -89,9 +103,9 @@ class TranscriptionTests(unittest.TestCase):
         self.assertEqual(captured["options"]["language"], "en")
         self.assertFalse(captured["options"]["condition_on_previous_text"])
         self.assertTrue(captured["options"]["vad_filter"])
-        self.assertEqual(captured["options"]["beam_size"], 2)
-        self.assertEqual(captured["options"]["best_of"], 2)
-        self.assertEqual(captured["options"]["temperature"], 0.0)
+        self.assertEqual(captured["options"]["beam_size"], 5)
+        self.assertEqual(captured["options"]["best_of"], 5)
+        self.assertEqual(captured["options"]["temperature"], [0.0, 0.2, 0.4])
         self.assertEqual(captured["options"]["no_repeat_ngram_size"], 5)
 
     def test_faster_whisper_quality_modes_adjust_model_and_decode_options(self):
@@ -117,10 +131,10 @@ class TranscriptionTests(unittest.TestCase):
         self.assertEqual(captured[1]["model_options"]["compute_type"], "int8")
         self.assertEqual(captured[1]["options"]["beam_size"], 1)
         self.assertEqual(captured[1]["options"]["best_of"], 1)
-        self.assertEqual(captured[1]["options"]["temperature"], 0.0)
-        self.assertNotIn("no_repeat_ngram_size", captured[1]["options"])
+        self.assertEqual(captured[1]["options"]["temperature"], [0.0, 0.2])
+        self.assertEqual(captured[1]["options"]["no_repeat_ngram_size"], 5)
 
-    def test_build_transcriber_passes_requested_quality_to_faster_whisper(self):
+    def test_build_transcriber_passes_profile_to_faster_whisper(self):
         with mock.patch(
             "lecture_processor.transcription.FasterWhisperTranscriber",
             return_value=NullTranscriber(),
@@ -129,9 +143,89 @@ class TranscriptionTests(unittest.TestCase):
                 TranscriptionEngine.FASTER_WHISPER,
                 "medium.en",
                 quality=TranscriptionQuality.ACCURATE,
+                profile_id=QUALITY_PROFILE_ID,
             )
 
-        constructor.assert_called_once_with("medium.en", TranscriptionQuality.ACCURATE)
+        args, kwargs = constructor.call_args
+        self.assertEqual(args, ("medium.en",))
+        self.assertEqual(kwargs["profile"].id, QUALITY_PROFILE_ID)
+
+    def test_fast_profile_passes_speed_kwargs_to_faster_whisper(self):
+        captured = {}
+
+        class FakeWhisperModel:
+            def __init__(self, model_name, **model_options):
+                captured["model_name"] = model_name
+                captured["model_options"] = model_options
+
+            def transcribe(self, media_path, **options):
+                captured["options"] = options
+                return iter([FakeFasterWhisperSegment()]), object()
+
+        fake_module = type("FakeFasterWhisperModule", (), {"WhisperModel": FakeWhisperModel})
+        with mock.patch("lecture_processor.profiles.detect_performance_core_count", return_value=6), mock.patch(
+            "lecture_processor.transcription.importlib.import_module",
+            return_value=fake_module,
+        ):
+            build_transcriber(
+                TranscriptionEngine.FASTER_WHISPER,
+                "ignored",
+                profile_id=FAST_PROFILE_ID,
+            ).transcribe(Path("clean.wav"))
+
+        self.assertEqual(captured["model_name"], "medium.en")
+        self.assertEqual(captured["model_options"]["compute_type"], "int8")
+        self.assertEqual(captured["model_options"]["cpu_threads"], 6)
+        self.assertEqual(captured["options"]["beam_size"], 1)
+        self.assertEqual(captured["options"]["best_of"], 1)
+        self.assertEqual(captured["options"]["temperature"], [0.0, 0.2])
+
+    def test_mlx_engine_accepts_turbo_profile_options(self):
+        fake_module = FakeMLXWhisperModule()
+        profile = get_profile(TURBO_PROFILE_ID)
+
+        with mock.patch("lecture_processor.transcription._mlx_whisper_import_available", return_value=True), mock.patch(
+            "lecture_processor.transcription.importlib.import_module",
+            return_value=fake_module,
+        ):
+            result = MLXWhisperTranscriber(profile.model, profile.engine_kwargs, profile=profile).transcribe(
+                Path("clean.wav")
+            )
+
+        self.assertEqual(result.text, "hello lecture")
+        self.assertEqual(result.segments[0].start, 1.0)
+        call = fake_module.calls[0]
+        self.assertEqual(call["options"]["path_or_hf_repo"], "mlx-community/whisper-large-v3-mlx")
+        self.assertTrue(call["options"]["word_timestamps"])
+        self.assertFalse(call["options"]["condition_on_previous_text"])
+
+    def test_build_transcriber_uses_mlx_engine_for_turbo_profile(self):
+        with mock.patch("lecture_processor.transcription._mlx_whisper_import_available", return_value=True), mock.patch(
+            "lecture_processor.transcription.MLXWhisperTranscriber",
+            return_value=NullTranscriber(),
+        ) as constructor:
+            transcriber = build_transcriber(
+                TranscriptionEngine.FASTER_WHISPER,
+                "ignored",
+                profile_id=TURBO_PROFILE_ID,
+            )
+
+        self.assertIsInstance(transcriber._transcriber, NullTranscriber)
+        args, kwargs = constructor.call_args
+        self.assertEqual(args[0], "mlx-community/whisper-large-v3-mlx")
+        self.assertEqual(args[1]["transcribe_options"]["temperature"], 0.0)
+        self.assertEqual(kwargs["profile"].id, TURBO_PROFILE_ID)
+
+    def test_turbo_profile_reports_unavailable_mlx_without_crashing(self):
+        with mock.patch("lecture_processor.transcription._mlx_whisper_import_available", return_value=False):
+            with self.assertRaises(DependencyMissingError) as context:
+                build_transcriber(
+                    TranscriptionEngine.FASTER_WHISPER,
+                    "ignored",
+                    profile_id=TURBO_PROFILE_ID,
+                )
+
+        self.assertIn("Turbo transcription requires Apple Silicon", str(context.exception))
 
     def test_whisper_cpp_runtime_defaults_disable_unstable_metal_decoder(self):
         with mock.patch.dict(os.environ, {}, clear=True):

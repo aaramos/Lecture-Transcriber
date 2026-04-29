@@ -484,7 +484,7 @@ button:disabled {
 }
 
 .system-metrics {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
 }
 
 .results-grid {
@@ -525,6 +525,12 @@ button:disabled {
   font-weight: 800;
 }
 
+.system-card span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .results-grid span {
   margin-bottom: 0;
   font-size: 30px;
@@ -538,6 +544,12 @@ button:disabled {
   font-size: 11px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.system-card label {
+  overflow-wrap: anywhere;
+  line-height: 1.2;
+  white-space: normal;
 }
 
 .system-card.unavailable span,
@@ -668,7 +680,8 @@ button:disabled {
 
 .video-name,
 .video-stage,
-.video-detail {
+.video-detail,
+.video-stats {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -691,6 +704,13 @@ button:disabled {
 
 .video-detail {
   font-size: 11px;
+}
+
+.video-stats {
+  color: #d8d2c8;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
 }
 
 .video-step-list {
@@ -860,6 +880,10 @@ button:disabled {
   font-size: 13px;
   letter-spacing: 0;
   text-transform: none;
+}
+
+.field-grid .wide-field {
+  grid-column: 1 / -1;
 }
 
 select,

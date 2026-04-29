@@ -1,9 +1,11 @@
+import json
 import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from shlex import quote as shlex_quote
 from subprocess import CompletedProcess
 
 from lecture_processor.config import AudioQuality, FfmpegHwAccel, RecordingSpeed
@@ -17,6 +19,7 @@ from lecture_processor.media import (
     _has_audio_stream,
     _require_command,
     _run_interruptible,
+    _transcription_audio_filter_for,
     ensure_media_tools,
 )
 from lecture_processor.models import MediaInfo
@@ -108,6 +111,88 @@ class MediaDependencyTests(unittest.TestCase):
             self.assertTrue(destination.exists())
             self.assertFalse((destination.parent / "..transcription_audio.wav.ffmpeg.tmp").exists())
 
+    def test_extract_for_transcription_keeps_1x_command_equivalent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ffmpeg = Path(tmp) / "ffmpeg"
+            ffmpeg.write_text("binary", encoding="utf-8")
+            source = Path(tmp) / "lecture.mp4"
+            source.write_text("video", encoding="utf-8")
+            destination = Path(tmp) / "out" / ".transcription_audio.wav"
+            captured = {}
+
+            def runner(command, capture_output, text):
+                captured["command"] = command
+                Path(command[-1]).write_text("audio", encoding="utf-8")
+                return CompletedProcess(command, 0, "", "")
+
+            CleanAudioExtractor(
+                ffmpeg_path=str(ffmpeg),
+                runner=runner,
+                filter_available=lambda _ffmpeg, filter_name: filter_name == "loudnorm",
+            ).extract_for_transcription(
+                source=source,
+                destination=destination,
+                media_info=MediaInfo(path=source, duration_seconds=120.0, has_audio=True),
+                recording_speed=RecordingSpeed.NORMAL,
+                audio_quality=AudioQuality.HIGH,
+            )
+
+            command = captured["command"]
+            self.assertIn("-vn", command)
+            self.assertEqual(command[command.index("-af") + 1], "loudnorm=I=-18:TP=-2:LRA=11")
+            self.assertNotIn("atempo=0.5", " ".join(command))
+            self.assertNotIn("rubberband=tempo=0.5", " ".join(command))
+
+    def test_extract_for_transcription_2x_puts_speed_filter_before_clean_filters(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ffmpeg = Path(tmp) / "ffmpeg"
+            ffmpeg.write_text("binary", encoding="utf-8")
+            source = Path(tmp) / "lecture.mp4"
+            source.write_text("video", encoding="utf-8")
+            destination = Path(tmp) / "out" / ".transcription_audio.wav"
+            captured = {}
+
+            def runner(command, capture_output, text):
+                captured["command"] = command
+                Path(command[-1]).write_text("audio", encoding="utf-8")
+                return CompletedProcess(command, 0, "", "")
+
+            extractor = CleanAudioExtractor(
+                ffmpeg_path=str(ffmpeg),
+                runner=runner,
+                filter_available=lambda _ffmpeg, filter_name: filter_name in {"rubberband", "highpass", "loudnorm"},
+            )
+            extractor.extract_for_transcription(
+                source=source,
+                destination=destination,
+                media_info=MediaInfo(path=source, duration_seconds=120.0, has_audio=True),
+                recording_speed=RecordingSpeed.DOUBLE,
+                audio_quality=AudioQuality.HIGH,
+            )
+
+            command = captured["command"]
+            self.assertIn("-vn", command)
+            self.assertEqual(command[command.index("-map") + 1], "0:a:0")
+            self.assertEqual(command[command.index("-ac") + 1], "1")
+            self.assertEqual(command[command.index("-ar") + 1], "16000")
+            self.assertEqual(command[command.index("-c:a") + 1], "pcm_s16le")
+            self.assertEqual(command[-3:-1], ["-f", "wav"])
+            self.assertEqual(
+                command[command.index("-af") + 1],
+                "rubberband=tempo=0.5,highpass=f=80,loudnorm=I=-18:TP=-2:LRA=11",
+            )
+            self.assertEqual(extractor.last_command_text, " ".join(shlex_quote(part) for part in command))
+
+    def test_transcription_audio_filter_uses_atempo_when_rubberband_is_missing(self):
+        audio_filter = _transcription_audio_filter_for(
+            "ffmpeg",
+            RecordingSpeed.DOUBLE,
+            AudioQuality.HIGH,
+            filter_available=lambda _ffmpeg, filter_name: filter_name in {"highpass", "loudnorm"},
+        )
+
+        self.assertEqual(audio_filter, "atempo=0.5,highpass=f=80,loudnorm=I=-18:TP=-2:LRA=11")
+
     def test_clean_audio_extractor_rejects_video_without_audio(self):
         with tempfile.TemporaryDirectory() as tmp:
             ffmpeg = Path(tmp) / "ffmpeg"
@@ -119,6 +204,69 @@ class MediaDependencyTests(unittest.TestCase):
                     destination=Path(tmp) / ".transcription_audio.wav",
                     media_info=MediaInfo(path=Path("lecture.mp4"), duration_seconds=120.0, has_audio=False),
                 )
+
+    def test_real_ffmpeg_transcription_audio_is_mono_16khz_pcm_wav(self):
+        ffmpeg = shutil.which("ffmpeg") or str(_require_command("ffmpeg"))
+        ffprobe = shutil.which("ffprobe") or str(_require_command("ffprobe"))
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "source.mov"
+            destination = root / "out" / ".transcription_audio.wav"
+            create = subprocess.run(
+                [
+                    ffmpeg,
+                    "-y",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "testsrc2=size=160x90:rate=10:duration=0.5",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "sine=frequency=1000:duration=0.5",
+                    "-c:v",
+                    "libx264",
+                    "-pix_fmt",
+                    "yuv420p",
+                    "-c:a",
+                    "aac",
+                    str(source),
+                ],
+                capture_output=True,
+                text=True,
+            )
+            if create.returncode != 0:
+                self.skipTest(f"Could not create ffmpeg fixture: {create.stderr}")
+
+            CleanAudioExtractor(ffmpeg_path=ffmpeg).extract_for_transcription(
+                source=source,
+                destination=destination,
+                media_info=MediaInfo(path=source, duration_seconds=0.5, has_audio=True),
+                recording_speed=RecordingSpeed.DOUBLE,
+                audio_quality=AudioQuality.FAST,
+            )
+
+            probe = subprocess.run(
+                [
+                    ffprobe,
+                    "-v",
+                    "error",
+                    "-select_streams",
+                    "a:0",
+                    "-show_entries",
+                    "stream=codec_name,sample_rate,channels",
+                    "-of",
+                    "json",
+                    str(destination),
+                ],
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(probe.returncode, 0, probe.stderr)
+            stream = json.loads(probe.stdout)["streams"][0]
+            self.assertEqual(stream["codec_name"], "pcm_s16le")
+            self.assertEqual(stream["sample_rate"], "16000")
+            self.assertEqual(stream["channels"], 1)
 
     def test_interruptible_runner_stops_child_process(self):
         calls = 0
@@ -134,6 +282,47 @@ class MediaDependencyTests(unittest.TestCase):
                 subprocess.run,
                 stop_requested=stop_requested,
             )
+
+    def test_interruptible_runner_drains_child_output_while_waiting(self):
+        completed = _run_interruptible(
+            [
+                sys.executable,
+                "-c",
+                "import sys; sys.stderr.write('x' * 200000); sys.stderr.flush(); print('done')",
+            ],
+            subprocess.run,
+            stop_requested=lambda: False,
+        )
+
+        self.assertEqual(completed.returncode, 0)
+        self.assertIn("done", completed.stdout)
+        self.assertLess(len(completed.stderr), 200000)
+        self.assertGreater(len(completed.stderr), 0)
+
+    def test_interruptible_runner_fails_when_output_file_stalls(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "partial.mp4"
+
+            completed = _run_interruptible(
+                [
+                    sys.executable,
+                    "-c",
+                    (
+                        "import pathlib, sys, time; "
+                        "pathlib.Path(sys.argv[1]).write_text('partial', encoding='utf-8'); "
+                        "time.sleep(10)"
+                    ),
+                    str(output),
+                ],
+                subprocess.run,
+                stop_requested=lambda: False,
+                progress_path=output,
+                stall_timeout_seconds=0.2,
+                poll_interval_seconds=0.05,
+            )
+
+            self.assertNotEqual(completed.returncode, 0)
+            self.assertIn("stalled", completed.stderr)
 
     def test_normalization_command_handles_video_without_audio(self):
         with tempfile.TemporaryDirectory() as tmp:

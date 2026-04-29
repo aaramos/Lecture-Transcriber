@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Optional, Tuple
 
 from .errors import LectureProcessorError
+from .profiles import DEFAULT_PROFILE_ID, normalize_profile_id
 
 
 class RecordingSpeed(str, Enum):
@@ -65,6 +66,7 @@ class BatchConfig:
     save_normalized_video: bool = True
     audio_quality: AudioQuality = AudioQuality.HIGH
     slide_sensitivity: SlideSensitivity = SlideSensitivity.MEDIUM
+    transcription_profile: str = DEFAULT_PROFILE_ID
     transcription_engine: TranscriptionEngine = TranscriptionEngine.FASTER_WHISPER
     transcription_quality: TranscriptionQuality = TranscriptionQuality.ACCURATE
     whisper_model: str = "medium.en"
@@ -90,6 +92,10 @@ class BatchConfig:
             raise LectureProcessorError("--concurrent must be between 1 and 8")
         if self.min_duration_seconds < 0:
             raise LectureProcessorError("--min-duration must be zero or greater")
+        try:
+            object.__setattr__(self, "transcription_profile", normalize_profile_id(self.transcription_profile))
+        except ValueError as exc:
+            raise LectureProcessorError(str(exc)) from exc
         if self.require_whisper_cpp_coreml and self.transcription_engine not in (
             TranscriptionEngine.AUTO,
             TranscriptionEngine.WHISPER_CPP,

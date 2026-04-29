@@ -1,12 +1,15 @@
 import importlib
 import os
+import subprocess
+import sys
 import threading
 from pathlib import Path
-from typing import Optional, Protocol
+from typing import Dict, Optional, Protocol
 
 from .config import TranscriptionEngine, TranscriptionQuality
 from .errors import DependencyMissingError, ProcessingError
 from .models import TranscriptResult, TranscriptSegment
+from .profiles import TranscriptionProfile, get_profile
 
 
 class Transcriber(Protocol):
@@ -82,7 +85,9 @@ class FasterWhisperTranscriber:
             "transcribe_options": {
                 "beam_size": 1,
                 "best_of": 1,
-                "temperature": 0.0,
+                "temperature": [0.0, 0.2],
+                "repetition_penalty": 1.05,
+                "no_repeat_ngram_size": 5,
             },
         },
     }
@@ -90,11 +95,15 @@ class FasterWhisperTranscriber:
     def __init__(
         self,
         model_name: str,
-        quality: TranscriptionQuality = TranscriptionQuality.BALANCED,
+        quality: TranscriptionQuality = TranscriptionQuality.ACCURATE,
+        profile: Optional[TranscriptionProfile] = None,
     ) -> None:
         module = importlib.import_module("faster_whisper")
-        self.quality = TranscriptionQuality(quality)
-        preset = self.QUALITY_PRESETS[self.quality]
+        self.profile = profile
+        self.quality = TranscriptionQuality(
+            profile.engine_kwargs.get("quality", quality) if profile else quality
+        )
+        preset = profile.engine_kwargs if profile else self.QUALITY_PRESETS[self.quality]
         self.model_options = dict(preset["model_options"])
         self.transcribe_options = {
             **self.COMMON_TRANSCRIBE_OPTIONS,
@@ -104,8 +113,11 @@ class FasterWhisperTranscriber:
         self.metadata = {
             "resolved_engine": "faster-whisper",
             "model": model_name,
+            "profile": profile.id if profile else "",
+            "profile_name": profile.display_name if profile else "",
             "quality": self.quality.value,
             "compute_type": self.model_options.get("compute_type", ""),
+            "cpu_threads": self.model_options.get("cpu_threads"),
             "coreml_used": False,
             "language": "en",
             "audio_input": "clean_16khz_mono_wav",
@@ -129,6 +141,62 @@ class FasterWhisperTranscriber:
                 )
             )
         text = " ".join(text_parts).strip()
+        if not text:
+            raise ProcessingError("Whisper returned empty transcript")
+        return TranscriptResult(text=text, segments=segments)
+
+
+class MLXWhisperTranscriber:
+    def __init__(
+        self,
+        model_name: str,
+        engine_kwargs: Dict,
+        profile: Optional[TranscriptionProfile] = None,
+    ) -> None:
+        if not _mlx_whisper_import_available():
+            raise DependencyMissingError(
+                "Turbo transcription requires Apple Silicon with MLX available. "
+                "Choose Quality/Fast or refresh dependencies."
+            )
+        self._module = importlib.import_module("mlx_whisper")
+        self.model_name = model_name
+        self.profile = profile
+        self.transcribe_options = dict(engine_kwargs.get("transcribe_options") or {})
+        self.metadata = {
+            "resolved_engine": "mlx-whisper",
+            "model": model_name,
+            "profile": profile.id if profile else "",
+            "profile_name": profile.display_name if profile else "",
+            "quality": str(engine_kwargs.get("quality") or "accurate"),
+            "compute_type": "mlx",
+            "coreml_used": False,
+            "language": self.transcribe_options.get("language", "en"),
+            "audio_input": "clean_16khz_mono_wav",
+            "condition_on_previous_text": bool(
+                self.transcribe_options.get("condition_on_previous_text", False)
+            ),
+            "vad_filter": bool(engine_kwargs.get("vad_filter", True)),
+            "word_timestamps": bool(self.transcribe_options.get("word_timestamps", False)),
+        }
+
+    def transcribe(self, media_path: Path) -> TranscriptResult:
+        result = self._module.transcribe(
+            str(media_path),
+            path_or_hf_repo=self.model_name,
+            **self.transcribe_options,
+        )
+        text = str(result.get("text") or "").strip()
+        segments = []
+        text_parts = []
+        for segment in result.get("segments", []) or []:
+            segment_text = str(segment.get("text") or "").strip()
+            if segment_text:
+                text_parts.append(segment_text)
+            start = float(segment.get("start", 0.0) or 0.0)
+            end = float(segment.get("end", start) or start)
+            segments.append(TranscriptSegment(start=start, end=end, text=segment_text))
+        if not text:
+            text = " ".join(text_parts).strip()
         if not text:
             raise ProcessingError("Whisper returned empty transcript")
         return TranscriptResult(text=text, segments=segments)
@@ -218,7 +286,8 @@ def build_transcriber(
     engine: TranscriptionEngine,
     model_name: str,
     *,
-    quality: TranscriptionQuality = TranscriptionQuality.BALANCED,
+    quality: TranscriptionQuality = TranscriptionQuality.ACCURATE,
+    profile_id: Optional[str] = None,
     prefer_whisper_cpp: bool = False,
     whisper_cpp_model_dir: str = "",
     require_whisper_cpp_coreml: bool = False,
@@ -226,6 +295,27 @@ def build_transcriber(
 ) -> LockedTranscriber:
     if engine is TranscriptionEngine.NONE:
         return LockedTranscriber(NullTranscriber())
+
+    if profile_id:
+        profile = get_profile(profile_id)
+        try:
+            return LockedTranscriber(_build_profile_transcriber(profile))
+        except ImportError as exc:
+            if profile.engine == "mlx-whisper":
+                raise DependencyMissingError(
+                    "Turbo transcription requires Apple Silicon and mlx-whisper. "
+                    "Refresh dependencies, or choose Quality/Fast."
+                ) from exc
+            raise DependencyMissingError(
+                "faster-whisper is not installed. Install with: python3 -m pip install -e '.[transcription]'"
+            ) from exc
+        except DependencyMissingError:
+            raise
+        except Exception as exc:
+            raise ProcessingError(
+                f"Could not initialize {profile.display_name} transcription with model "
+                f"'{profile.model}': {exc}"
+            ) from exc
 
     wants_whisper_cpp = engine is TranscriptionEngine.WHISPER_CPP or (
         engine is TranscriptionEngine.AUTO and (prefer_whisper_cpp or require_whisper_cpp_coreml)
@@ -280,6 +370,27 @@ def build_transcriber(
         "No Whisper transcription engine is installed. Install optional dependencies or "
         "use --transcription-engine none for media-only smoke tests."
     )
+
+
+def _build_profile_transcriber(profile: TranscriptionProfile) -> Transcriber:
+    if profile.engine == "faster-whisper":
+        return FasterWhisperTranscriber(profile.model, profile=profile)
+    if profile.engine == "mlx-whisper":
+        return MLXWhisperTranscriber(profile.model, profile.engine_kwargs, profile=profile)
+    raise DependencyMissingError(f"Unsupported transcription profile engine: {profile.engine}")
+
+
+def _mlx_whisper_import_available() -> bool:
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", "import mlx_whisper"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=10,
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
 
 
 def configure_whisper_cpp_runtime_env() -> None:

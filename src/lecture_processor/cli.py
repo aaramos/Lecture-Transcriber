@@ -27,6 +27,7 @@ from .html_renderer import render_lecture_page
 from .media import ensure_media_tools, resolve_media_tool
 from .models import BatchSummary, FileStatus
 from .pipeline import BatchProcessor, discover_mov_files, enrich_processed_batch
+from .profiles import FAST_PROFILE_ID, QUALITY_PROFILE_ID, TURBO_PROFILE_ID, profile_from_legacy_quality
 from .slides import SlideExtractor
 from .temp_cleanup import cleanup_slide_temp_dirs
 from .transcription import build_transcriber
@@ -59,6 +60,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--transcription-quality",
         choices=[item.value for item in TranscriptionQuality],
         default="accurate",
+    )
+    process.add_argument(
+        "--transcription-profile",
+        choices=[QUALITY_PROFILE_ID, FAST_PROFILE_ID, TURBO_PROFILE_ID],
+        default=None,
     )
     process.add_argument("--whisper-model", default="medium.en")
     process.add_argument("--whisper-cpp-model-dir", default="")
@@ -136,6 +142,8 @@ def _run_process(args) -> int:
         audio_quality=AudioQuality(args.audio_quality),
         slide_sensitivity=SlideSensitivity(args.slide_sensitivity),
         slide_backend=SlideBackend(args.slide_backend),
+        transcription_profile=args.transcription_profile
+        or _profile_for_legacy_args(args.transcription_engine, args.transcription_quality),
         transcription_engine=TranscriptionEngine(args.transcription_engine),
         transcription_quality=TranscriptionQuality(args.transcription_quality),
         whisper_model=args.whisper_model,
@@ -176,6 +184,9 @@ def _run_process(args) -> int:
             config.transcription_engine,
             config.whisper_model,
             quality=config.transcription_quality,
+            profile_id=config.transcription_profile
+            if (args.transcription_profile or config.transcription_engine is TranscriptionEngine.FASTER_WHISPER)
+            else "",
             prefer_whisper_cpp=False,
             whisper_cpp_model_dir=config.whisper_cpp_model_dir,
             require_whisper_cpp_coreml=config.require_whisper_cpp_coreml,
@@ -209,6 +220,14 @@ def _run_process(args) -> int:
 
     print(_format_summary(summary, output_dir))
     return 1 if summary.failed else 0
+
+
+def _profile_for_legacy_args(transcription_engine: str, transcription_quality: str) -> str:
+    if transcription_engine == TranscriptionEngine.FASTER_WHISPER.value:
+        return profile_from_legacy_quality(transcription_quality)
+    return QUALITY_PROFILE_ID
+
+
 
 
 def _run_enrich(args) -> int:

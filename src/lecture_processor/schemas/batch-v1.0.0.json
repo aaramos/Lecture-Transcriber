@@ -18,6 +18,7 @@
       "properties": {
         "recording_speed": {"type": "string", "enum": ["1x", "2x"]},
         "audio_quality": {"type": "string", "enum": ["fast", "high"]},
+        "transcription_profile": {"type": "string", "enum": ["quality", "fast", "turbo"]},
         "transcription_engine": {"type": "string"},
         "transcription_quality": {"type": "string", "enum": ["accurate", "balanced", "fast"]},
         "whisper_model": {"type": "string"},

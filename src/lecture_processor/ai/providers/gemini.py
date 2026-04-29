@@ -83,6 +83,8 @@ class GeminiProvider:
                 step=step,
                 completed=completed_steps,
                 total=total_steps,
+                input_tokens=usage["input"],
+                output_tokens=usage["output"],
             )
 
         chunks = cache.setdefault("chunks", {})

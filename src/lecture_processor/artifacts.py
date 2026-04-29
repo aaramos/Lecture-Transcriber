@@ -113,6 +113,7 @@ def build_lecture_artifact(
         "transcript": {
             "engine": _resolved_transcription_engine(transcriber_metadata, config),
             "model": str(transcriber_metadata.get("model") or config.whisper_model or ""),
+            "profile": str(transcriber_metadata.get("profile") or config.transcription_profile or ""),
             "quality": str(transcriber_metadata.get("quality") or config.transcription_quality.value),
             "compute_type": str(transcriber_metadata.get("compute_type") or ""),
             "coreml_used": bool(transcriber_metadata.get("coreml_used", False)),
@@ -209,6 +210,7 @@ def build_batch_artifact(
         "config": {
             "recording_speed": config.recording_speed.value,
             "audio_quality": config.audio_quality.value,
+            "transcription_profile": config.transcription_profile,
             "transcription_engine": config.transcription_engine.value,
             "transcription_quality": config.transcription_quality.value,
             "whisper_model": config.whisper_model,
@@ -260,7 +262,7 @@ def _batch_lecture_record(result: FileResult, output_root: Path) -> Dict:
         "lecture_json_path": lecture_json_path,
         "html_path": html_path,
         "thumbnail_relative_path": _first_slide_path(result.output_dir, output_root),
-        "duration_minutes": round(result.duration_seconds / 60.0, 2) if result.duration_seconds else None,
+        "duration_minutes": round(_result_duration_seconds(result) / 60.0, 2) if _result_duration_seconds(result) else None,
         "failure_step": result.failure_step,
         "failure_message": result.message if result.status in (FileStatus.FAILED, FileStatus.STOPPED) else None,
     }
@@ -279,6 +281,10 @@ def _stat_or_none(path: Path) -> Dict:
             "byte_size": 0,
             "modified_at": utc_now_iso(),
         }
+
+
+def _result_duration_seconds(result: FileResult) -> float:
+    return result.normalized_duration_seconds or result.duration_seconds
 
 
 def _sha256_file(path: Path) -> str:

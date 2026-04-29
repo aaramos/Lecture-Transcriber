@@ -238,6 +238,8 @@ class GeminiProviderTests(unittest.TestCase):
             ]
             self.assertEqual(2, len(slide_calls))
             self.assertIn("resources", [event["step"] for event in events])
+            self.assertEqual(response.input_token_estimate, events[-1]["input_tokens"])
+            self.assertEqual(response.output_token_estimate, events[-1]["output_tokens"])
 
             resumed_provider = object.__new__(GeminiProvider)
             resumed_provider.model = "gemini-test"

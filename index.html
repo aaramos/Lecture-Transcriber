@@ -117,6 +117,16 @@
             <span id="memoryMetric">--</span>
             <small id="memoryMetricStatus">Waiting</small>
           </div>
+          <div class="system-card">
+            <label>Tokens Sent</label>
+            <span id="tokensSentMetric">0</span>
+            <small id="tokensSentMetricStatus">Gemini prompt</small>
+          </div>
+          <div class="system-card">
+            <label>Tokens Received</label>
+            <span id="tokensReceivedMetric">0</span>
+            <small id="tokensReceivedMetricStatus">Gemini output</small>
+          </div>
         </div>
 
         <div class="activity-header">
@@ -200,32 +210,16 @@
               </select>
             </label>
 
-            <label>
-              Transcription
-              <select id="transcriptionEngine">
-                <option value="faster-whisper" selected>faster-whisper</option>
-              </select>
-            </label>
-
-            <label>
-              Transcription Quality
-              <select id="transcriptionQuality">
-                <option value="accurate" selected>Accurate</option>
-                <option value="balanced">Balanced</option>
+            <label class="wide-field">
+              Transcription Profile
+              <select id="transcriptionProfile">
+                <option value="quality" selected>Quality</option>
                 <option value="fast">Fast</option>
+                <option value="turbo">Turbo</option>
               </select>
-              <span class="field-help">Accurate gives the strongest transcript. Balanced is faster.</span>
-            </label>
-
-            <label>
-              Whisper Model
-              <select id="whisperModel">
-                <option value="medium.en" selected>medium.en</option>
-                <option value="large-v3">large-v3</option>
-                <option value="medium">medium</option>
-                <option value="small">small</option>
-              </select>
-              <span class="field-help">medium.en is faster for English lectures. large-v3 is slower and more accurate.</span>
+              <span id="transcriptionProfileHelp" class="field-help">
+                Highest accuracy. Best for difficult audio. ~1.5-2x real-time.
+              </span>
             </label>
 
             <label>

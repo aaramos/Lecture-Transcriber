@@ -3,6 +3,7 @@ import unittest
 from pathlib import Path
 
 from lecture_processor.config import AudioQuality, BatchConfig, RecordingSpeed, TranscriptionQuality
+from lecture_processor.profiles import QUALITY_PROFILE_ID
 from lecture_processor.errors import LectureProcessorError
 
 
@@ -40,6 +41,7 @@ class BatchConfigTests(unittest.TestCase):
             config = BatchConfig(input_dir=folder, output_dir=folder / "out")
 
             self.assertIs(config.audio_quality, AudioQuality.HIGH)
+            self.assertEqual(config.transcription_profile, QUALITY_PROFILE_ID)
             self.assertIs(config.transcription_quality, TranscriptionQuality.ACCURATE)
             self.assertEqual(config.whisper_model, "medium.en")
 

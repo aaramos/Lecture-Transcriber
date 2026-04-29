@@ -2,6 +2,7 @@ import json
 import os
 import re
 import shutil
+import threading
 import time
 from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -69,7 +70,15 @@ class BatchProcessor:
             batch_started_at = utc_now_iso()
             cleanup_processor_temp_files(self.config.output_dir)
             output_dirs = allocate_output_dirs(files, self.config.output_dir)
-            self._emit("batch_started", attempted=len(files), output_dir=str(self.config.output_dir))
+            transcriber_metadata = getattr(self.transcriber, "metadata", {})
+            self._emit(
+                "batch_started",
+                attempted=len(files),
+                output_dir=str(self.config.output_dir),
+                transcription_profile=transcriber_metadata.get("profile") or self.config.transcription_profile,
+                transcription_engine=transcriber_metadata.get("resolved_engine") or self.config.transcription_engine.value,
+                transcription_model=transcriber_metadata.get("model") or self.config.whisper_model,
+            )
             results: List[FileResult] = []
             skip_files = set(self.config.skip_files) | self.control.skipped_files()
             process_files = []
@@ -127,6 +136,7 @@ class BatchProcessor:
         log_lines = [
             f"File:     {source.name}",
             f"Started:  {time.strftime('%Y-%m-%d %H:%M:%S')}",
+            self._transcription_log_line(),
             "",
         ]
         temp_normalized: Optional[Path] = None
@@ -160,6 +170,12 @@ class BatchProcessor:
                 stage_timings,
                 lambda: self.inspector.probe(source),
             )
+            self._emit(
+                "file_media",
+                source=source.name,
+                source_duration_seconds=round(media_info.duration_seconds, 3),
+                duration_seconds=round(_effective_duration_seconds(media_info.duration_seconds, self.config), 3),
+            )
             if media_info.duration_seconds < self.config.min_duration_seconds:
                 message = (
                     f"File too short ({media_info.duration_seconds:.0f}s < "
@@ -191,32 +207,46 @@ class BatchProcessor:
                 )
 
             work_video = source
+            transcription_input = work_video
+            has_transcription = self.config.transcription_engine is not TranscriptionEngine.NONE
             if self.config.recording_speed is RecordingSpeed.DOUBLE:
                 destination = normalized_video_output_path(source, output_dir)
                 if not self.config.save_normalized_video:
                     destination = output_dir / ".normalized_work.mp4"
                     temp_normalized = destination
-                work_video = self._time_step(
-                    "Normalize",
-                    source,
-                    log_lines,
-                    step_state,
-                    stage_timings,
-                    lambda: self.normalizer.normalize(
+                if has_transcription:
+                    temp_transcription_audio = output_dir / ".transcription_audio.wav"
+                    work_video, transcription_input = self._prepare_double_speed_media(
                         source=source,
-                        destination=destination,
+                        normalized_destination=destination,
+                        transcription_audio_destination=temp_transcription_audio,
                         media_info=media_info,
-                        recording_speed=self.config.recording_speed,
-                        audio_quality=self.config.audio_quality,
-                        stop_requested=lambda: self.control.should_stop(source.name),
-                    ),
-                )
+                        log_lines=log_lines,
+                        step_state=step_state,
+                        stage_timings=stage_timings,
+                    )
+                    self._append_audio_command_log(log_lines, temp_transcription_audio)
+                else:
+                    work_video = self._time_step(
+                        "Normalize",
+                        source,
+                        log_lines,
+                        step_state,
+                        stage_timings,
+                        lambda: self.normalizer.normalize(
+                            source=source,
+                            destination=destination,
+                            media_info=media_info,
+                            recording_speed=self.config.recording_speed,
+                            audio_quality=self.config.audio_quality,
+                            stop_requested=lambda: self.control.should_stop(source.name),
+                        ),
+                    )
                 if self.config.save_normalized_video:
                     normalized_output = work_video
                 normalized_duration = media_info.duration_seconds * 2.0
 
-            transcription_input = work_video
-            if self.config.transcription_engine is not TranscriptionEngine.NONE:
+            if self.config.recording_speed is not RecordingSpeed.DOUBLE and has_transcription:
                 temp_transcription_audio = output_dir / ".transcription_audio.wav"
                 transcription_input = self._time_step(
                     "Audio",
@@ -224,14 +254,17 @@ class BatchProcessor:
                     log_lines,
                     step_state,
                     stage_timings,
-                    lambda: self.audio_extractor.extract(
-                        source=work_video,
+                    lambda: self.audio_extractor.extract_for_transcription(
+                        source=source,
                         destination=temp_transcription_audio,
                         media_info=media_info,
+                        recording_speed=self.config.recording_speed,
+                        audio_quality=self.config.audio_quality,
                         stop_requested=lambda: self.control.should_stop(source.name),
                     ),
                 )
                 log_lines[-1] = f"{log_lines[-1]} (16 kHz mono WAV)"
+                self._append_audio_command_log(log_lines, temp_transcription_audio)
 
             transcript = self._time_step(
                 "Transcribe",
@@ -359,6 +392,8 @@ class BatchProcessor:
             step = step_state["current"]
             message = str(exc)
             log_lines.append(f"{step}  ERROR: {message}")
+            if step == "Audio":
+                self._append_audio_command_log(log_lines)
             log_lines.append("Partial output preserved for review. File marked failed.")
             elapsed = time.monotonic() - started
             try:
@@ -409,6 +444,67 @@ class BatchProcessor:
             message=message,
         )
 
+    def _transcription_log_line(self) -> str:
+        metadata = getattr(self.transcriber, "metadata", {}) or {}
+        profile = metadata.get("profile_name") or metadata.get("profile") or self.config.transcription_profile
+        engine = metadata.get("resolved_engine") or self.config.transcription_engine.value
+        model = metadata.get("model") or self.config.whisper_model
+        return f"Profile:  {profile} ({engine}, {model})"
+
+    def _append_audio_command_log(self, log_lines: List[str], destination: Optional[Path] = None) -> None:
+        command_text = ""
+        if destination and hasattr(self.audio_extractor, "command_text_for"):
+            command_text = self.audio_extractor.command_text_for(destination)
+        if not command_text:
+            command_text = getattr(self.audio_extractor, "last_command_text", "")
+        if command_text and not any(line.startswith("Audio cmd:") for line in log_lines):
+            log_lines.append(f"Audio cmd: {command_text}")
+
+    def _prepare_double_speed_media(
+        self,
+        source: Path,
+        normalized_destination: Path,
+        transcription_audio_destination: Path,
+        media_info,
+        log_lines: List[str],
+        step_state,
+        stage_timings,
+    ):
+        def normalize(stop_requested):
+            return self.normalizer.normalize(
+                source=source,
+                destination=normalized_destination,
+                media_info=media_info,
+                recording_speed=self.config.recording_speed,
+                audio_quality=self.config.audio_quality,
+                stop_requested=stop_requested,
+            )
+
+        def extract_audio(stop_requested):
+            return self.audio_extractor.extract_for_transcription(
+                source=source,
+                destination=transcription_audio_destination,
+                media_info=media_info,
+                recording_speed=self.config.recording_speed,
+                audio_quality=self.config.audio_quality,
+                stop_requested=stop_requested,
+            )
+
+        results = self._time_steps_parallel(
+            source=source,
+            log_lines=log_lines,
+            step_state=step_state,
+            stage_timings=stage_timings,
+            operations={
+                "Normalize": normalize,
+                "Audio": extract_audio,
+            },
+            log_suffixes={
+                "Audio": " (16 kHz mono WAV)",
+            },
+        )
+        return results["Normalize"], results["Audio"]
+
     def _time_step(self, name: str, source: Path, log_lines: List[str], step_state, stage_timings, operation):
         if self.control.should_stop(source.name):
             raise ProcessingStopped("Stopped by user")
@@ -424,6 +520,75 @@ class BatchProcessor:
         self._emit("step_finished", source=source.name, step=name, elapsed_seconds=round(elapsed, 1))
         return result
 
+    def _time_steps_parallel(
+        self,
+        source: Path,
+        log_lines: List[str],
+        step_state,
+        stage_timings,
+        operations: Dict[str, Callable[[Callable[[], bool]], object]],
+        log_suffixes: Optional[Dict[str, str]] = None,
+    ) -> Dict[str, object]:
+        cancel_requested = threading.Event()
+        step_lock = threading.Lock()
+        log_suffixes = log_suffixes or {}
+
+        def should_stop() -> bool:
+            return cancel_requested.is_set() or self.control.should_stop(source.name)
+
+        def run_step(name: str, operation: Callable[[Callable[[], bool]], object]):
+            if should_stop():
+                raise ProcessingStopped("Stopped by user")
+            with step_lock:
+                step_state["current"] = name
+            self._emit("step_started", source=source.name, step=name)
+            started = time.monotonic()
+            try:
+                result = operation(should_stop)
+            except Exception:
+                cancel_requested.set()
+                raise
+            if should_stop():
+                cancel_requested.set()
+                raise ProcessingStopped("Stopped by user")
+            elapsed = time.monotonic() - started
+            self._emit("step_finished", source=source.name, step=name, elapsed_seconds=round(elapsed, 1))
+            return name, result, elapsed
+
+        results: Dict[str, object] = {}
+        successes: Dict[str, float] = {}
+        failures = []
+        with ThreadPoolExecutor(max_workers=len(operations)) as executor:
+            futures = {
+                executor.submit(run_step, name, operation): name
+                for name, operation in operations.items()
+            }
+            for future in as_completed(futures):
+                name = futures[future]
+                try:
+                    completed_name, result, elapsed = future.result()
+                    results[completed_name] = result
+                    successes[completed_name] = elapsed
+                except Exception as exc:
+                    cancel_requested.set()
+                    failures.append((name, exc))
+
+        for name in operations:
+            if name in successes:
+                elapsed = successes[name]
+                stage_timings[name] = round(elapsed, 3)
+                log_lines.append(f"{name:<10} OK  {elapsed:.1f}s{log_suffixes.get(name, '')}")
+
+        if failures:
+            failed_name, exc = next(
+                ((name, error) for name, error in failures if not isinstance(error, ProcessingStopped)),
+                failures[0],
+            )
+            step_state["current"] = failed_name
+            raise exc
+
+        return results
+
     def _emit_file_finished(self, result: FileResult, results: List[FileResult], attempted: int) -> None:
         self._emit(
             "file_finished",
@@ -438,6 +603,15 @@ class BatchProcessor:
             total=attempted,
             word_count=result.word_count,
             slide_count=result.slide_count,
+            duration_seconds=round(_result_effective_duration_seconds(result), 3),
+            source_duration_seconds=round(result.duration_seconds, 3),
+            normalized_duration_seconds=(
+                round(result.normalized_duration_seconds, 3)
+                if result.normalized_duration_seconds is not None
+                else None
+            ),
+            lecture_duration_seconds=round(_result_effective_duration_seconds(result), 3),
+            elapsed_seconds=round(result.elapsed_seconds, 3),
             enriched=result.enriched,
             rendered=result.rendered,
             failure_step=result.failure_step,
@@ -458,6 +632,16 @@ def discover_mov_files(folder: Path) -> List[Path]:
         (item for item in folder.iterdir() if item.is_file() and item.suffix.lower() == ".mov"),
         key=lambda item: item.name.lower(),
     )
+
+
+def _effective_duration_seconds(duration_seconds: float, config: BatchConfig) -> float:
+    if config.recording_speed is RecordingSpeed.DOUBLE:
+        return duration_seconds * 2.0
+    return duration_seconds
+
+
+def _result_effective_duration_seconds(result: FileResult) -> float:
+    return result.normalized_duration_seconds or result.duration_seconds
 
 
 def discover_lecture_artifacts(folder: Path) -> List[Path]:

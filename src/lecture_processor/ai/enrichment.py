@@ -63,6 +63,8 @@ def enrich_lecture_artifact(
         source=artifact["source"]["filename"],
         title=enrichment["title"],
         elapsed_seconds=round(enrichment["elapsed_seconds"], 1),
+        input_tokens=enrichment["input_token_estimate"],
+        output_tokens=enrichment["output_token_estimate"],
     )
     return artifact
 

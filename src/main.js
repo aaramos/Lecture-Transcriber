@@ -51,19 +51,26 @@ const LAST_OUTPUT_STORAGE_KEY = "lectureProcessor.lastOutputDir.v1";
 const DEFAULT_SETTINGS = Object.freeze({
   recordingSpeed: "1x",
   audioQuality: "high",
-  transcriptionEngine: "faster-whisper",
-  transcriptionQuality: "accurate",
-  whisperModel: "medium.en",
+  transcriptionProfile: "quality",
   slideSensitivity: "medium",
   aiModel: "gemini-2.5-flash",
   enhanceWithGemini: false,
   concurrentFiles: 2,
   saveNormalized: true,
 });
+const PROFILE_ORDER = ["quality", "fast", "turbo"];
+const PROFILE_DESCRIPTIONS = Object.freeze({
+  quality: "Highest accuracy. Best for difficult audio. ~1.5-2x real-time.",
+  fast: "Recommended for most lectures. Minimal accuracy loss vs Quality, ~2-3x faster.",
+  turbo: "Maximum speed using Apple Silicon acceleration. Excellent accuracy. Requires M-series Mac.",
+});
+const PROFILE_LABELS = Object.freeze({
+  quality: "Quality",
+  fast: "Fast",
+  turbo: "Turbo",
+});
 const LEGACY_DEFAULT_MIGRATIONS = Object.freeze({
   audioQuality: ["fast", DEFAULT_SETTINGS.audioQuality],
-  transcriptionQuality: ["balanced", DEFAULT_SETTINGS.transcriptionQuality],
-  whisperModel: ["large-v3", DEFAULT_SETTINGS.whisperModel],
   aiModel: ["gemini-2.5-flash-lite", DEFAULT_SETTINGS.aiModel],
 });
 
@@ -84,10 +91,14 @@ const state = {
   elapsedTimer: null,
   systemMetricsTimer: null,
   finishedFileReports: 0,
+  tokensSent: 0,
+  tokensReceived: 0,
+  tokenUsageBySource: new Map(),
   geminiKeySaved: false,
   enhanceWithGeminiPreference: DEFAULT_SETTINGS.enhanceWithGemini,
   dependencyReady: false,
   dependencySetupRunning: false,
+  profileStatusById: new Map(),
   files: new Map(),
   fileOrder: [],
   skippedFiles: new Set(),
@@ -133,6 +144,10 @@ const elements = {
   gpuMetricStatus: document.querySelector("#gpuMetricStatus"),
   memoryMetric: document.querySelector("#memoryMetric"),
   memoryMetricStatus: document.querySelector("#memoryMetricStatus"),
+  tokensSentMetric: document.querySelector("#tokensSentMetric"),
+  tokensSentMetricStatus: document.querySelector("#tokensSentMetricStatus"),
+  tokensReceivedMetric: document.querySelector("#tokensReceivedMetric"),
+  tokensReceivedMetricStatus: document.querySelector("#tokensReceivedMetricStatus"),
   activeVideos: document.querySelector("#activeVideos"),
   activeSummary: document.querySelector("#activeSummary"),
   completedCount: document.querySelector("#completedCount"),
@@ -142,9 +157,8 @@ const elements = {
   skippedCount: document.querySelector("#skippedCount"),
   canceledCount: document.querySelector("#canceledCount"),
   audioQuality: document.querySelector("#audioQuality"),
-  transcriptionEngine: document.querySelector("#transcriptionEngine"),
-  transcriptionQuality: document.querySelector("#transcriptionQuality"),
-  whisperModel: document.querySelector("#whisperModel"),
+  transcriptionProfile: document.querySelector("#transcriptionProfile"),
+  transcriptionProfileHelp: document.querySelector("#transcriptionProfileHelp"),
   slideSensitivity: document.querySelector("#slideSensitivity"),
   enhanceWithGemini: document.querySelector("#enhanceWithGemini"),
   aiModel: document.querySelector("#aiModel"),
@@ -161,6 +175,7 @@ window.__TAURI__?.event?.listen?.("processor-event", (event) => handleProcessorE
 window.__TAURI__?.event?.listen?.("dependency-event", (event) => handleDependencyEvent(event.payload));
 loadPersistedSettings();
 refreshDependencyStatus();
+refreshTranscriptionProfileStatus();
 refreshGeminiKeyStatus();
 cleanupTempFilesAtLaunch();
 setupDragAndDrop();
@@ -216,9 +231,7 @@ elements.concurrentFiles.addEventListener("input", () => {
 
 [
   elements.audioQuality,
-  elements.transcriptionEngine,
-  elements.transcriptionQuality,
-  elements.whisperModel,
+  elements.transcriptionProfile,
   elements.slideSensitivity,
   elements.enhanceWithGemini,
   elements.aiModel,
@@ -227,6 +240,9 @@ elements.concurrentFiles.addEventListener("input", () => {
   element.addEventListener("change", () => {
     if (element === elements.enhanceWithGemini && state.folderMode !== "processed") {
       state.enhanceWithGeminiPreference = elements.enhanceWithGemini.checked;
+    }
+    if (element === elements.transcriptionProfile) {
+      renderTranscriptionProfileHelp();
     }
     saveCurrentSettings();
     renderAiControls();
@@ -354,9 +370,7 @@ async function startBatch() {
     concurrentFiles: finalConcurrentFiles,
     saveNormalizedVideo: elements.saveNormalized.checked,
     audioQuality: elements.audioQuality.value,
-    transcriptionEngine: elements.transcriptionEngine.value,
-    transcriptionQuality: elements.transcriptionQuality.value,
-    whisperModel: elements.whisperModel.value,
+    transcriptionProfile: elements.transcriptionProfile.value,
     slideSensitivity: elements.slideSensitivity.value,
     aiProvider: needsGemini() ? "gemini" : "none",
     aiModel: elements.aiModel.value,
@@ -390,6 +404,7 @@ async function refreshDependencyStatus() {
   try {
     const status = await invoke("dependency_status");
     applyDependencyStatus(status);
+    await refreshTranscriptionProfileStatus();
   } catch (error) {
     showDependencySetup({
       message: "Dependency check failed",
@@ -398,6 +413,16 @@ async function refreshDependencyStatus() {
       failed: true,
     });
   }
+}
+
+async function refreshTranscriptionProfileStatus() {
+  try {
+    const status = await invoke("transcription_profile_status");
+    state.profileStatusById = new Map((status?.profiles || []).map((profile) => [profile.id, profile]));
+  } catch {
+    state.profileStatusById = new Map();
+  }
+  renderTranscriptionProfileOptions();
 }
 
 async function setupDependencies() {
@@ -416,6 +441,7 @@ async function setupDependencies() {
   try {
     const status = await invoke("setup_dependencies");
     applyDependencyStatus(status);
+    await refreshTranscriptionProfileStatus();
   } catch (error) {
     showDependencySetup({
       message: "Setup failed",
@@ -671,9 +697,13 @@ function resetResults() {
   state.cancelRequested = false;
   state.processorStarted = false;
   state.finishedFileReports = 0;
+  state.tokensSent = 0;
+  state.tokensReceived = 0;
+  state.tokenUsageBySource.clear();
   state.files.clear();
   state.fileOrder = [];
   setProgress(0, 0);
+  renderTokenMetrics();
   renderVideoDashboard();
 }
 
@@ -686,9 +716,7 @@ function plannedStepNames() {
   if (state.recordingSpeed === "2x") {
     steps.push("Normalize");
   }
-  if (elements.transcriptionEngine.value !== "none") {
-    steps.push("Audio");
-  }
+  steps.push("Audio");
   steps.push("Transcribe", "Slides");
   if (needsGemini()) {
     steps.push("Enrich");
@@ -728,6 +756,9 @@ function markStepStarted(file, step) {
         };
       }
       if (index < activeIndex && ["waiting", "active"].includes(item.status)) {
+        if (item.status === "active") {
+          return item;
+        }
         return {
           ...item,
           status: "done",
@@ -745,19 +776,23 @@ function markStepStarted(file, step) {
 function markStepFinished(file, step, elapsedSeconds) {
   const now = Date.now();
   const steps = ensureStepStates(file, step);
+  const updatedSteps = steps.map((item) =>
+    item.key === step
+      ? {
+          ...item,
+          status: "done",
+          elapsedSeconds,
+          startedAt: item.startedAt || null,
+        }
+      : item,
+  );
+  const nextActiveStep = updatedSteps.find((item) => item.status === "active");
+  const nextCurrentStep = file?.currentStep === step ? nextActiveStep?.key || null : file?.currentStep || nextActiveStep?.key || null;
+  const nextCurrentStepState = updatedSteps.find((item) => item.key === nextCurrentStep);
   return {
-    steps: steps.map((item) =>
-      item.key === step
-        ? {
-            ...item,
-            status: "done",
-            elapsedSeconds,
-            startedAt: item.startedAt || null,
-          }
-        : item,
-    ),
-    currentStep: file?.currentStep === step ? null : file?.currentStep || null,
-    currentStepStartedAt: file?.currentStep === step ? null : file?.currentStepStartedAt || null,
+    steps: updatedSteps,
+    currentStep: nextCurrentStep,
+    currentStepStartedAt: nextCurrentStepState?.startedAt || null,
     lastEventAt: now,
   };
 }
@@ -864,6 +899,56 @@ function activeStepDuration(file, step) {
   return formatDuration((Date.now() - startedAt) / 1000);
 }
 
+function renderFileStats(file, source) {
+  const length = formatFileLength(file?.durationSeconds);
+  const elapsed = fileElapsedSeconds(file);
+  const speed = processingSpeed(file?.durationSeconds, elapsed);
+  const elapsedLabel = file?.status === "completed" ? "Finished in" : "Elapsed";
+  const elapsedText = elapsed ? formatDuration(elapsed) : "--";
+  const tokenStats = renderFileTokenStats(file, source);
+  return `<div class="video-stats">Length ${escapeHtml(length)} · ${escapeHtml(elapsedLabel)} ${escapeHtml(
+    elapsedText,
+  )} · Speed ${escapeHtml(speed)}${tokenStats}</div>`;
+}
+
+function renderFileTokenStats(file, source) {
+  const usage = state.tokenUsageBySource.get(source) || {
+    sent: Number(file?.tokensSent || 0),
+    received: Number(file?.tokensReceived || 0),
+  };
+  const hasUsage = Number(usage.sent) > 0 || Number(usage.received) > 0;
+  const shouldShow = hasUsage || needsGemini() || file?.currentStep === "Enrich";
+  if (!shouldShow) return "";
+  const sent = hasUsage ? formatTokenCount(usage.sent) : "--";
+  const received = hasUsage ? formatTokenCount(usage.received) : "--";
+  return ` · Tokens in ${escapeHtml(sent)} · out ${escapeHtml(received)}`;
+}
+
+function fileElapsedSeconds(file) {
+  if (!file) return 0;
+  if (Number(file.elapsedSeconds) > 0) return Number(file.elapsedSeconds);
+  if (file.startedAt && isActiveStatus(file.status)) {
+    return Math.max(0, (Date.now() - file.startedAt) / 1000);
+  }
+  return 0;
+}
+
+function processingSpeed(durationSeconds, elapsedSeconds) {
+  const duration = Number(durationSeconds || 0);
+  const elapsed = Number(elapsedSeconds || 0);
+  if (!duration || !elapsed || elapsed < 0.5) return "--x";
+  return `${(duration / elapsed).toFixed(1)}x`;
+}
+
+function formatFileLength(seconds) {
+  const totalSeconds = Number(seconds || 0);
+  if (!totalSeconds || totalSeconds < 0) return "--:--";
+  const wholeSeconds = Math.max(0, Math.round(totalSeconds));
+  const minutes = Math.floor(wholeSeconds / 60);
+  const remainingSeconds = wholeSeconds % 60;
+  return `${minutes}:${String(remainingSeconds).padStart(2, "0")}`;
+}
+
 function formatDuration(seconds) {
   const wholeSeconds = Math.max(0, Math.floor(Number(seconds) || 0));
   if (wholeSeconds < 60) return `${wholeSeconds}s`;
@@ -902,6 +987,15 @@ function validateSettings(options = {}) {
     elements.runMeta.textContent = "Concurrent files must be between 1 and 3.";
     return null;
   }
+  const selectedProfile = currentProfileStatus();
+  if (selectedProfile && selectedProfile.available === false) {
+    if (showDialogOnError) {
+      showDialog(elements.settingsDialog);
+    }
+    elements.runMeta.textContent = selectedProfile.unavailableReason || "Choose an available transcription profile.";
+    elements.transcriptionProfile.focus();
+    return null;
+  }
   if (needsGemini() && !state.geminiKeySaved && !elements.geminiApiKey.value.trim()) {
     if (showDialogOnError) {
       showDialog(elements.settingsDialog);
@@ -929,11 +1023,18 @@ function handleProcessorEvent(event) {
     if (["skipped", "stopping", "stopped"].includes(state.files.get(event.source)?.status)) {
       return;
     }
+    const previous = state.files.get(event.source);
     updateFile(event.source, {
       status: "running",
       stage: "Preparing",
       detail: "Preparing video",
       progress: 5,
+      startedAt: previous?.startedAt || Date.now(),
+    });
+  } else if (event.kind === "file_media") {
+    updateFile(event.source, {
+      durationSeconds: Number(event.duration_seconds || 0),
+      sourceDurationSeconds: Number(event.source_duration_seconds || event.duration_seconds || 0),
     });
   } else if (event.kind === "step_started") {
     if (["skipped", "stopping", "stopped"].includes(state.files.get(event.source)?.status)) {
@@ -944,17 +1045,22 @@ function handleProcessorEvent(event) {
       stage: STEP_LABELS[event.step] || event.step,
       detail: stepRunningDetail(event.step),
       progress: STEP_START_PROGRESS[event.step] || 12,
+      startedAt: state.files.get(event.source)?.startedAt || Date.now(),
       ...markStepStarted(state.files.get(event.source), event.step),
     });
   } else if (event.kind === "step_finished") {
     if (["skipped", "stopping", "stopped"].includes(state.files.get(event.source)?.status)) {
       return;
     }
+    const stepPatch = markStepFinished(state.files.get(event.source), event.step, Number(event.elapsed_seconds || 0));
+    const activeStep = stepPatch.steps.find((item) => item.status === "active");
     updateFile(event.source, {
-      stage: `${STEP_LABELS[event.step] || event.step} complete`,
-      detail: `${Number(event.elapsed_seconds || 0).toFixed(1)}s`,
-      progress: STEP_DONE_PROGRESS[event.step] || 20,
-      ...markStepFinished(state.files.get(event.source), event.step, Number(event.elapsed_seconds || 0)),
+      stage: activeStep ? STEP_LABELS[activeStep.key] || activeStep.key : `${STEP_LABELS[event.step] || event.step} complete`,
+      detail: activeStep ? stepRunningDetail(activeStep.key) : `${Number(event.elapsed_seconds || 0).toFixed(1)}s`,
+      progress: activeStep
+        ? Math.max(STEP_START_PROGRESS[activeStep.key] || 12, STEP_DONE_PROGRESS[event.step] || 20)
+        : STEP_DONE_PROGRESS[event.step] || 20,
+      ...stepPatch,
     });
   } else if (event.kind === "enrichment_started") {
     updateFile(event.source, {
@@ -962,6 +1068,7 @@ function handleProcessorEvent(event) {
       ...markStepStarted(state.files.get(event.source), "Enrich"),
     });
   } else if (event.kind === "enrichment_progress") {
+    applyTokenUsage(event);
     const completed = Number(event.completed || 0);
     const total = Number(event.total || 0);
     const countText = total > 0 ? ` (${completed}/${total})` : "";
@@ -975,6 +1082,7 @@ function handleProcessorEvent(event) {
       ...activePatch,
     });
   } else if (event.kind === "enrichment_finished") {
+    applyTokenUsage(event);
     updateFile(event.source, {
       detail: event.title ? `Gemini finished: ${event.title}` : "Gemini finished",
       ...markStepFinished(state.files.get(event.source), "Enrich", Number(event.elapsed_seconds || 0)),
@@ -989,6 +1097,10 @@ function handleProcessorEvent(event) {
       stage: statusLabel(event.status),
       detail: fileFinishedDetail(event, failedStage),
       progress: 100,
+      durationSeconds: Number(event.lecture_duration_seconds || event.duration_seconds || previous.durationSeconds || 0),
+      sourceDurationSeconds: Number(event.source_duration_seconds || previous.sourceDurationSeconds || 0),
+      elapsedSeconds: Number(event.elapsed_seconds || previous.elapsedSeconds || 0),
+      finishedAt: Date.now(),
       ...markFileFinished(previous, event.status, event.failure_step),
     });
   } else if (event.kind === "batch_finished") {
@@ -1171,6 +1283,7 @@ function renderVideoList(entries) {
               <span class="video-stage">${escapeHtml(file.stage || statusLabel(file.status))}</span>
             </div>
             <div class="video-detail">${escapeHtml(detail)}</div>
+            ${renderFileStats(file, name)}
             ${renderStepStrip(file)}
           </div>
           ${
@@ -1464,9 +1577,7 @@ function applySettings(settings) {
     ? settings.recordingSpeed
     : DEFAULT_SETTINGS.recordingSpeed;
   setSelectValue(elements.audioQuality, settings.audioQuality, DEFAULT_SETTINGS.audioQuality);
-  setSelectValue(elements.transcriptionEngine, settings.transcriptionEngine, DEFAULT_SETTINGS.transcriptionEngine);
-  setSelectValue(elements.transcriptionQuality, settings.transcriptionQuality, DEFAULT_SETTINGS.transcriptionQuality);
-  setSelectValue(elements.whisperModel, settings.whisperModel, DEFAULT_SETTINGS.whisperModel);
+  setSelectValue(elements.transcriptionProfile, settings.transcriptionProfile, DEFAULT_SETTINGS.transcriptionProfile);
   setSelectValue(elements.slideSensitivity, settings.slideSensitivity, DEFAULT_SETTINGS.slideSensitivity);
   setSelectValue(elements.aiModel, settings.aiModel, DEFAULT_SETTINGS.aiModel);
   state.enhanceWithGeminiPreference = Boolean(settings.enhanceWithGemini);
@@ -1474,18 +1585,28 @@ function applySettings(settings) {
   elements.concurrentFiles.value = String(validConcurrentFiles(settings.concurrentFiles));
   elements.saveNormalized.checked = Boolean(settings.saveNormalized);
   syncSpeedSegments();
+  renderTranscriptionProfileOptions();
   renderAiControls();
   renderNormalizationWarning();
 }
 
 function migratePersistedSettings(settings) {
   const migrated = { ...settings };
+  if (!migrated.transcriptionProfile) {
+    migrated.transcriptionProfile = legacyProfileFromSettings(migrated);
+  }
   Object.entries(LEGACY_DEFAULT_MIGRATIONS).forEach(([key, [legacyValue, nextValue]]) => {
     if (migrated[key] === legacyValue) {
       migrated[key] = nextValue;
     }
   });
   return migrated;
+}
+
+function legacyProfileFromSettings(settings) {
+  const legacyQuality = String(settings.transcriptionQuality || "").toLowerCase();
+  if (legacyQuality === "balanced" || legacyQuality === "fast") return "fast";
+  return DEFAULT_SETTINGS.transcriptionProfile;
 }
 
 function saveCurrentSettings() {
@@ -1495,9 +1616,7 @@ function saveCurrentSettings() {
   const settings = {
     recordingSpeed: state.recordingSpeed,
     audioQuality: elements.audioQuality.value,
-    transcriptionEngine: elements.transcriptionEngine.value,
-    transcriptionQuality: elements.transcriptionQuality.value,
-    whisperModel: elements.whisperModel.value,
+    transcriptionProfile: elements.transcriptionProfile.value,
     slideSensitivity: elements.slideSensitivity.value,
     enhanceWithGemini: state.folderMode === "processed" ? state.enhanceWithGeminiPreference : elements.enhanceWithGemini.checked,
     aiModel: elements.aiModel.value,
@@ -1556,6 +1675,55 @@ function renderAiControls() {
   elements.aiModel.disabled = !geminiSelected;
   elements.geminiApiKey.disabled = !geminiSelected;
   elements.saveGeminiKeyButton.disabled = !geminiSelected;
+}
+
+function renderTranscriptionProfileOptions() {
+  const currentValue = elements.transcriptionProfile.value || DEFAULT_SETTINGS.transcriptionProfile;
+  const profiles = PROFILE_ORDER.map((id) => state.profileStatusById.get(id) || {
+    id,
+    displayName: PROFILE_LABELS[id],
+    description: PROFILE_DESCRIPTIONS[id],
+    available: true,
+    unavailableReason: null,
+  });
+  elements.transcriptionProfile.innerHTML = "";
+  profiles.forEach((profile) => {
+    const option = document.createElement("option");
+    option.value = profile.id;
+    option.textContent = profile.displayName || PROFILE_LABELS[profile.id] || profile.id;
+    option.disabled = profile.available === false;
+    if (profile.unavailableReason) {
+      option.title = profile.unavailableReason;
+    }
+    elements.transcriptionProfile.appendChild(option);
+  });
+  const desiredStatus = profiles.find((profile) => profile.id === currentValue);
+  elements.transcriptionProfile.value = desiredStatus && desiredStatus.available !== false
+    ? currentValue
+    : DEFAULT_SETTINGS.transcriptionProfile;
+  renderTranscriptionProfileHelp();
+}
+
+function renderTranscriptionProfileHelp() {
+  const profile = currentProfileStatus();
+  if (!profile) {
+    elements.transcriptionProfileHelp.textContent = PROFILE_DESCRIPTIONS[elements.transcriptionProfile.value] || "";
+    return;
+  }
+  const reason = profile.available === false && profile.unavailableReason ? ` ${profile.unavailableReason}` : "";
+  elements.transcriptionProfileHelp.textContent =
+    `${profile.description || PROFILE_DESCRIPTIONS[profile.id] || ""}${reason}`;
+}
+
+function currentProfileStatus() {
+  const id = elements.transcriptionProfile.value || DEFAULT_SETTINGS.transcriptionProfile;
+  return state.profileStatusById.get(id) || {
+    id,
+    displayName: PROFILE_LABELS[id],
+    description: PROFILE_DESCRIPTIONS[id],
+    available: true,
+    unavailableReason: null,
+  };
 }
 
 async function cleanupTempFilesAtLaunch() {
@@ -1641,8 +1809,14 @@ function runDescription() {
   if (state.folderMode === "processed") {
     return `${ready} ${noun}${ready === 1 ? "" : "s"} · ${concurrent} at a time · Gemini${skippedText}`;
   }
+  const profileText = selectedProfileLabel();
   const aiText = needsGemini() ? " · Gemini" : "";
-  return `${ready} ${noun}${ready === 1 ? "" : "s"} · ${concurrent} at a time · ${speed}${aiText}${skippedText}`;
+  return `${ready} ${noun}${ready === 1 ? "" : "s"} · ${concurrent} at a time · ${speed} · ${profileText}${aiText}${skippedText}`;
+}
+
+function selectedProfileLabel() {
+  const profile = currentProfileStatus();
+  return profile?.displayName || PROFILE_LABELS[elements.transcriptionProfile.value] || "Quality";
 }
 
 function startElapsedTimer() {
@@ -1712,12 +1886,56 @@ function renderSystemMetrics(metrics) {
     memoryUsedGb == null ? metrics?.memoryStatus || "Unavailable" : "used memory in GB",
     memoryUsedGb == null,
   );
+  renderTokenMetrics();
 }
 
 function renderMetric(valueElement, statusElement, value, status, unavailable) {
   valueElement.textContent = value;
   statusElement.textContent = status;
   valueElement.closest(".system-card")?.classList.toggle("unavailable", unavailable);
+}
+
+function applyTokenUsage(event) {
+  const sent = Number(event.input_tokens ?? event.inputTokens ?? event.input_token_estimate ?? event.inputTokenEstimate);
+  const received = Number(event.output_tokens ?? event.outputTokens ?? event.output_token_estimate ?? event.outputTokenEstimate);
+  if (!Number.isFinite(sent) && !Number.isFinite(received)) return;
+
+  if (event.source) {
+    const previous = state.tokenUsageBySource.get(event.source) || { sent: 0, received: 0 };
+    state.tokenUsageBySource.set(event.source, {
+      sent: Number.isFinite(sent) ? Math.max(0, sent) : previous.sent,
+      received: Number.isFinite(received) ? Math.max(0, received) : previous.received,
+    });
+    const totals = [...state.tokenUsageBySource.values()].reduce(
+      (sum, usage) => ({
+        sent: sum.sent + usage.sent,
+        received: sum.received + usage.received,
+      }),
+      { sent: 0, received: 0 },
+    );
+    state.tokensSent = totals.sent;
+    state.tokensReceived = totals.received;
+  } else {
+    if (Number.isFinite(sent)) state.tokensSent = Math.max(0, sent);
+    if (Number.isFinite(received)) state.tokensReceived = Math.max(0, received);
+  }
+
+  renderTokenMetrics();
+}
+
+function renderTokenMetrics() {
+  elements.tokensSentMetric.textContent = formatTokenCount(state.tokensSent);
+  elements.tokensReceivedMetric.textContent = formatTokenCount(state.tokensReceived);
+  elements.tokensSentMetricStatus.textContent = state.tokensSent ? "Gemini prompt" : "Waiting";
+  elements.tokensReceivedMetricStatus.textContent = state.tokensReceived ? "Gemini output" : "Waiting";
+}
+
+function formatTokenCount(value) {
+  const count = Math.max(0, Math.round(Number(value) || 0));
+  if (count >= 1_000_000) return `${(count / 1_000_000).toFixed(1)}M`;
+  if (count >= 10_000) return `${Math.round(count / 1_000)}K`;
+  if (count >= 1_000) return `${(count / 1_000).toFixed(1)}K`;
+  return String(count);
 }
 
 function waitForPaint() {
