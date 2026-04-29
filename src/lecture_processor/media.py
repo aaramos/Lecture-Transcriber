@@ -113,9 +113,12 @@ class MediaInspector:
         payload = json.loads(completed.stdout)
         duration = _extract_duration(payload)
         video_stream = _first_video_stream(payload)
+        has_video = bool(video_stream)
         has_audio = _has_audio_stream(payload)
-        avg_frame_rate = _parse_fraction(video_stream.get("avg_frame_rate"))
-        real_frame_rate = _parse_fraction(video_stream.get("r_frame_rate"))
+        if not has_video and not has_audio:
+            raise ProcessingError(f"No audio or video stream found in {path.name}")
+        avg_frame_rate = _parse_fraction(video_stream.get("avg_frame_rate")) if video_stream else 0.0
+        real_frame_rate = _parse_fraction(video_stream.get("r_frame_rate")) if video_stream else 0.0
         is_vfr = bool(
             avg_frame_rate
             and real_frame_rate
@@ -129,6 +132,7 @@ class MediaInspector:
             real_frame_rate=real_frame_rate,
             is_vfr=is_vfr,
             has_audio=has_audio,
+            has_video=has_video,
         )
 
 
@@ -527,11 +531,11 @@ def _extract_duration(payload: Dict[str, Any]) -> float:
     raise ProcessingError("Could not determine media duration")
 
 
-def _first_video_stream(payload: Dict[str, Any]) -> Dict[str, Any]:
+def _first_video_stream(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     for stream in payload.get("streams", []):
         if stream.get("codec_type") == "video":
             return stream
-    raise ProcessingError("No video stream found")
+    return None
 
 
 def _has_audio_stream(payload: Dict[str, Any]) -> bool:

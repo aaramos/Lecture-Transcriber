@@ -17,9 +17,11 @@ from .errors import LectureProcessorError
 from .errors import ProcessingStopped
 from .html_renderer import render_batch_index, render_lecture_page
 from .media import CleanAudioExtractor, MediaInspector, MediaNormalizer
-from .models import BatchSummary, FileResult, FileStatus, TranscriptResult
+from .models import BatchSummary, FileResult, FileStatus, MediaInfo, TranscriptResult
 from .slides import SlideExtractor
+from .sources import discover_source_files, is_transcript_source, source_kind
 from .temp_cleanup import cleanup_processor_temp_files, remove_temp_path
+from .transcript_import import import_transcript, transcript_duration_seconds
 from .transcription import Transcriber
 from .writers import write_processing_log, write_text_atomic, write_transcript
 
@@ -47,8 +49,6 @@ class BatchProcessor:
             apple_silicon=config.apple_silicon,
         )
         self.audio_extractor = audio_extractor or CleanAudioExtractor(config.ffmpeg_path)
-        if transcriber is None:
-            raise LectureProcessorError("BatchProcessor requires a transcriber")
         self.transcriber = transcriber
         self.slide_extractor = slide_extractor or SlideExtractor(
             config.slide_sensitivity,
@@ -62,9 +62,9 @@ class BatchProcessor:
 
     def run(self) -> BatchSummary:
         self.config.validate()
-        files = discover_mov_files(self.config.input_dir)
+        files = discover_source_files(self.config.input_dir)
         if not files:
-            raise LectureProcessorError("No .mov files found. Try a different folder.")
+            raise LectureProcessorError("No supported lecture files found. Try a different folder or file.")
 
         with output_dir_lock(self.config.output_dir):
             batch_started_at = utc_now_iso()
@@ -131,6 +131,9 @@ class BatchProcessor:
             return summary
 
     def _process_file(self, source: Path, output_dir: Path) -> FileResult:
+        if is_transcript_source(source):
+            return self._process_transcript_file(source, output_dir)
+
         started = time.monotonic()
         started_at = utc_now_iso()
         log_lines = [
@@ -173,8 +176,11 @@ class BatchProcessor:
             self._emit(
                 "file_media",
                 source=source.name,
+                source_kind=source_kind(source),
                 source_duration_seconds=round(media_info.duration_seconds, 3),
                 duration_seconds=round(_effective_duration_seconds(media_info.duration_seconds, self.config), 3),
+                has_audio=media_info.has_audio,
+                has_video=media_info.has_video,
             )
             if media_info.duration_seconds < self.config.min_duration_seconds:
                 message = (
@@ -209,12 +215,19 @@ class BatchProcessor:
             work_video = source
             transcription_input = work_video
             has_transcription = self.config.transcription_engine is not TranscriptionEngine.NONE
+            should_transcribe = has_transcription and media_info.has_audio
+            if has_transcription and not media_info.has_audio:
+                raise LectureProcessorError(f"No audio stream found for transcription in {source.name}")
+
             if self.config.recording_speed is RecordingSpeed.DOUBLE:
+                normalized_duration = media_info.duration_seconds * 2.0
+
+            if media_info.has_video and self.config.recording_speed is RecordingSpeed.DOUBLE:
                 destination = normalized_video_output_path(source, output_dir)
                 if not self.config.save_normalized_video:
                     destination = output_dir / ".normalized_work.mp4"
                     temp_normalized = destination
-                if has_transcription:
+                if should_transcribe:
                     temp_transcription_audio = output_dir / ".transcription_audio.wav"
                     work_video, transcription_input = self._prepare_double_speed_media(
                         source=source,
@@ -244,9 +257,8 @@ class BatchProcessor:
                     )
                 if self.config.save_normalized_video:
                     normalized_output = work_video
-                normalized_duration = media_info.duration_seconds * 2.0
 
-            if self.config.recording_speed is not RecordingSpeed.DOUBLE and has_transcription:
+            if (not media_info.has_video or self.config.recording_speed is not RecordingSpeed.DOUBLE) and should_transcribe:
                 temp_transcription_audio = output_dir / ".transcription_audio.wav"
                 transcription_input = self._time_step(
                     "Audio",
@@ -266,6 +278,8 @@ class BatchProcessor:
                 log_lines[-1] = f"{log_lines[-1]} (16 kHz mono WAV)"
                 self._append_audio_command_log(log_lines, temp_transcription_audio)
 
+            if not self.transcriber:
+                raise LectureProcessorError("Transcription runtime is not available for media files.")
             transcript = self._time_step(
                 "Transcribe",
                 source,
@@ -283,21 +297,23 @@ class BatchProcessor:
             write_transcript(output_dir, transcript)
             log_lines[-1] = f"{log_lines[-1]} ({transcript.word_count} words)"
 
-            slides_dir = output_dir / "slides"
-            slide_count = self._time_step(
-                "Slides",
-                source,
-                log_lines,
-                step_state,
-                stage_timings,
-                lambda: self.slide_extractor.extract(
-                    work_video,
-                    slides_dir,
-                    timestamp_scale=self.config.normalized_timestamp_scale,
-                    stop_requested=lambda: self.control.should_stop(source.name),
-                ),
-            )
-            log_lines[-1] = f"{log_lines[-1]} ({slide_count} slides extracted)"
+            slide_count = 0
+            if media_info.has_video:
+                slides_dir = output_dir / "slides"
+                slide_count = self._time_step(
+                    "Slides",
+                    source,
+                    log_lines,
+                    step_state,
+                    stage_timings,
+                    lambda: self.slide_extractor.extract(
+                        work_video,
+                        slides_dir,
+                        timestamp_scale=self.config.normalized_timestamp_scale,
+                        stop_requested=lambda: self.control.should_stop(source.name),
+                    ),
+                )
+                log_lines[-1] = f"{log_lines[-1]} ({slide_count} slides extracted)"
 
             if temp_normalized:
                 remove_temp_path(temp_normalized)
@@ -435,6 +451,174 @@ class BatchProcessor:
                 remove_temp_path(temp_transcription_audio)
             if temp_normalized:
                 remove_temp_path(temp_normalized)
+
+    def _process_transcript_file(self, source: Path, output_dir: Path) -> FileResult:
+        started = time.monotonic()
+        started_at = utc_now_iso()
+        log_lines = [
+            f"File:     {source.name}",
+            f"Started:  {time.strftime('%Y-%m-%d %H:%M:%S')}",
+            "Import:   Transcript source",
+            "",
+        ]
+        stage_timings: Dict[str, float] = {}
+        step_state = {"current": "Import"}
+        lecture_json_path = None
+        html_path = None
+        enriched = False
+        rendered = False
+        title = None
+        short_summary = None
+        transcript = None
+        media_info = None
+        try:
+            if self.control.should_skip(source.name):
+                return self._skipped_file_result(source, output_dir, "Skipped by user")
+            if self.control.should_stop(source.name):
+                raise ProcessingStopped("Stopped by user")
+
+            self._emit("file_started", source=source.name, source_kind=source_kind(source))
+            reset_output_dir(output_dir)
+            transcript = self._time_step(
+                "Import",
+                source,
+                log_lines,
+                step_state,
+                stage_timings,
+                lambda: import_transcript(source),
+            )
+            duration = transcript_duration_seconds(transcript)
+            media_info = MediaInfo(
+                path=source,
+                duration_seconds=duration,
+                has_audio=False,
+                has_video=False,
+            )
+            self._emit(
+                "file_media",
+                source=source.name,
+                source_kind=source_kind(source),
+                source_duration_seconds=round(duration, 3),
+                duration_seconds=round(duration, 3),
+                has_audio=False,
+                has_video=False,
+            )
+            write_transcript(output_dir, transcript)
+            log_lines[-1] = f"{log_lines[-1]} ({transcript.word_count} words)"
+
+            elapsed = time.monotonic() - started
+            lecture_json_path = write_lecture_artifact(
+                output_dir=output_dir,
+                source=source,
+                config=self.config,
+                status=FileStatus.COMPLETED,
+                started_at=started_at,
+                finished_at=utc_now_iso(),
+                elapsed_seconds=elapsed,
+                media_info=media_info,
+                transcript=transcript,
+                transcriber_metadata={
+                    "engine": "import",
+                    "model": source.suffix.lower().lstrip("."),
+                    "profile": "import",
+                },
+                stage_timings=stage_timings,
+            )
+            if self.config.ai_provider.value != "none":
+                artifact = self._time_step(
+                    "Enrich",
+                    source,
+                    log_lines,
+                    step_state,
+                    stage_timings,
+                    lambda: enrich_lecture_artifact(
+                        lecture_json_path,
+                        self.config,
+                        progress_callback=self.progress_callback,
+                    ),
+                )
+                enrichment = artifact.get("enrichment") or {}
+                enriched = bool(enrichment)
+                title = enrichment.get("title")
+                short_summary = enrichment.get("executive_summary")
+                log_lines[-1] = f"{log_lines[-1]} ({self.config.ai_provider.value})"
+
+            if self.config.render_html:
+                html_path = self._time_step(
+                    "Render",
+                    source,
+                    log_lines,
+                    step_state,
+                    stage_timings,
+                    lambda: render_lecture_page(lecture_json_path),
+                )
+                rendered = True
+
+            elapsed = time.monotonic() - started
+            log_lines.append(f"Complete in {elapsed:.1f}s")
+            write_processing_log(output_dir, log_lines)
+            return FileResult(
+                source=source,
+                output_dir=output_dir,
+                status=FileStatus.COMPLETED,
+                duration_seconds=duration,
+                elapsed_seconds=elapsed,
+                word_count=transcript.word_count,
+                slide_count=0,
+                message="Complete",
+                lecture_json_path=lecture_json_path,
+                html_path=html_path,
+                enriched=enriched,
+                rendered=rendered,
+                title=title,
+                short_summary=short_summary,
+            )
+        except ProcessingStopped:
+            remove_temp_path(output_dir)
+            elapsed = time.monotonic() - started
+            return FileResult(
+                source=source,
+                output_dir=output_dir,
+                status=FileStatus.STOPPED,
+                elapsed_seconds=elapsed,
+                message="Stopped by user",
+            )
+        except Exception as exc:
+            output_dir.mkdir(parents=True, exist_ok=True)
+            step = step_state["current"]
+            message = str(exc)
+            log_lines.append(f"{step}  ERROR: {message}")
+            log_lines.append("Partial output preserved for review. File marked failed.")
+            elapsed = time.monotonic() - started
+            try:
+                lecture_json_path = write_lecture_artifact(
+                    output_dir=output_dir,
+                    source=source,
+                    config=self.config,
+                    status=FileStatus.FAILED,
+                    started_at=started_at,
+                    finished_at=utc_now_iso(),
+                    elapsed_seconds=elapsed,
+                    media_info=media_info,
+                    transcript=transcript,
+                    stage_timings=stage_timings,
+                    failure_step=step,
+                    failure_message=message,
+                )
+            except Exception:
+                lecture_json_path = None
+            write_processing_log(output_dir, log_lines)
+            return FileResult(
+                source=source,
+                output_dir=output_dir,
+                status=FileStatus.FAILED,
+                duration_seconds=media_info.duration_seconds if media_info else 0.0,
+                elapsed_seconds=elapsed,
+                word_count=transcript.word_count if transcript else 0,
+                failure_step=step,
+                message=message,
+                lecture_json_path=lecture_json_path,
+            )
 
     def _skipped_file_result(self, source: Path, output_dir: Path, message: str) -> FileResult:
         return FileResult(
@@ -628,10 +812,7 @@ class BatchProcessor:
 
 
 def discover_mov_files(folder: Path) -> List[Path]:
-    return sorted(
-        (item for item in folder.iterdir() if item.is_file() and item.suffix.lower() == ".mov"),
-        key=lambda item: item.name.lower(),
-    )
+    return discover_source_files(folder)
 
 
 def _effective_duration_seconds(duration_seconds: float, config: BatchConfig) -> float:

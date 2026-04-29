@@ -105,6 +105,7 @@ def build_lecture_artifact(
             "intended_frame_rate": media_info.intended_frame_rate if media_info else 0.0,
             "is_vfr": bool(media_info.is_vfr) if media_info else False,
             "has_audio": bool(media_info.has_audio) if media_info else False,
+            "has_video": bool(media_info.has_video) if media_info else False,
             "recording_speed_input": config.recording_speed.value,
             "recording_speed_output": _recording_speed_output(config),
             "normalized_path": normalized_relative,

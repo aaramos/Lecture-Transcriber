@@ -10,14 +10,14 @@ from lecture_processor.cli import EVENT_PREFIX, _build_event_printer, _prepend_t
 
 
 class CliTests(unittest.TestCase):
-    def test_empty_folder_reports_no_mov_before_optional_dependencies(self):
+    def test_empty_folder_reports_no_supported_files_before_optional_dependencies(self):
         with tempfile.TemporaryDirectory() as tmp:
             stderr = io.StringIO()
             with redirect_stderr(stderr):
                 exit_code = main(["process", str(Path(tmp)), "--transcription-engine", "auto"])
 
             self.assertEqual(exit_code, 2)
-            self.assertIn("No .mov files found", stderr.getvalue())
+            self.assertIn("No supported lecture files found", stderr.getvalue())
 
     def test_startup_error_writes_run_level_logs(self):
         with tempfile.TemporaryDirectory() as tmp:

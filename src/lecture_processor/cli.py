@@ -29,6 +29,7 @@ from .models import BatchSummary, FileStatus
 from .pipeline import BatchProcessor, discover_mov_files, enrich_processed_batch
 from .profiles import FAST_PROFILE_ID, QUALITY_PROFILE_ID, TURBO_PROFILE_ID, profile_from_legacy_quality
 from .slides import SlideExtractor
+from .sources import is_media_source
 from .temp_cleanup import cleanup_slide_temp_dirs
 from .transcription import build_transcriber
 from .writers import write_text_atomic
@@ -40,7 +41,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="lecture-processor")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    process = subparsers.add_parser("process", help="Process a folder of .mov lecture recordings")
+    process = subparsers.add_parser("process", help="Process a supported lecture file or folder")
     process.add_argument("input_dir", type=Path)
     process.add_argument("--output", type=Path)
     process.add_argument("--recording-speed", choices=[item.value for item in RecordingSpeed], default="1x")
@@ -166,31 +167,37 @@ def _run_process(args) -> int:
             raise LectureProcessorError("Gemini enrichment requires a saved or exported GEMINI_API_KEY.")
         if config.ai_provider is AIProviderName.GEMINI and not _gemini_dependency_available():
             raise LectureProcessorError("Gemini support is not installed. Install with: python3 -m pip install -e '.[ai]'")
-        if not discover_mov_files(config.input_dir):
-            raise LectureProcessorError("No .mov files found. Try a different folder.")
-        needs_ffmpeg = (
+        source_files = discover_mov_files(config.input_dir)
+        if not source_files:
+            raise LectureProcessorError("No supported lecture files found. Try a different folder or file.")
+        media_files = [path for path in source_files if is_media_source(path)]
+        needs_media_tools = bool(media_files)
+        needs_ffmpeg = needs_media_tools and (
             config.recording_speed is RecordingSpeed.DOUBLE
             or config.transcription_engine is not TranscriptionEngine.NONE
             or config.slide_backend is not SlideBackend.OPENCV
         )
-        ensure_media_tools(
-            ffprobe_path=config.ffprobe_path,
-            ffmpeg_path=config.ffmpeg_path,
-            needs_ffmpeg=needs_ffmpeg,
-        )
-        if needs_ffmpeg:
-            _prepend_tool_parent_to_path(config.ffmpeg_path)
-        transcriber = build_transcriber(
-            config.transcription_engine,
-            config.whisper_model,
-            quality=config.transcription_quality,
-            profile_id=config.transcription_profile
-            if (args.transcription_profile or config.transcription_engine is TranscriptionEngine.FASTER_WHISPER)
-            else "",
-            prefer_whisper_cpp=False,
-            whisper_cpp_model_dir=config.whisper_cpp_model_dir,
-            require_whisper_cpp_coreml=config.require_whisper_cpp_coreml,
-        )
+        if needs_media_tools:
+            ensure_media_tools(
+                ffprobe_path=config.ffprobe_path,
+                ffmpeg_path=config.ffmpeg_path,
+                needs_ffmpeg=needs_ffmpeg,
+            )
+            if needs_ffmpeg:
+                _prepend_tool_parent_to_path(config.ffmpeg_path)
+        transcriber = None
+        if media_files:
+            transcriber = build_transcriber(
+                config.transcription_engine,
+                config.whisper_model,
+                quality=config.transcription_quality,
+                profile_id=config.transcription_profile
+                if (args.transcription_profile or config.transcription_engine is TranscriptionEngine.FASTER_WHISPER)
+                else "",
+                prefer_whisper_cpp=False,
+                whisper_cpp_model_dir=config.whisper_cpp_model_dir,
+                require_whisper_cpp_coreml=config.require_whisper_cpp_coreml,
+            )
         processor = BatchProcessor(
             config=config,
             transcriber=transcriber,
@@ -368,7 +375,8 @@ def _gemini_dependency_available() -> bool:
 
 
 def _default_output_dir(input_dir: Path) -> Path:
-    return input_dir.parent / f"{input_dir.name}_processed"
+    name = input_dir.stem if input_dir.is_file() else input_dir.name
+    return input_dir.parent / f"{name}_processed"
 
 
 def _prepend_tool_parent_to_path(command: str) -> None:
@@ -387,7 +395,7 @@ def _write_run_error(output_dir: Path, message: str) -> None:
             output_dir / "batch_error.txt",
             "\n".join(
                 [
-                    "Batch failed before all video logs were available.",
+                    "Batch failed before all file logs were available.",
                     f"Time: {time.strftime('%Y-%m-%d %H:%M:%S')}",
                     f"Environment: {platform.platform()}",
                     "",

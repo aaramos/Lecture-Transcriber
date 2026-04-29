@@ -5,7 +5,8 @@ if (!invoke) {
 }
 
 const STEP_LABELS = {
-  Probe: "Checking video",
+  Import: "Reading transcript",
+  Probe: "Checking file",
   Normalize: "Normalizing",
   Audio: "Preparing audio",
   Transcribe: "Transcribing",
@@ -15,6 +16,7 @@ const STEP_LABELS = {
 };
 
 const STEP_SHORT_LABELS = {
+  Import: "Import",
   Probe: "Check",
   Normalize: "Normalize",
   Audio: "Audio",
@@ -24,9 +26,10 @@ const STEP_SHORT_LABELS = {
   Render: "HTML",
 };
 
-const STEP_ORDER = ["Probe", "Normalize", "Audio", "Transcribe", "Slides", "Enrich", "Render"];
+const STEP_ORDER = ["Import", "Probe", "Normalize", "Audio", "Transcribe", "Slides", "Enrich", "Render"];
 
 const STEP_START_PROGRESS = {
+  Import: 18,
   Probe: 8,
   Normalize: 22,
   Audio: 44,
@@ -37,6 +40,7 @@ const STEP_START_PROGRESS = {
 };
 
 const STEP_DONE_PROGRESS = {
+  Import: 72,
   Probe: 18,
   Normalize: 42,
   Audio: 52,
@@ -80,6 +84,7 @@ const state = {
   outputDir: "",
   fileCount: 0,
   fileNames: [],
+  fileKinds: new Map(),
   recordingSpeed: DEFAULT_SETTINGS.recordingSpeed,
   running: false,
   cancelRequested: false,
@@ -291,7 +296,13 @@ async function scanFolder() {
     state.folderMode = scan.folderMode === "processed" ? "processed" : "source";
     state.outputDir = scan.outputDir || state.outputDir;
     rememberOutputDir(state.outputDir);
-    state.fileNames = state.folderMode === "processed" ? scan.lectureFiles || [] : scan.movFiles || [];
+    const sourceFiles = Array.isArray(scan.sourceFiles) ? scan.sourceFiles : [];
+    state.fileKinds = new Map(sourceFiles.map((file) => [file.name, file.kind || "video"]));
+    state.fileNames = state.folderMode === "processed"
+      ? scan.lectureFiles || []
+      : sourceFiles.length
+        ? sourceFiles.map((file) => file.name)
+        : scan.movFiles || [];
     state.fileCount = state.fileNames.length;
     state.skippedFiles.clear();
     state.autoSkipReasons.clear();
@@ -307,12 +318,13 @@ async function scanFolder() {
     const emptyMessage =
       state.folderMode === "processed"
         ? "No completed processed lectures found. Try a different folder."
-        : "No .mov files found. Try a different folder.";
+        : "No supported lecture files found. Try a different folder or file.";
     setFolderError(state.fileCount === 0 ? emptyMessage : "");
   } catch (error) {
     state.folderMode = "source";
     state.fileCount = 0;
     state.fileNames = [];
+    state.fileKinds.clear();
     state.files.clear();
     state.fileOrder = [];
     state.skippedFiles.clear();
@@ -327,6 +339,7 @@ function clearFolder() {
   state.outputDir = "";
   state.fileCount = 0;
   state.fileNames = [];
+  state.fileKinds.clear();
   state.files.clear();
   state.fileOrder = [];
   state.skippedFiles.clear();
@@ -386,7 +399,7 @@ async function startBatch() {
     applyProcessorResult(result);
   } catch (error) {
     state.lastOutputDir = state.outputDir;
-    markUnfinishedVideosFailed("Processor stopped before reporting this video complete.");
+    markUnfinishedVideosFailed("Processor stopped before reporting this file complete.");
     renderVideoDashboard();
     elements.runTitle.textContent = "Batch failed";
     elements.statusPill.textContent = "Failed";
@@ -531,7 +544,7 @@ async function cancelBatch() {
   elements.runTitle.textContent = "Canceling batch...";
   elements.statusPill.textContent = "Canceling";
   elements.statusPill.className = "status-pill warning";
-  elements.runMeta.textContent = "Stopping active video processing.";
+    elements.runMeta.textContent = "Stopping active file processing.";
   updateActiveVideosForCancel();
 
   try {
@@ -569,7 +582,7 @@ function applyProcessorResult(result) {
   if (result.cancelled) {
     unfinished = markRemainingVideosStopped();
   } else {
-    unfinished = markUnfinishedVideosFailed("Processor ended before reporting this video complete.");
+    unfinished = markUnfinishedVideosFailed("Processor ended before reporting this file complete.");
   }
 
   renderVideoDashboard();
@@ -595,7 +608,7 @@ function applyProcessorResult(result) {
     elements.runTitle.textContent = "Batch finished";
     elements.statusPill.textContent = "Complete";
     elements.statusPill.className = "status-pill complete";
-    elements.runMeta.textContent = "All videos finished. Open the output folder for transcripts, videos, and slides.";
+    elements.runMeta.textContent = "All files finished. Open the output folder for transcripts, media, slides, and study pages.";
   } else {
     elements.runTitle.textContent = failedBeforeFileResults
         ? "Batch failed"
@@ -633,7 +646,7 @@ function finalRunSummary(counts, unfinished, exitCode) {
 function render() {
   const hasFolder = Boolean(state.inputDir);
   const noun = itemNoun();
-  elements.folderTitle.textContent = hasFolder ? basename(state.inputDir) : "Choose lecture or processed folder";
+  elements.folderTitle.textContent = hasFolder ? basename(state.inputDir) : "Choose lecture file or folder";
   elements.folderSub.textContent = hasFolder
     ? `${state.inputDir} · ${state.fileCount} ${noun}${state.fileCount === 1 ? "" : "s"}`
     : "No folder selected";
@@ -649,7 +662,7 @@ function render() {
     syncPendingFilePlans();
     elements.runMeta.textContent = hasFolder
       ? readyRunMeta()
-      : "Select a folder to begin.";
+      : "Select a file or folder to begin.";
   }
   renderVideoDashboard();
   renderNormalizationWarning();
@@ -707,17 +720,28 @@ function resetResults() {
   renderVideoDashboard();
 }
 
-function plannedStepNames() {
+function plannedStepNames(fileKind = "video") {
   if (state.folderMode === "processed") {
     return ["Enrich", "Render"];
   }
 
+  if (fileKind === "transcript") {
+    const steps = ["Import"];
+    if (needsGemini()) {
+      steps.push("Enrich");
+    }
+    steps.push("Render");
+    return steps;
+  }
+
   const steps = ["Probe"];
-  if (state.recordingSpeed === "2x") {
+  if (fileKind === "video" && state.recordingSpeed === "2x") {
     steps.push("Normalize");
   }
-  steps.push("Audio");
-  steps.push("Transcribe", "Slides");
+  steps.push("Audio", "Transcribe");
+  if (fileKind === "video") {
+    steps.push("Slides");
+  }
   if (needsGemini()) {
     steps.push("Enrich");
   }
@@ -725,9 +749,9 @@ function plannedStepNames() {
   return steps;
 }
 
-function buildInitialSteps(fileStatus = "queued") {
+function buildInitialSteps(fileStatus = "queued", fileKind = "video") {
   const stepStatus = fileStatus === "skipped" ? "skipped" : "waiting";
-  return plannedStepNames().map((key) => ({
+  return plannedStepNames(fileKind).map((key) => ({
     key,
     label: STEP_SHORT_LABELS[key] || key,
     status: stepStatus,
@@ -847,7 +871,9 @@ function markFileFinished(file, status, failureStep) {
 }
 
 function ensureStepStates(file, step = null) {
-  const existing = Array.isArray(file?.steps) && file.steps.length > 0 ? file.steps : buildInitialSteps(file?.status);
+  const existing = Array.isArray(file?.steps) && file.steps.length > 0
+    ? file.steps
+    : buildInitialSteps(file?.status, file?.sourceKind || "video");
   if (!step || existing.some((item) => item.key === step)) {
     return existing;
   }
@@ -1025,14 +1051,17 @@ function handleProcessorEvent(event) {
     }
     const previous = state.files.get(event.source);
     updateFile(event.source, {
+      sourceKind: event.source_kind || event.sourceKind || fileKindFor(event.source),
       status: "running",
       stage: "Preparing",
-      detail: "Preparing video",
+      detail: "Preparing file",
       progress: 5,
       startedAt: previous?.startedAt || Date.now(),
     });
   } else if (event.kind === "file_media") {
+    const sourceKind = event.source_kind || event.sourceKind || (event.has_video === false ? "audio" : fileKindFor(event.source));
     updateFile(event.source, {
+      sourceKind,
       durationSeconds: Number(event.duration_seconds || 0),
       sourceDurationSeconds: Number(event.source_duration_seconds || event.duration_seconds || 0),
     });
@@ -1108,7 +1137,7 @@ function handleProcessorEvent(event) {
     renderVideoDashboard();
   } else if (event.kind === "batch_failed") {
     state.lastOutputDir = event.output_dir || state.outputDir;
-    markUnfinishedVideosFailed(event.message || "Processor stopped before reporting this video complete.");
+    markUnfinishedVideosFailed(event.message || "Processor stopped before reporting this file complete.");
     elements.runTitle.textContent = "Batch failed";
     elements.statusPill.textContent = "Failed";
     elements.statusPill.className = "status-pill failed";
@@ -1122,14 +1151,16 @@ function updateFile(source, patch) {
   if (!state.fileOrder.includes(source)) {
     state.fileOrder.push(source);
   }
+  const kind = patch.sourceKind || state.files.get(source)?.sourceKind || fileKindFor(source);
   const previous = state.files.get(source) || {
     status: "queued",
     stage: "Queue",
     detail: "Waiting to start",
     progress: 0,
-    steps: buildInitialSteps("queued"),
+    sourceKind: kind,
+    steps: buildInitialSteps("queued", kind),
   };
-  state.files.set(source, { ...previous, ...patch });
+  state.files.set(source, { ...previous, sourceKind: kind, ...patch });
   renderVideoDashboard();
 }
 
@@ -1154,11 +1185,12 @@ function primeQueuedFiles(concurrentFiles) {
     const skipReason = state.autoSkipReasons.get(name) || "Skipped by user";
     if (preparing) activeSlots += 1;
     state.files.set(name, {
+      sourceKind: fileKindFor(name),
       status: skipped ? "skipped" : preparing ? "preparing" : "queued",
       stage: skipped ? "Skipped" : preparing ? "Preparing" : "Queue",
       detail: skipped ? skipReason : preparing ? `Preparing ${itemNoun()}` : "Waiting to start",
       progress: skipped ? 100 : preparing ? 3 : 0,
-      steps: buildInitialSteps(skipped ? "skipped" : "queued"),
+      steps: buildInitialSteps(skipped ? "skipped" : "queued", fileKindFor(name)),
     });
   });
 
@@ -1178,11 +1210,12 @@ function initializeQueuedFiles() {
     const skipped = state.skippedFiles.has(name);
     const skipReason = state.autoSkipReasons.get(name) || "Skipped by user";
     state.files.set(name, {
+      sourceKind: fileKindFor(name),
       status: skipped ? "skipped" : "queued",
       stage: skipped ? "Skipped" : "Queue",
       detail: skipped ? skipReason : "Waiting to start",
       progress: skipped ? 100 : 0,
-      steps: buildInitialSteps(skipped ? "skipped" : "queued"),
+      steps: buildInitialSteps(skipped ? "skipped" : "queued", fileKindFor(name)),
     });
   });
 }
@@ -1193,7 +1226,7 @@ function syncPendingFilePlans() {
     if (!["queued", "skipped", "preparing"].includes(file.status)) continue;
     state.files.set(name, {
       ...file,
-      steps: buildInitialSteps(file.status === "skipped" ? "skipped" : "queued"),
+      steps: buildInitialSteps(file.status === "skipped" ? "skipped" : "queued", file.sourceKind || fileKindFor(name)),
       currentStep: null,
       currentStepStartedAt: null,
     });
@@ -1209,7 +1242,8 @@ function dashboardEntries() {
         stage: "Queue",
         detail: "Waiting to start",
         progress: 0,
-        steps: buildInitialSteps("queued"),
+        sourceKind: fileKindFor(name),
+        steps: buildInitialSteps("queued", fileKindFor(name)),
       },
     ]);
   }
@@ -1222,7 +1256,8 @@ function dashboardEntries() {
         stage: "Queue",
         detail: "Waiting to start",
         progress: 0,
-        steps: buildInitialSteps("queued"),
+        sourceKind: fileKindFor(name),
+        steps: buildInitialSteps("queued", fileKindFor(name)),
       },
     ]);
   }
@@ -1263,7 +1298,7 @@ function renderOverallProgress(entries) {
 function renderVideoList(entries) {
   elements.activeSummary.textContent = videoListSummaryText(countDashboardEntries(entries));
   if (entries.length === 0) {
-    elements.activeVideos.innerHTML = `<div class="video-placeholder">Choose a folder to see files.</div>`;
+    elements.activeVideos.innerHTML = `<div class="video-placeholder">Choose a file or folder to see files.</div>`;
     return;
   }
 
@@ -1425,7 +1460,7 @@ function markUnfinishedVideosFailed(detail) {
 }
 
 function videoListSummaryText(summary) {
-  if (summary.total === 0) return "Choose a folder to see files";
+  if (summary.total === 0) return "Choose a file or folder to see files";
   const parts = [];
   if (summary.completed) parts.push(`${summary.completed} complete`);
   if (summary.processing) parts.push(`${summary.processing} active`);
@@ -1433,7 +1468,7 @@ function videoListSummaryText(summary) {
   if (summary.failed) parts.push(`${summary.failed} failed`);
   if (summary.skipped) parts.push(`${summary.skipped} skipped`);
   if (summary.stopped) parts.push(`${summary.stopped} stopped`);
-  return parts.length ? parts.join(" · ") : "No videos ready";
+  return parts.length ? parts.join(" · ") : "No files ready";
 }
 
 function videoActionFor(name, file) {
@@ -1478,7 +1513,7 @@ async function handleVideoAction(action, source) {
         stage: "Queue",
         detail: "Waiting to start",
         progress: 0,
-        steps: buildInitialSteps("queued"),
+        steps: buildInitialSteps("queued", fileKindFor(source)),
         currentStep: null,
         currentStepStartedAt: null,
       });
@@ -1544,7 +1579,11 @@ function requiresNormalizationConfirmation() {
 }
 
 function itemNoun() {
-  return state.folderMode === "processed" ? "lecture" : "video";
+  return state.folderMode === "processed" ? "lecture" : "file";
+}
+
+function fileKindFor(source) {
+  return state.folderMode === "processed" ? "processed" : state.fileKinds.get(source) || "video";
 }
 
 function readyRunMeta() {

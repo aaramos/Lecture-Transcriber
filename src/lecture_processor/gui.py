@@ -54,7 +54,7 @@ class LectureProcessorApp(tk.Tk):
         )
         ttk.Label(
             header,
-            text="Batch-process .mov lectures into playback-speed videos, transcripts, and slide images.",
+            text="Batch-process supported lecture files into transcripts, slide images, and study pages.",
         ).grid(row=1, column=0, sticky="w", pady=(4, 0))
 
         controls = ttk.LabelFrame(self, text="Batch setup", padding=14)
@@ -197,7 +197,7 @@ class LectureProcessorApp(tk.Tk):
         try:
             config.validate()
             if not discover_mov_files(config.input_dir):
-                raise LectureProcessorError("No .mov files found. Try a different folder.")
+                raise LectureProcessorError("No supported lecture files found. Try a different folder.")
             transcriber = build_transcriber(
                 config.transcription_engine,
                 config.whisper_model,

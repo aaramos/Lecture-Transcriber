@@ -6,7 +6,7 @@ The implementation has two layers: a Python processing core and a Tauri desktop 
 
 ## What It Does
 
-- Scans a folder for `.mov` files.
+- Scans a supported lecture file or folder. Video files get the full transcript, slides, and study-page flow; audio and transcript files get transcript-first study pages without slide extraction.
 - Skips files shorter than 60 seconds.
 - Optionally normalizes 2x recordings to 1x playback with FFmpeg.
 - Extracts a temporary clean 16 kHz mono WAV for transcription, then deletes it after use.

@@ -31,6 +31,11 @@ const ATOMIC_TEMP_FILES: [&str; 9] = [
     ".transcript.srt.tmp",
     ".transcript.txt.tmp",
 ];
+const VIDEO_EXTENSIONS: [&str; 12] = [
+    "mov", "mp4", "m4v", "mkv", "webm", "avi", "wmv", "mpg", "mpeg", "mts", "m2ts", "ts",
+];
+const AUDIO_EXTENSIONS: [&str; 5] = ["mp3", "m4a", "wav", "aac", "flac"];
+const TRANSCRIPT_EXTENSIONS: [&str; 4] = ["srt", "vtt", "txt", "docx"];
 
 #[derive(Clone)]
 struct ActiveProcess {
@@ -54,6 +59,8 @@ struct MetricsState {
 #[serde(rename_all = "camelCase")]
 struct FolderScan {
     folder_mode: String,
+    source_count: usize,
+    source_files: Vec<SourceFileScan>,
     mov_count: usize,
     mov_files: Vec<String>,
     processed_count: usize,
@@ -61,6 +68,13 @@ struct FolderScan {
     already_processed_files: Vec<String>,
     already_enhanced_files: Vec<String>,
     output_dir: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SourceFileScan {
+    name: String,
+    kind: String,
 }
 
 #[derive(Deserialize)]
@@ -210,10 +224,17 @@ fn default_output_dir(input_dir: String) -> Result<String, String> {
 }
 
 fn default_output_dir_for_path(input: &Path) -> PathBuf {
-    let name = input
-        .file_name()
-        .and_then(|value| value.to_str())
-        .unwrap_or("output");
+    let name = if input.is_file() {
+        input
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .unwrap_or("output")
+    } else {
+        input
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("output")
+    };
     let parent = input.parent().unwrap_or_else(|| Path::new("."));
     parent.join(format!("{name}_processed"))
 }
@@ -236,6 +257,8 @@ fn scan_folder(input_dir: String, output_dir: Option<String>) -> Result<FolderSc
         already_enhanced_files.sort_by_key(|value| value.to_lowercase());
         return Ok(FolderScan {
             folder_mode: "processed".to_string(),
+            source_count: 0,
+            source_files: Vec::new(),
             mov_count: 0,
             mov_files: Vec::new(),
             processed_count: lecture_files.len(),
@@ -246,22 +269,12 @@ fn scan_folder(input_dir: String, output_dir: Option<String>) -> Result<FolderSc
         });
     }
 
-    let entries =
-        std::fs::read_dir(&input_dir).map_err(|error| format!("Could not read folder: {error}"))?;
-    let mut mov_files = entries
-        .filter_map(Result::ok)
-        .filter(|entry| entry.path().is_file())
-        .filter(|entry| {
-            entry
-                .path()
-                .extension()
-                .and_then(|value| value.to_str())
-                .map(|extension| extension.eq_ignore_ascii_case("mov"))
-                .unwrap_or(false)
-        })
-        .filter_map(|entry| entry.file_name().to_str().map(|value| value.to_string()))
+    let mut source_files = scan_supported_source_files(&input_path)?;
+    source_files.sort_by_key(|value| value.name.to_lowercase());
+    let mov_files = source_files
+        .iter()
+        .map(|file| file.name.clone())
         .collect::<Vec<_>>();
-    mov_files.sort_by_key(|value| value.to_lowercase());
     let output_path = output_dir
         .filter(|value| !value.trim().is_empty())
         .map(PathBuf::from)
@@ -270,6 +283,8 @@ fn scan_folder(input_dir: String, output_dir: Option<String>) -> Result<FolderSc
         already_processed_files_for_source(&input_path, &output_path, &mov_files);
     Ok(FolderScan {
         folder_mode: "source".to_string(),
+        source_count: source_files.len(),
+        source_files,
         mov_count: mov_files.len(),
         mov_files,
         processed_count: 0,
@@ -278,6 +293,57 @@ fn scan_folder(input_dir: String, output_dir: Option<String>) -> Result<FolderSc
         already_enhanced_files: Vec::new(),
         output_dir: output_path.to_string_lossy().to_string(),
     })
+}
+
+fn scan_supported_source_files(path: &Path) -> Result<Vec<SourceFileScan>, String> {
+    if path.is_file() {
+        return Ok(source_kind(path)
+            .map(|kind| {
+                vec![SourceFileScan {
+                    name: path
+                        .file_name()
+                        .and_then(|value| value.to_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                    kind,
+                }]
+            })
+            .unwrap_or_default());
+    }
+    if !path.is_dir() {
+        return Err("Input path is not a file or folder.".to_string());
+    }
+    let entries =
+        std::fs::read_dir(path).map_err(|error| format!("Could not read folder: {error}"))?;
+    Ok(entries
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().is_file())
+        .filter_map(|entry| {
+            source_kind(&entry.path()).and_then(|kind| {
+                entry.file_name().to_str().map(|name| SourceFileScan {
+                    name: name.to_string(),
+                    kind,
+                })
+            })
+        })
+        .collect::<Vec<_>>())
+}
+
+fn source_kind(path: &Path) -> Option<String> {
+    let extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| value.to_ascii_lowercase())?;
+    if VIDEO_EXTENSIONS.contains(&extension.as_str()) {
+        return Some("video".to_string());
+    }
+    if AUDIO_EXTENSIONS.contains(&extension.as_str()) {
+        return Some("audio".to_string());
+    }
+    if TRANSCRIPT_EXTENSIONS.contains(&extension.as_str()) {
+        return Some("transcript".to_string());
+    }
+    None
 }
 
 fn scan_processed_lectures(folder: &Path) -> Result<Vec<ProcessedLectureScan>, String> {
@@ -386,7 +452,11 @@ fn already_processed_files_for_source(
     let mut seen = std::collections::BTreeMap::<String, usize>::new();
     let mut processed = Vec::new();
     for filename in mov_files {
-        let source = input_dir.join(filename);
+        let source = if input_dir.is_file() {
+            input_dir.to_path_buf()
+        } else {
+            input_dir.join(filename)
+        };
         let stem = source
             .file_stem()
             .and_then(|value| value.to_str())
@@ -637,7 +707,7 @@ fn update_file_control(request: FileControlRequest) -> Result<FileControlRespons
         return Err("Output folder is not set.".to_string());
     }
     if request.source.trim().is_empty() {
-        return Err("Video name is missing.".to_string());
+        return Err("File name is missing.".to_string());
     }
 
     let control_file = output_dir.join(CONTROL_FILE);
@@ -815,9 +885,10 @@ fn round_one(value: f64) -> f64 {
 mod tests {
     use super::{
         parse_accumulated_gpu_times, parse_top_cpu_percent, parse_vm_page_size, parse_vm_pages,
-        processed_lecture_can_be_enriched,
+        processed_lecture_can_be_enriched, source_kind,
     };
     use serde_json::json;
+    use std::path::Path;
 
     #[test]
     fn parses_vm_stat_values() {
@@ -870,6 +941,27 @@ CPU usage: 71.30% user, 24.79% sys, 3.89% idle
         });
 
         assert!(processed_lecture_can_be_enriched(&payload));
+    }
+
+    #[test]
+    fn classifies_supported_source_file_types() {
+        assert_eq!(
+            source_kind(Path::new("lecture.mp4")).as_deref(),
+            Some("video")
+        );
+        assert_eq!(
+            source_kind(Path::new("lecture.mkv")).as_deref(),
+            Some("video")
+        );
+        assert_eq!(
+            source_kind(Path::new("lecture.mp3")).as_deref(),
+            Some("audio")
+        );
+        assert_eq!(
+            source_kind(Path::new("lecture.srt")).as_deref(),
+            Some("transcript")
+        );
+        assert_eq!(source_kind(Path::new("lecture.pdf")), None);
     }
 }
 
@@ -1387,7 +1479,9 @@ fn setup_dependencies_impl(app: tauri::AppHandle) -> Result<DependencyStatus, St
     };
     let install_target = format!("{}[{extras}]", project_root.to_string_lossy());
     let mut install = Command::new(&venv_python);
-    install.args(["-m", "pip", "install", "--upgrade"]).arg(install_target);
+    install
+        .args(["-m", "pip", "install", "--upgrade"])
+        .arg(install_target);
     run_setup_command(&mut install, "install processor dependencies")?;
 
     emit_dependency_event(
@@ -1404,8 +1498,11 @@ fn setup_dependencies_impl(app: tauri::AppHandle) -> Result<DependencyStatus, St
         .arg("--help")
         .env("PATH", tool_path(&app, &project_root));
     run_setup_command(&mut verify, "verify processor command")?;
-    fs::write(runtime_version_path(&runtime_dir), env!("CARGO_PKG_VERSION"))
-        .map_err(|error| format!("Could not save runtime version marker: {error}"))?;
+    fs::write(
+        runtime_version_path(&runtime_dir),
+        env!("CARGO_PKG_VERSION"),
+    )
+    .map_err(|error| format!("Could not save runtime version marker: {error}"))?;
 
     emit_dependency_event(
         &app,

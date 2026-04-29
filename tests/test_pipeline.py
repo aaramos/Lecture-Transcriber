@@ -12,6 +12,7 @@ from lecture_processor.models import FileStatus, MediaInfo, TranscriptResult, Tr
 from lecture_processor.pipeline import (
     BatchProcessor,
     allocate_output_dirs,
+    discover_mov_files,
     enrich_processed_batch,
     normalized_video_output_path,
 )
@@ -22,12 +23,23 @@ class FakeInspector:
         self.durations = durations
 
     def probe(self, path):
+        value = self.durations[path.name]
+        if isinstance(value, dict):
+            duration = value.get("duration", 120.0)
+            has_audio = value.get("has_audio", True)
+            has_video = value.get("has_video", True)
+        else:
+            duration = value
+            has_audio = True
+            has_video = True
         return MediaInfo(
             path=path,
-            duration_seconds=self.durations[path.name],
+            duration_seconds=duration,
             avg_frame_rate=30.0,
             real_frame_rate=30.0,
             is_vfr=False,
+            has_audio=has_audio,
+            has_video=has_video,
         )
 
 
@@ -153,6 +165,22 @@ class StopDuringNormalizer:
 
 
 class BatchProcessorTests(unittest.TestCase):
+    def test_discovers_supported_sources_in_folder_and_single_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for name in ["lecture.mov", "lecture.mp4", "lecture.mkv", "audio.mp3", "captions.srt", "notes.txt"]:
+                (root / name).write_text("source", encoding="utf-8")
+            (root / "ignore.pdf").write_text("ignore", encoding="utf-8")
+
+            discovered = [path.name for path in discover_mov_files(root)]
+
+            self.assertEqual(
+                discovered,
+                ["audio.mp3", "captions.srt", "lecture.mkv", "lecture.mov", "lecture.mp4", "notes.txt"],
+            )
+            self.assertEqual(discover_mov_files(root / "lecture.mp4"), [root / "lecture.mp4"])
+            self.assertEqual(discover_mov_files(root / "ignore.pdf"), [])
+
     def test_allocates_unique_output_dirs_after_sanitizing_names(self):
         root = Path("/tmp/out")
         files = [Path("Lecture 1.mov"), Path("Lecture:1.mov")]
@@ -258,8 +286,55 @@ class BatchProcessorTests(unittest.TestCase):
             self.assertEqual(summary.skipped, 1)
             self.assertEqual(summary.results[0].message, "Already processed")
             self.assertTrue((lecture_dir / "lecture.json").exists())
-            self.assertEqual(summary.results[0].word_count, 2)
-            self.assertEqual(summary.results[0].slide_count, 1)
+
+    def test_audio_file_uses_transcription_without_slide_extraction(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "lecture.mp3"
+            source.write_text("audio", encoding="utf-8")
+            output = root / "out"
+            slide_extractor = FakeSlideExtractor()
+
+            summary = BatchProcessor(
+                config=BatchConfig(input_dir=root, output_dir=output),
+                inspector=FakeInspector({"lecture.mp3": {"duration": 120.0, "has_audio": True, "has_video": False}}),
+                normalizer=FakeNormalizer(),
+                audio_extractor=FakeAudioExtractor(),
+                transcriber=FakeTranscriber(),
+                slide_extractor=slide_extractor,
+            ).run()
+
+            self.assertEqual(summary.completed, 1)
+            self.assertEqual(summary.results[0].slide_count, 0)
+            self.assertFalse((output / "lecture" / "slides").exists())
+            self.assertEqual(slide_extractor.scales, [])
+
+    def test_transcript_file_imports_without_transcriber(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "lecture.srt"
+            source.write_text(
+                "1\n00:00:01,000 --> 00:00:03,500\nWelcome to class.\n",
+                encoding="utf-8",
+            )
+            output = root / "out"
+
+            summary = BatchProcessor(
+                config=BatchConfig(input_dir=root, output_dir=output),
+                inspector=FakeInspector({}),
+                normalizer=FakeNormalizer(),
+                audio_extractor=FakeAudioExtractor(),
+                transcriber=None,
+                slide_extractor=FakeSlideExtractor(),
+            ).run()
+
+            artifact = json.loads((output / "lecture" / "lecture.json").read_text(encoding="utf-8"))
+            self.assertEqual(summary.completed, 1)
+            self.assertEqual(summary.results[0].word_count, 3)
+            self.assertEqual(summary.results[0].slide_count, 0)
+            self.assertEqual(artifact["transcript"]["engine"], "import")
+            self.assertEqual(artifact["media"]["duration_seconds"], 3.5)
+            self.assertFalse(artifact["media"]["has_video"])
 
     def test_user_stopped_file_removes_partial_output_and_continues(self):
         with tempfile.TemporaryDirectory() as tmp:

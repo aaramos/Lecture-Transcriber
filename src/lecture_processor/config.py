@@ -85,9 +85,9 @@ class BatchConfig:
 
     def validate(self) -> None:
         if not self.input_dir.exists():
-            raise LectureProcessorError(f"Input folder does not exist: {self.input_dir}")
-        if not self.input_dir.is_dir():
-            raise LectureProcessorError(f"Input path is not a folder: {self.input_dir}")
+            raise LectureProcessorError(f"Input path does not exist: {self.input_dir}")
+        if not self.input_dir.is_dir() and not self.input_dir.is_file():
+            raise LectureProcessorError(f"Input path is not a file or folder: {self.input_dir}")
         if self.concurrent_files < 1 or self.concurrent_files > 8:
             raise LectureProcessorError("--concurrent must be between 1 and 8")
         if self.min_duration_seconds < 0:
