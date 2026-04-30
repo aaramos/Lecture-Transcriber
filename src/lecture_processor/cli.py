@@ -11,6 +11,7 @@ from pathlib import Path
 
 from .config import (
     AIProviderName,
+    AIModelProvider,
     AudioEnhancementMode,
     AudioQuality,
     BatchConfig,
@@ -76,6 +77,14 @@ def build_parser() -> argparse.ArgumentParser:
     process.add_argument("--ffmpeg-hwaccel", choices=[item.value for item in FfmpegHwAccel], default="auto")
     process.add_argument("--ai-provider", choices=[item.value for item in AIProviderName], default="none")
     process.add_argument("--ai-model", default="")
+    process.add_argument("--ai-overview-provider", choices=[item.value for item in AIModelProvider], default="gemini")
+    process.add_argument("--ai-overview-model", default="")
+    process.add_argument("--ai-transcript-provider", choices=[item.value for item in AIModelProvider], default="gemini")
+    process.add_argument("--ai-transcript-model", default="")
+    process.add_argument("--ai-slides-provider", choices=[item.value for item in AIModelProvider], default="gemini")
+    process.add_argument("--ai-slides-model", default="")
+    process.add_argument("--ai-resources-provider", choices=[item.value for item in AIModelProvider], default="gemini")
+    process.add_argument("--ai-resources-model", default="")
     process.add_argument("--gemini-max-concurrency", type=int, default=6)
     process.add_argument("--no-render-html", action="store_true")
     process.add_argument("--skip-file", action="append", default=[], help=argparse.SUPPRESS)
@@ -89,6 +98,14 @@ def build_parser() -> argparse.ArgumentParser:
     enrich.add_argument("lecture_json", type=Path)
     enrich.add_argument("--ai-provider", choices=["mock", "gemini"], default="mock")
     enrich.add_argument("--ai-model", default="")
+    enrich.add_argument("--ai-overview-provider", choices=[item.value for item in AIModelProvider], default="gemini")
+    enrich.add_argument("--ai-overview-model", default="")
+    enrich.add_argument("--ai-transcript-provider", choices=[item.value for item in AIModelProvider], default="gemini")
+    enrich.add_argument("--ai-transcript-model", default="")
+    enrich.add_argument("--ai-slides-provider", choices=[item.value for item in AIModelProvider], default="gemini")
+    enrich.add_argument("--ai-slides-model", default="")
+    enrich.add_argument("--ai-resources-provider", choices=[item.value for item in AIModelProvider], default="gemini")
+    enrich.add_argument("--ai-resources-model", default="")
     enrich.add_argument("--gemini-max-concurrency", type=int, default=6)
     enrich.add_argument("--render-html", action="store_true")
 
@@ -96,6 +113,14 @@ def build_parser() -> argparse.ArgumentParser:
     enrich_batch.add_argument("processed_dir", type=Path)
     enrich_batch.add_argument("--ai-provider", choices=["mock", "gemini"], default="gemini")
     enrich_batch.add_argument("--ai-model", default="")
+    enrich_batch.add_argument("--ai-overview-provider", choices=[item.value for item in AIModelProvider], default="gemini")
+    enrich_batch.add_argument("--ai-overview-model", default="")
+    enrich_batch.add_argument("--ai-transcript-provider", choices=[item.value for item in AIModelProvider], default="gemini")
+    enrich_batch.add_argument("--ai-transcript-model", default="")
+    enrich_batch.add_argument("--ai-slides-provider", choices=[item.value for item in AIModelProvider], default="gemini")
+    enrich_batch.add_argument("--ai-slides-model", default="")
+    enrich_batch.add_argument("--ai-resources-provider", choices=[item.value for item in AIModelProvider], default="gemini")
+    enrich_batch.add_argument("--ai-resources-model", default="")
     enrich_batch.add_argument("--concurrent", type=int, default=1)
     enrich_batch.add_argument("--gemini-max-concurrency", type=int, default=6)
     enrich_batch.add_argument("--skip-file", action="append", default=[], help=argparse.SUPPRESS)
@@ -164,6 +189,14 @@ def _run_process(args) -> int:
         apple_silicon=apple_silicon,
         ai_provider=AIProviderName(args.ai_provider),
         ai_model=args.ai_model,
+        ai_overview_provider=AIModelProvider(args.ai_overview_provider),
+        ai_overview_model=args.ai_overview_model,
+        ai_transcript_provider=AIModelProvider(args.ai_transcript_provider),
+        ai_transcript_model=args.ai_transcript_model,
+        ai_slides_provider=AIModelProvider(args.ai_slides_provider),
+        ai_slides_model=args.ai_slides_model,
+        ai_resources_provider=AIModelProvider(args.ai_resources_provider),
+        ai_resources_model=args.ai_resources_model,
         gemini_max_concurrency=args.gemini_max_concurrency,
         render_html=not args.no_render_html,
         skip_files=tuple(args.skip_file or ()),
@@ -172,9 +205,9 @@ def _run_process(args) -> int:
 
     try:
         config.validate()
-        if config.ai_provider is AIProviderName.GEMINI and not _gemini_api_key_available():
+        if config.ai_uses_gemini and not _gemini_api_key_available():
             raise LectureProcessorError("Gemini enrichment requires a saved or exported GEMINI_API_KEY.")
-        if config.ai_provider is AIProviderName.GEMINI and not _gemini_dependency_available():
+        if config.ai_uses_gemini and not _gemini_dependency_available():
             raise LectureProcessorError("Gemini support is not installed. Install with: python3 -m pip install -e '.[ai]'")
         source_files = discover_mov_files(config.input_dir)
         if not source_files:
@@ -256,20 +289,29 @@ def _run_enrich(args) -> int:
         print(f"Error: lecture artifact not found: {lecture_json}", file=sys.stderr)
         return 2
     provider = AIProviderName(args.ai_provider)
-    if provider is AIProviderName.GEMINI and not _gemini_api_key_available():
-        print("Error: Gemini enrichment requires GEMINI_API_KEY.", file=sys.stderr)
-        return 2
-    if provider is AIProviderName.GEMINI and not _gemini_dependency_available():
-        print("Error: Gemini support is not installed. Install with: python3 -m pip install -e '.[ai]'", file=sys.stderr)
-        return 2
     config = BatchConfig(
         input_dir=lecture_json.parent,
         output_dir=lecture_json.parent,
         transcription_engine=TranscriptionEngine.NONE,
         ai_provider=provider,
         ai_model=args.ai_model,
+        ai_overview_provider=AIModelProvider(args.ai_overview_provider),
+        ai_overview_model=args.ai_overview_model,
+        ai_transcript_provider=AIModelProvider(args.ai_transcript_provider),
+        ai_transcript_model=args.ai_transcript_model,
+        ai_slides_provider=AIModelProvider(args.ai_slides_provider),
+        ai_slides_model=args.ai_slides_model,
+        ai_resources_provider=AIModelProvider(args.ai_resources_provider),
+        ai_resources_model=args.ai_resources_model,
         gemini_max_concurrency=args.gemini_max_concurrency,
     )
+    config.validate()
+    if config.ai_uses_gemini and not _gemini_api_key_available():
+        print("Error: Gemini enrichment requires GEMINI_API_KEY.", file=sys.stderr)
+        return 2
+    if config.ai_uses_gemini and not _gemini_dependency_available():
+        print("Error: Gemini support is not installed. Install with: python3 -m pip install -e '.[ai]'", file=sys.stderr)
+        return 2
     try:
         artifact = enrich_lecture_artifact(lecture_json, config)
         if args.render_html:
@@ -286,12 +328,6 @@ def _run_enrich_batch(args) -> int:
     processed_dir = args.processed_dir.expanduser().resolve()
     provider = AIProviderName(args.ai_provider)
     event_printer = _build_event_printer(args.json_events)
-    if provider is AIProviderName.GEMINI and not _gemini_api_key_available():
-        print("Error: Gemini enrichment requires GEMINI_API_KEY.", file=sys.stderr)
-        return 2
-    if provider is AIProviderName.GEMINI and not _gemini_dependency_available():
-        print("Error: Gemini support is not installed. Install with: python3 -m pip install -e '.[ai]'", file=sys.stderr)
-        return 2
     config = BatchConfig(
         input_dir=processed_dir,
         output_dir=processed_dir,
@@ -299,10 +335,25 @@ def _run_enrich_batch(args) -> int:
         concurrent_files=args.concurrent,
         ai_provider=provider,
         ai_model=args.ai_model,
+        ai_overview_provider=AIModelProvider(args.ai_overview_provider),
+        ai_overview_model=args.ai_overview_model,
+        ai_transcript_provider=AIModelProvider(args.ai_transcript_provider),
+        ai_transcript_model=args.ai_transcript_model,
+        ai_slides_provider=AIModelProvider(args.ai_slides_provider),
+        ai_slides_model=args.ai_slides_model,
+        ai_resources_provider=AIModelProvider(args.ai_resources_provider),
+        ai_resources_model=args.ai_resources_model,
         gemini_max_concurrency=args.gemini_max_concurrency,
         render_html=not args.no_render_html,
         skip_files=tuple(args.skip_file or ()),
     )
+    config.validate()
+    if config.ai_uses_gemini and not _gemini_api_key_available():
+        print("Error: Gemini enrichment requires GEMINI_API_KEY.", file=sys.stderr)
+        return 2
+    if config.ai_uses_gemini and not _gemini_dependency_available():
+        print("Error: Gemini support is not installed. Install with: python3 -m pip install -e '.[ai]'", file=sys.stderr)
+        return 2
     try:
         summary = enrich_processed_batch(config, progress_callback=event_printer)
     except LectureProcessorError as exc:

@@ -888,7 +888,8 @@ button:disabled {
 
 select,
 input[type="number"],
-input[type="password"] {
+input[type="password"],
+input[type="text"] {
   width: 100%;
   min-height: 38px;
   margin-top: 6px;
@@ -897,6 +898,43 @@ input[type="password"] {
   background: var(--panel-soft);
   color: var(--text);
   padding: 0 10px;
+}
+
+.model-routing {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px;
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.model-routing-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.model-routing-head span {
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.model-routing-head small {
+  color: var(--muted);
+  font-size: 12px;
+  text-align: right;
+}
+
+.model-route-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.model-route-grid input[type="text"] {
+  margin-top: 8px;
 }
 
 .key-row {

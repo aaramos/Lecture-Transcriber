@@ -61,6 +61,12 @@ class AIProviderName(str, Enum):
     GEMINI = "gemini"
 
 
+class AIModelProvider(str, Enum):
+    GEMINI = "gemini"
+    LOCAL_STUB = "local-stub"
+    OFF = "off"
+
+
 @dataclass(frozen=True)
 class BatchConfig:
     input_dir: Path
@@ -87,6 +93,14 @@ class BatchConfig:
     apple_silicon: bool = False
     ai_provider: AIProviderName = AIProviderName.NONE
     ai_model: str = ""
+    ai_overview_provider: AIModelProvider = AIModelProvider.GEMINI
+    ai_overview_model: str = ""
+    ai_transcript_provider: AIModelProvider = AIModelProvider.GEMINI
+    ai_transcript_model: str = ""
+    ai_slides_provider: AIModelProvider = AIModelProvider.GEMINI
+    ai_slides_model: str = ""
+    ai_resources_provider: AIModelProvider = AIModelProvider.GEMINI
+    ai_resources_model: str = ""
     gemini_max_concurrency: int = 6
     render_html: bool = True
     skip_files: Tuple[str, ...] = ()
@@ -119,6 +133,46 @@ class BatchConfig:
             )
         if self.ai_provider is AIProviderName.GEMINI and not self.ai_model:
             object.__setattr__(self, "ai_model", "gemini-2.5-flash")
+
+    def ai_step_provider(self, step: str) -> AIModelProvider:
+        return getattr(self, f"ai_{step}_provider")
+
+    def ai_step_model(self, step: str) -> str:
+        explicit = str(getattr(self, f"ai_{step}_model") or "").strip()
+        provider = self.ai_step_provider(step)
+        if explicit:
+            return explicit
+        if provider is AIModelProvider.GEMINI:
+            return self.ai_model or "gemini-2.5-flash"
+        if provider is AIModelProvider.LOCAL_STUB:
+            return "local-stub-v0"
+        return "off"
+
+    @property
+    def ai_uses_gemini(self) -> bool:
+        if self.ai_provider is not AIProviderName.GEMINI:
+            return False
+        return any(
+            self.ai_step_provider(step) is AIModelProvider.GEMINI
+            for step in ("overview", "transcript", "slides", "resources")
+        )
+
+    @property
+    def ai_uses_local_stub(self) -> bool:
+        return any(
+            self.ai_step_provider(step) is AIModelProvider.LOCAL_STUB
+            for step in ("overview", "transcript", "slides", "resources")
+        )
+
+    @property
+    def ai_model_routing(self) -> dict:
+        return {
+            step: {
+                "provider": self.ai_step_provider(step).value,
+                "model": self.ai_step_model(step),
+            }
+            for step in ("overview", "transcript", "slides", "resources")
+        }
 
     @property
     def normalized_timestamp_scale(self) -> float:

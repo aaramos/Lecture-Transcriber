@@ -27,6 +27,7 @@
         "concurrent_files": {"type": "integer", "minimum": 1, "maximum": 8},
         "ai_provider": {"type": ["string", "null"]},
         "ai_model": {"type": ["string", "null"]},
+        "ai_model_routing": {"type": "object"},
         "gemini_max_concurrency": {"type": "integer", "minimum": 1, "maximum": 12}
       }
     },

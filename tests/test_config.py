@@ -2,7 +2,15 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from lecture_processor.config import AudioEnhancementMode, AudioQuality, BatchConfig, RecordingSpeed, TranscriptionQuality
+from lecture_processor.config import (
+    AIModelProvider,
+    AIProviderName,
+    AudioEnhancementMode,
+    AudioQuality,
+    BatchConfig,
+    RecordingSpeed,
+    TranscriptionQuality,
+)
 from lecture_processor.profiles import QUALITY_PROFILE_ID
 from lecture_processor.errors import LectureProcessorError
 
@@ -58,6 +66,32 @@ class BatchConfigTests(unittest.TestCase):
             self.assertIs(config.transcription_quality, TranscriptionQuality.ACCURATE)
             self.assertEqual(config.whisper_model, "medium.en")
             self.assertEqual(config.gemini_max_concurrency, 6)
+            self.assertEqual(
+                config.ai_model_routing,
+                {
+                    "overview": {"provider": "gemini", "model": "gemini-2.5-flash"},
+                    "transcript": {"provider": "gemini", "model": "gemini-2.5-flash"},
+                    "slides": {"provider": "gemini", "model": "gemini-2.5-flash"},
+                    "resources": {"provider": "gemini", "model": "gemini-2.5-flash"},
+                },
+            )
+
+    def test_ai_route_helpers_detect_gemini_and_local_routes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            config = BatchConfig(
+                input_dir=folder,
+                output_dir=folder / "out",
+                ai_provider=AIProviderName.GEMINI,
+                ai_transcript_provider=AIModelProvider.LOCAL_STUB,
+                ai_resources_provider=AIModelProvider.OFF,
+            )
+            config.validate()
+
+            self.assertTrue(config.ai_uses_gemini)
+            self.assertTrue(config.ai_uses_local_stub)
+            self.assertEqual(config.ai_step_model("transcript"), "local-stub-v0")
+            self.assertEqual(config.ai_step_model("resources"), "off")
 
 
 if __name__ == "__main__":

@@ -100,6 +100,22 @@ struct ProcessRequest {
     slide_sensitivity: String,
     ai_provider: String,
     ai_model: String,
+    #[serde(default = "default_ai_route_provider")]
+    ai_overview_provider: String,
+    #[serde(default)]
+    ai_overview_model: String,
+    #[serde(default = "default_ai_route_provider")]
+    ai_transcript_provider: String,
+    #[serde(default)]
+    ai_transcript_model: String,
+    #[serde(default = "default_ai_route_provider")]
+    ai_slides_provider: String,
+    #[serde(default)]
+    ai_slides_model: String,
+    #[serde(default = "default_ai_route_provider")]
+    ai_resources_provider: String,
+    #[serde(default)]
+    ai_resources_model: String,
     #[serde(default = "default_gemini_max_concurrency")]
     gemini_max_concurrency: u8,
     min_duration: f64,
@@ -216,6 +232,10 @@ fn default_whisper_model() -> String {
 
 fn default_gemini_max_concurrency() -> u8 {
     6
+}
+
+fn default_ai_route_provider() -> String {
+    "gemini".to_string()
 }
 
 fn default_audio_enhancement() -> String {
@@ -1015,13 +1035,32 @@ fn run_process_batch(
     if request.gemini_max_concurrency == 0 || request.gemini_max_concurrency > 12 {
         return Err("Gemini concurrency must be between 1 and 12.".to_string());
     }
+    for provider in [
+        &request.ai_overview_provider,
+        &request.ai_transcript_provider,
+        &request.ai_slides_provider,
+        &request.ai_resources_provider,
+    ] {
+        if !matches!(provider.as_str(), "gemini" | "local-stub" | "off") {
+            return Err("Model route providers must be Gemini, Local Stub, or Off.".to_string());
+        }
+    }
     if !matches!(request.audio_enhancement.as_str(), "none" | "hybrid" | "strong") {
         return Err("Audio enhancement must be None, Hybrid, or Strong.".to_string());
     }
     if !enhance_mode && request.output_dir.trim().is_empty() {
         return Err("Choose an output folder before starting.".to_string());
     }
-    let ai_api_key = if request.ai_provider == "gemini" {
+    let uses_gemini_route = request.ai_provider == "gemini"
+        && [
+            &request.ai_overview_provider,
+            &request.ai_transcript_provider,
+            &request.ai_slides_provider,
+            &request.ai_resources_provider,
+        ]
+        .iter()
+        .any(|provider| provider.as_str() == "gemini");
+    let ai_api_key = if uses_gemini_route {
         Some(
             read_api_key("gemini")?
                 .ok_or_else(|| "Gemini needs an API key saved in Settings.".to_string())?,
@@ -1054,6 +1093,22 @@ fn run_process_batch(
             request.ai_provider.clone(),
             "--ai-model".to_string(),
             request.ai_model.clone(),
+            "--ai-overview-provider".to_string(),
+            request.ai_overview_provider.clone(),
+            "--ai-overview-model".to_string(),
+            request.ai_overview_model.clone(),
+            "--ai-transcript-provider".to_string(),
+            request.ai_transcript_provider.clone(),
+            "--ai-transcript-model".to_string(),
+            request.ai_transcript_model.clone(),
+            "--ai-slides-provider".to_string(),
+            request.ai_slides_provider.clone(),
+            "--ai-slides-model".to_string(),
+            request.ai_slides_model.clone(),
+            "--ai-resources-provider".to_string(),
+            request.ai_resources_provider.clone(),
+            "--ai-resources-model".to_string(),
+            request.ai_resources_model.clone(),
             "--concurrent".to_string(),
             request.concurrent_files.to_string(),
             "--gemini-max-concurrency".to_string(),
@@ -1092,6 +1147,22 @@ fn run_process_batch(
             request.ai_provider.clone(),
             "--ai-model".to_string(),
             request.ai_model.clone(),
+            "--ai-overview-provider".to_string(),
+            request.ai_overview_provider.clone(),
+            "--ai-overview-model".to_string(),
+            request.ai_overview_model.clone(),
+            "--ai-transcript-provider".to_string(),
+            request.ai_transcript_provider.clone(),
+            "--ai-transcript-model".to_string(),
+            request.ai_transcript_model.clone(),
+            "--ai-slides-provider".to_string(),
+            request.ai_slides_provider.clone(),
+            "--ai-slides-model".to_string(),
+            request.ai_slides_model.clone(),
+            "--ai-resources-provider".to_string(),
+            request.ai_resources_provider.clone(),
+            "--ai-resources-model".to_string(),
+            request.ai_resources_model.clone(),
             "--gemini-max-concurrency".to_string(),
             request.gemini_max_concurrency.to_string(),
             "--min-duration".to_string(),

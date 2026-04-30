@@ -93,17 +93,31 @@ class GeminiProvider:
         *,
         cache_path: Optional[Path] = None,
         progress_callback: Optional[Callable[[Dict], None]] = None,
+        include_overview: bool = True,
+        include_transcript: bool = True,
+        include_slides: bool = True,
+        include_resources: bool = True,
+        overview_override: Optional[Dict] = None,
     ) -> AnalyzeLectureResponse:
         cache = _load_chunk_cache(cache_path, request, self.model)
         warnings = list(cache.get("warnings") or [])
         usage = {"input": 0, "output": 0}
-        transcript_chunks = _transcript_chunks(request)
-        slides_for_gemini, filtered_slides = _filter_slides_for_gemini(request)
+        transcript_chunks = _transcript_chunks(request) if include_transcript else []
+        slides_for_gemini, filtered_slides = (
+            _filter_slides_for_gemini(request) if include_slides else ([], {})
+        )
         slide_filter_warning = _slide_filter_warning(filtered_slides)
         if slide_filter_warning:
             warnings.append(slide_filter_warning)
         slide_batches = _slide_batches(slides_for_gemini)
-        total_steps = 2 + len(transcript_chunks) + len(slide_batches)
+        needs_overview = include_overview or include_slides or include_resources
+        should_generate_overview = needs_overview and overview_override is None
+        total_steps = (
+            (1 if should_generate_overview else 0)
+            + len(transcript_chunks)
+            + len(slide_batches)
+            + (1 if include_resources else 0)
+        )
         completed_steps = 0
 
         def emit(step: str) -> None:
@@ -117,8 +131,10 @@ class GeminiProvider:
             )
 
         chunks = cache.setdefault("chunks", {})
-        overview = chunks.get("overview")
-        if not overview:
+        overview = overview_override
+        if should_generate_overview:
+            overview = chunks.get("overview")
+        if should_generate_overview and not overview:
             try:
                 overview, response = self._generate_json(
                     _overview_prompt(request),
@@ -138,83 +154,95 @@ class GeminiProvider:
                 }
             chunks["overview"] = overview
             _save_chunk_cache(cache_path, cache)
+        if not overview:
+            overview = {
+                "title": _fallback_title(request),
+                "executive_summary": _fallback_summary(request.transcript_text),
+                "outline": _fallback_outline(request.slides),
+                "warnings": [],
+            }
         warnings.extend(overview.get("warnings") or [])
-        completed_steps += 1
-        emit("overview")
+        if should_generate_overview:
+            completed_steps += 1
+            emit("overview")
 
         transcript_cache = chunks.setdefault("transcript", {})
         slide_cache = chunks.setdefault("slides", {})
         cache_lock = threading.Lock()
         jobs = []
-        for chunk in transcript_chunks:
-            jobs.append(
-                (
-                    "transcript",
-                    chunk["index"],
-                    lambda chunk=chunk: self._analyze_transcript_chunk(
-                        request,
-                        chunk,
-                        transcript_cache,
-                        cache,
-                        cache_path,
-                        cache_lock,
-                    ),
+        if include_transcript:
+            for chunk in transcript_chunks:
+                jobs.append(
+                    (
+                        "transcript",
+                        chunk["index"],
+                        lambda chunk=chunk: self._analyze_transcript_chunk(
+                            request,
+                            chunk,
+                            transcript_cache,
+                            cache,
+                            cache_path,
+                            cache_lock,
+                        ),
+                    )
                 )
-            )
-        for batch_index, batch in enumerate(slide_batches, start=1):
-            jobs.append(
-                (
-                    "slides",
-                    batch_index,
-                    lambda batch=batch, batch_index=batch_index: self._analyze_slide_batch(
-                        request,
-                        batch,
+        if include_slides:
+            for batch_index, batch in enumerate(slide_batches, start=1):
+                jobs.append(
+                    (
+                        "slides",
                         batch_index,
+                        lambda batch=batch, batch_index=batch_index: self._analyze_slide_batch(
+                            request,
+                            batch,
+                            batch_index,
+                            overview,
+                            slide_cache,
+                            cache,
+                            cache_path,
+                            cache_lock,
+                        ),
+                    )
+                )
+        if include_resources:
+            jobs.append(
+                (
+                    "resources",
+                    1,
+                    lambda: self._analyze_resources(
+                        request,
                         overview,
-                        slide_cache,
+                        chunks,
                         cache,
                         cache_path,
                         cache_lock,
                     ),
                 )
             )
-        jobs.append(
-            (
-                "resources",
-                1,
-                lambda: self._analyze_resources(
-                    request,
-                    overview,
-                    chunks,
-                    cache,
-                    cache_path,
-                    cache_lock,
-                ),
-            )
-        )
 
         transcript_results: Dict[int, Dict] = {}
         slide_results: Dict[int, Dict] = {}
         resources = {"resources": [], "warnings": []}
-        max_workers = min(self.max_concurrency, max(1, len(jobs)))
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = {executor.submit(job): (kind, index) for kind, index, job in jobs}
-            for future in as_completed(futures):
-                kind, index = futures[future]
-                payload, response = future.result()
-                _add_usage(usage, response)
-                warnings.extend(payload.get("warnings") or [])
-                if kind == "transcript":
-                    transcript_results[index] = payload
-                    step = f"transcript {index}/{len(transcript_chunks)}"
-                elif kind == "slides":
-                    slide_results[index] = payload
-                    step = f"slides {index}/{len(slide_batches)}"
-                else:
-                    resources = payload
-                    step = "resources"
-                completed_steps += 1
-                emit(step)
+        if jobs:
+            max_workers = min(self.max_concurrency, len(jobs))
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = {executor.submit(job): (kind, index) for kind, index, job in jobs}
+                for future in as_completed(futures):
+                    kind, index = futures[future]
+                    payload, response = future.result()
+                    _add_usage(usage, response)
+                    warnings.extend(payload.get("warnings") or [])
+                    if kind == "transcript":
+                        transcript_results[index] = payload
+                        step = f"transcript {index}/{len(transcript_chunks)}"
+                    elif kind == "slides":
+                        slide_results[index] = payload
+                        step = f"slides {index}/{len(slide_batches)}"
+                    else:
+                        resources = payload
+                        step = "resources"
+                    completed_steps += 1
+                    emit(step)
 
         formatted_parts = [
             str(transcript_results.get(chunk["index"], {}).get("formatted_transcript") or chunk["text"]).strip()
@@ -226,8 +254,12 @@ class GeminiProvider:
         slide_analysis = _backfill_filtered_slide_analysis(request, slide_analysis, filtered_slides)
 
         formatted_transcript = "\n\n".join(part for part in formatted_parts if part).strip()
+        if not include_transcript:
+            formatted_transcript = request.transcript_text.strip()
         if not formatted_transcript:
             formatted_transcript = request.transcript_text.strip()
+        if not include_slides:
+            slide_analysis = _fallback_slide_analysis(request, request.slides)
         return AnalyzeLectureResponse(
             title=str(overview.get("title") or _fallback_title(request)).strip(),
             executive_summary=str(overview.get("executive_summary") or _fallback_summary(request.transcript_text)),

@@ -24,7 +24,7 @@ const STEP_SHORT_LABELS = {
   EnhanceAudio: "Clean",
   Transcribe: "Transcript",
   Slides: "Slides",
-  Enrich: "Gemini",
+  Enrich: "AI",
   Render: "HTML",
 };
 
@@ -63,6 +63,14 @@ const DEFAULT_SETTINGS = Object.freeze({
   transcriptionProfile: "quality",
   slideSensitivity: "medium",
   aiModel: "gemini-2.5-flash",
+  aiOverviewProvider: "gemini",
+  aiOverviewModel: "",
+  aiTranscriptProvider: "gemini",
+  aiTranscriptModel: "",
+  aiSlidesProvider: "gemini",
+  aiSlidesModel: "",
+  aiResourcesProvider: "gemini",
+  aiResourcesModel: "",
   enhanceWithGemini: false,
   concurrentFiles: 2,
   geminiMaxConcurrency: 6,
@@ -174,6 +182,14 @@ const elements = {
   slideSensitivity: document.querySelector("#slideSensitivity"),
   enhanceWithGemini: document.querySelector("#enhanceWithGemini"),
   aiModel: document.querySelector("#aiModel"),
+  aiOverviewProvider: document.querySelector("#aiOverviewProvider"),
+  aiOverviewModel: document.querySelector("#aiOverviewModel"),
+  aiTranscriptProvider: document.querySelector("#aiTranscriptProvider"),
+  aiTranscriptModel: document.querySelector("#aiTranscriptModel"),
+  aiSlidesProvider: document.querySelector("#aiSlidesProvider"),
+  aiSlidesModel: document.querySelector("#aiSlidesModel"),
+  aiResourcesProvider: document.querySelector("#aiResourcesProvider"),
+  aiResourcesModel: document.querySelector("#aiResourcesModel"),
   geminiApiKey: document.querySelector("#geminiApiKey"),
   saveGeminiKeyButton: document.querySelector("#saveGeminiKeyButton"),
   geminiKeyStatus: document.querySelector("#geminiKeyStatus"),
@@ -253,6 +269,10 @@ elements.geminiMaxConcurrency.addEventListener("input", () => {
   elements.slideSensitivity,
   elements.enhanceWithGemini,
   elements.aiModel,
+  elements.aiOverviewProvider,
+  elements.aiTranscriptProvider,
+  elements.aiSlidesProvider,
+  elements.aiResourcesProvider,
   elements.saveNormalized,
 ].forEach((element) => {
   element.addEventListener("change", () => {
@@ -265,6 +285,17 @@ elements.geminiMaxConcurrency.addEventListener("input", () => {
     saveCurrentSettings();
     renderAiControls();
     render();
+  });
+});
+
+[
+  elements.aiOverviewModel,
+  elements.aiTranscriptModel,
+  elements.aiSlidesModel,
+  elements.aiResourcesModel,
+].forEach((element) => {
+  element.addEventListener("input", () => {
+    saveCurrentSettings();
   });
 });
 
@@ -400,8 +431,16 @@ async function startBatch() {
     audioEnhancement: elements.audioEnhancement.value,
     transcriptionProfile: elements.transcriptionProfile.value,
     slideSensitivity: elements.slideSensitivity.value,
-    aiProvider: needsGemini() ? "gemini" : "none",
+    aiProvider: needsAiEnhancement() ? "gemini" : "none",
     aiModel: elements.aiModel.value,
+    aiOverviewProvider: elements.aiOverviewProvider.value,
+    aiOverviewModel: elements.aiOverviewModel.value.trim(),
+    aiTranscriptProvider: elements.aiTranscriptProvider.value,
+    aiTranscriptModel: elements.aiTranscriptModel.value.trim(),
+    aiSlidesProvider: elements.aiSlidesProvider.value,
+    aiSlidesModel: elements.aiSlidesModel.value.trim(),
+    aiResourcesProvider: elements.aiResourcesProvider.value,
+    aiResourcesModel: elements.aiResourcesModel.value.trim(),
     geminiMaxConcurrency: finalGeminiConcurrency,
     minDuration: 60,
     skippedFiles: manualSkippedFiles(),
@@ -681,6 +720,7 @@ function render() {
       : "Select a file or folder to begin.";
   }
   renderVideoDashboard();
+  renderAiControls();
   renderNormalizationWarning();
 }
 
@@ -693,6 +733,7 @@ function setRunning(running) {
   elements.enhanceWithGemini.disabled = running || state.folderMode === "processed";
   elements.progressBar.classList.toggle("running", running);
   renderRunControls();
+  renderAiControls();
   if (running) {
     const ready = processableFileCount();
     const noun = itemNoun();
@@ -743,7 +784,7 @@ function plannedStepNames(fileKind = "video") {
 
   if (fileKind === "transcript") {
     const steps = ["Import"];
-    if (needsGemini()) {
+    if (needsAiEnhancement()) {
       steps.push("Enrich");
     }
     steps.push("Render");
@@ -758,7 +799,7 @@ function plannedStepNames(fileKind = "video") {
   if (fileKind === "video") {
     steps.push("Slides");
   }
-  if (needsGemini()) {
+  if (needsAiEnhancement()) {
     steps.push("Enrich");
   }
   steps.push("Render");
@@ -1120,7 +1161,7 @@ function handleProcessorEvent(event) {
     });
   } else if (event.kind === "enrichment_started") {
     updateFile(event.source, {
-      detail: "Waiting for Gemini",
+      detail: "Waiting for AI notes",
       ...markStepStarted(state.files.get(event.source), "Enrich"),
     });
   } else if (event.kind === "enrichment_progress") {
@@ -1133,14 +1174,14 @@ function handleProcessorEvent(event) {
     updateFile(event.source, {
       status: "running",
       stage: STEP_LABELS.Enrich,
-      detail: `Gemini: ${event.step || "working"}${countText}`,
+      detail: `AI notes: ${event.step || "working"}${countText}`,
       progress: Math.max(STEP_START_PROGRESS.Enrich, Math.min(STEP_DONE_PROGRESS.Enrich, 88 + completed)),
       ...activePatch,
     });
   } else if (event.kind === "enrichment_finished") {
     applyTokenUsage(event);
     updateFile(event.source, {
-      detail: event.title ? `Gemini finished: ${event.title}` : "Gemini finished",
+      detail: event.title ? `AI notes finished: ${event.title}` : "AI notes finished",
       ...markStepFinished(state.files.get(event.source), "Enrich", Number(event.elapsed_seconds || 0)),
     });
   } else if (event.kind === "file_finished") {
@@ -1597,8 +1638,25 @@ function manualSkippedFiles() {
   return [...state.skippedFiles].filter((name) => !state.autoSkipReasons.has(name));
 }
 
-function needsGemini() {
+function needsAiEnhancement() {
   return state.folderMode === "processed" || elements.enhanceWithGemini.checked;
+}
+
+function needsGemini() {
+  return needsAiEnhancement() && usesGeminiRoutes();
+}
+
+function usesGeminiRoutes() {
+  return aiRouteProviders().some((provider) => provider === "gemini");
+}
+
+function aiRouteProviders() {
+  return [
+    elements.aiOverviewProvider.value,
+    elements.aiTranscriptProvider.value,
+    elements.aiSlidesProvider.value,
+    elements.aiResourcesProvider.value,
+  ];
 }
 
 function requiresNormalizationConfirmation() {
@@ -1647,6 +1705,14 @@ function applySettings(settings) {
   setSelectValue(elements.transcriptionProfile, settings.transcriptionProfile, DEFAULT_SETTINGS.transcriptionProfile);
   setSelectValue(elements.slideSensitivity, settings.slideSensitivity, DEFAULT_SETTINGS.slideSensitivity);
   setSelectValue(elements.aiModel, settings.aiModel, DEFAULT_SETTINGS.aiModel);
+  setSelectValue(elements.aiOverviewProvider, settings.aiOverviewProvider, DEFAULT_SETTINGS.aiOverviewProvider);
+  elements.aiOverviewModel.value = settings.aiOverviewModel || DEFAULT_SETTINGS.aiOverviewModel;
+  setSelectValue(elements.aiTranscriptProvider, settings.aiTranscriptProvider, DEFAULT_SETTINGS.aiTranscriptProvider);
+  elements.aiTranscriptModel.value = settings.aiTranscriptModel || DEFAULT_SETTINGS.aiTranscriptModel;
+  setSelectValue(elements.aiSlidesProvider, settings.aiSlidesProvider, DEFAULT_SETTINGS.aiSlidesProvider);
+  elements.aiSlidesModel.value = settings.aiSlidesModel || DEFAULT_SETTINGS.aiSlidesModel;
+  setSelectValue(elements.aiResourcesProvider, settings.aiResourcesProvider, DEFAULT_SETTINGS.aiResourcesProvider);
+  elements.aiResourcesModel.value = settings.aiResourcesModel || DEFAULT_SETTINGS.aiResourcesModel;
   state.enhanceWithGeminiPreference = Boolean(settings.enhanceWithGemini);
   elements.enhanceWithGemini.checked = state.enhanceWithGeminiPreference;
   elements.concurrentFiles.value = String(validConcurrentFiles(settings.concurrentFiles));
@@ -1691,6 +1757,14 @@ function saveCurrentSettings() {
     slideSensitivity: elements.slideSensitivity.value,
     enhanceWithGemini: state.folderMode === "processed" ? state.enhanceWithGeminiPreference : elements.enhanceWithGemini.checked,
     aiModel: elements.aiModel.value,
+    aiOverviewProvider: elements.aiOverviewProvider.value,
+    aiOverviewModel: elements.aiOverviewModel.value.trim(),
+    aiTranscriptProvider: elements.aiTranscriptProvider.value,
+    aiTranscriptModel: elements.aiTranscriptModel.value.trim(),
+    aiSlidesProvider: elements.aiSlidesProvider.value,
+    aiSlidesModel: elements.aiSlidesModel.value.trim(),
+    aiResourcesProvider: elements.aiResourcesProvider.value,
+    aiResourcesModel: elements.aiResourcesModel.value.trim(),
     concurrentFiles,
     geminiMaxConcurrency,
     saveNormalized: elements.saveNormalized.checked,
@@ -1747,6 +1821,18 @@ function renderAiControls() {
   elements.aiModel.disabled = !geminiSelected;
   elements.geminiApiKey.disabled = !geminiSelected;
   elements.saveGeminiKeyButton.disabled = !geminiSelected;
+  [
+    elements.aiOverviewProvider,
+    elements.aiOverviewModel,
+    elements.aiTranscriptProvider,
+    elements.aiTranscriptModel,
+    elements.aiSlidesProvider,
+    elements.aiSlidesModel,
+    elements.aiResourcesProvider,
+    elements.aiResourcesModel,
+  ].forEach((element) => {
+    element.disabled = state.running;
+  });
 }
 
 function renderTranscriptionProfileOptions() {
@@ -1884,11 +1970,11 @@ function runDescription() {
   const skippedText = skipped ? ` · ${skipped} skipped` : "";
   const noun = itemNoun();
   if (state.folderMode === "processed") {
-    return `${ready} ${noun}${ready === 1 ? "" : "s"} · ${concurrent} at a time · Gemini${skippedText}`;
+    return `${ready} ${noun}${ready === 1 ? "" : "s"} · ${concurrent} at a time · ${selectedAiRouteLabel()}${skippedText}`;
   }
   const profileText = selectedProfileLabel();
   const audioText = selectedAudioEnhancementLabel();
-  const aiText = needsGemini() ? " · Gemini" : "";
+  const aiText = needsAiEnhancement() ? ` · ${selectedAiRouteLabel()}` : "";
   return `${ready} ${noun}${ready === 1 ? "" : "s"} · ${concurrent} at a time · ${speed} · ${profileText}${audioText}${aiText}${skippedText}`;
 }
 
@@ -1902,6 +1988,14 @@ function selectedAudioEnhancementLabel() {
   if (value === "hybrid") return " · Hybrid audio";
   if (value === "strong") return " · Strong audio";
   return "";
+}
+
+function selectedAiRouteLabel() {
+  const providers = aiRouteProviders();
+  if (providers.every((provider) => provider === "gemini")) return "Gemini";
+  if (providers.every((provider) => provider === "off")) return "AI off";
+  if (!providers.includes("gemini")) return "Local AI";
+  return "Gemini + Local";
 }
 
 function startElapsedTimer() {
