@@ -1,15 +1,18 @@
 from collections import deque
 import json
+import os
 import shlex
 import shutil
 import subprocess
+import tempfile
 import threading
 import time
+from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Callable, Deque, Dict, Optional
+from typing import Any, Callable, Deque, Dict, List, Optional
 
-from .config import AudioQuality, FfmpegHwAccel, RecordingSpeed
+from .config import AudioEnhancementMode, AudioQuality, FfmpegHwAccel, RecordingSpeed
 from .errors import DependencyMissingError, ProcessingError, ProcessingStopped
 from .models import MediaInfo
 from .temp_cleanup import remove_temp_path
@@ -25,8 +28,28 @@ def ensure_media_tools(ffprobe_path: str, ffmpeg_path: str, needs_ffmpeg: bool) 
         resolve_media_tool(ffmpeg_path)
 
 
+def ensure_audio_enhancement_tools(deep_filter_path: str = "") -> None:
+    resolve_deep_filter_tool(deep_filter_path)
+
+
 def resolve_media_tool(command: str) -> str:
     return _require_command(command)
+
+
+def resolve_deep_filter_tool(command: str = "") -> str:
+    explicit = command.strip()
+    if explicit:
+        return _require_command(explicit)
+    for candidate in _deep_filter_candidates():
+        if candidate.exists() and candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
+    resolved = shutil.which("deep-filter")
+    if resolved:
+        return resolved
+    raise DependencyMissingError(
+        "DeepFilterNet is not installed. Install the ClearVoice tools, install deep-filter on PATH, "
+        "or set DEEP_FILTER_PATH to the deep-filter binary."
+    )
 
 
 def _require_command(command: str) -> str:
@@ -45,6 +68,26 @@ def _require_command(command: str) -> str:
         raise DependencyMissingError(f"Required command not found on PATH: {command}")
     return resolved
 
+
+def _deep_filter_candidates() -> List[Path]:
+    candidates: List[Path] = []
+    for key in ("LECTURE_PROCESSOR_DEEP_FILTER_PATH", "DEEP_FILTER_PATH"):
+        value = os.environ.get(key, "").strip()
+        if value:
+            candidates.append(Path(value).expanduser())
+
+    home = Path.home()
+    candidates.extend(
+        [
+            home / "Library/Application Support/ClearVoice/Tools/deep-filter/deep-filter",
+            home / "Library/Application Support/Lecture Processor/Tools/deep-filter/deep-filter",
+            home / "Library/Application Support/com.lecture.processor/runtime/tools/deep-filter/deep-filter",
+            Path("/opt/homebrew/bin/deep-filter"),
+            Path("/usr/local/bin/deep-filter"),
+            Path("/tmp/deep-filter"),
+        ]
+    )
+    return candidates
 
 def _known_system_tool_candidate(command: str) -> Optional[Path]:
     if command not in {"ffmpeg", "ffprobe"}:
@@ -374,8 +417,182 @@ class CleanAudioExtractor:
             self._commands_by_destination[Path(destination)] = list(command)
 
 
+@dataclass(frozen=True)
+class _EnhancementProfile:
+    highpass_frequency: int
+    lowpass_frequency: int
+    click_threshold: int
+    click_burst: int
+    clip_threshold: int
+    noise_reduction: int
+    noise_floor: int
+    gain_smooth: int
+    gate_threshold: float
+    gate_ratio: float
+    gate_range: float
+    gate_attack: int
+    gate_release: int
+    speech_expansion: float
+    speech_release: float
+
+
+class DeepFilterAudioEnhancer:
+    def __init__(
+        self,
+        ffmpeg_path: str = "ffmpeg",
+        deep_filter_path: str = "",
+        runner: Callable = subprocess.run,
+    ) -> None:
+        self.ffmpeg_path = ffmpeg_path
+        self.deep_filter_path = deep_filter_path
+        self._runner = runner
+        self.last_command_text = ""
+        self._command_lock = threading.Lock()
+        self._commands_by_destination: Dict[Path, List[list]] = {}
+
+    def command_text_for(self, destination: Path) -> str:
+        with self._command_lock:
+            return _quote_commands(self._commands_by_destination.get(Path(destination), []))
+
+    def enhance(
+        self,
+        source: Path,
+        destination: Path,
+        mode: AudioEnhancementMode,
+        stop_requested: Callable[[], bool] = None,
+    ) -> Path:
+        if mode is AudioEnhancementMode.NONE:
+            return source
+
+        ffmpeg = _require_command(self.ffmpeg_path)
+        deep_filter = resolve_deep_filter_tool(self.deep_filter_path)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        temp_destination = destination.with_name(f".{destination.name}.ffmpeg.tmp")
+        work_dir = Path(tempfile.mkdtemp(prefix="lecture-deepfilter-"))
+        repaired_input = work_dir / "deepfilter_input.wav"
+        deep_filter_output_dir = work_dir / "deepfilter_out"
+        deep_filter_output_dir.mkdir(parents=True, exist_ok=True)
+
+        preprocess_command = self._preprocess_command(ffmpeg, source, repaired_input, mode)
+        deep_filter_command = self._deep_filter_command(deep_filter, repaired_input, deep_filter_output_dir)
+
+        try:
+            self._remember_commands(destination, [preprocess_command, deep_filter_command])
+            completed = _run_interruptible(preprocess_command, self._runner, stop_requested)
+            if completed.returncode != 0:
+                raise ProcessingError(
+                    f"audio enhancement pre-clean failed for {source.name}: "
+                    f"{completed.stderr.strip() or completed.stdout.strip()}"
+                )
+
+            completed = _run_interruptible(deep_filter_command, self._runner, stop_requested)
+            if completed.returncode != 0:
+                raise ProcessingError(
+                    f"DeepFilterNet failed for {source.name}: "
+                    f"{completed.stderr.strip() or completed.stdout.strip()}"
+                )
+
+            enhanced_wav = self._locate_deep_filter_output(
+                expected_filename=repaired_input.name,
+                output_dir=deep_filter_output_dir,
+            )
+            if not enhanced_wav:
+                raise ProcessingError("DeepFilterNet finished but did not create an enhanced WAV.")
+
+            postprocess_command = self._postprocess_command(ffmpeg, enhanced_wav, temp_destination, mode)
+            self._remember_commands(destination, [preprocess_command, deep_filter_command, postprocess_command])
+            completed = _run_interruptible(
+                postprocess_command,
+                self._runner,
+                stop_requested,
+                progress_path=temp_destination,
+                stall_timeout_seconds=_FFMPEG_STALL_TIMEOUT_SECONDS,
+            )
+            if completed.returncode != 0:
+                raise ProcessingError(
+                    f"audio enhancement export failed for {source.name}: "
+                    f"{completed.stderr.strip() or completed.stdout.strip()}"
+                )
+            temp_destination.replace(destination)
+        finally:
+            remove_temp_path(temp_destination)
+            remove_temp_path(work_dir)
+        return destination
+
+    def _preprocess_command(self, ffmpeg: str, source: Path, destination: Path, mode: AudioEnhancementMode) -> list:
+        return [
+            ffmpeg,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-i",
+            str(source),
+            "-vn",
+            "-af",
+            _deep_filter_preprocess_filter_for(mode),
+            "-ac",
+            "1",
+            "-ar",
+            "48000",
+            "-c:a",
+            "pcm_s16le",
+            str(destination),
+        ]
+
+    def _deep_filter_command(self, deep_filter: str, source: Path, output_dir: Path) -> list:
+        return [
+            deep_filter,
+            "--compensate-delay",
+            "-o",
+            str(output_dir),
+            str(source),
+        ]
+
+    def _postprocess_command(self, ffmpeg: str, source: Path, destination: Path, mode: AudioEnhancementMode) -> list:
+        return [
+            ffmpeg,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-i",
+            str(source),
+            "-vn",
+            "-af",
+            _deep_filter_postprocess_filter_for(mode),
+            "-ac",
+            "1",
+            "-ar",
+            "16000",
+            "-c:a",
+            "pcm_s16le",
+            "-f",
+            "wav",
+            str(destination),
+        ]
+
+    def _locate_deep_filter_output(self, expected_filename: str, output_dir: Path) -> Optional[Path]:
+        expected = output_dir / expected_filename
+        if expected.exists():
+            return expected
+        try:
+            return sorted(path for path in output_dir.iterdir() if path.suffix.lower() == ".wav")[0]
+        except (IndexError, FileNotFoundError):
+            return None
+
+    def _remember_commands(self, destination: Path, commands: List[list]) -> None:
+        with self._command_lock:
+            self.last_command_text = _quote_commands(commands)
+            self._commands_by_destination[Path(destination)] = [list(command) for command in commands]
+
+
 def _quote_command(command: list) -> str:
     return shlex.join(str(item) for item in command) if command else ""
+
+
+def _quote_commands(commands: List[list]) -> str:
+    return " && ".join(_quote_command(command) for command in commands if command)
 
 
 def _run_interruptible(
@@ -580,6 +797,83 @@ def _transcription_audio_filter_for(
     if clean_filter:
         filters.extend(clean_filter.split(","))
     return ",".join(filters)
+
+
+def _deep_filter_preprocess_filter_for(mode: AudioEnhancementMode) -> str:
+    profile = _deep_filter_profile_for(mode)
+    return ",".join(
+        [
+            (
+                "adeclick=window=20:overlap=75:arorder=2:"
+                f"threshold={profile.click_threshold}:burst={profile.click_burst}:method=save"
+            ),
+            (
+                "adeclip=window=55:overlap=75:arorder=8:"
+                f"threshold={profile.clip_threshold}:hsize=1200:method=save"
+            ),
+            f"highpass=f={profile.highpass_frequency}",
+            f"lowpass=f={profile.lowpass_frequency}",
+            (
+                f"afftdn=nr={profile.noise_reduction}:nf={profile.noise_floor}:"
+                f"tn=1:gs={profile.gain_smooth}"
+            ),
+            (
+                f"agate=threshold={profile.gate_threshold}:ratio={profile.gate_ratio}:"
+                f"range={profile.gate_range}:attack={profile.gate_attack}:"
+                f"release={profile.gate_release}:detection=rms"
+            ),
+            f"speechnorm=e={profile.speech_expansion}:r={profile.speech_release}:l=1",
+        ]
+    )
+
+
+def _deep_filter_postprocess_filter_for(mode: AudioEnhancementMode) -> str:
+    lowpass = 7200 if mode is AudioEnhancementMode.STRONG else 7800
+    return ",".join(
+        [
+            "highpass=f=80",
+            f"lowpass=f={lowpass}",
+            "speechnorm=e=4.0:r=0.0001:l=1",
+        ]
+    )
+
+
+def _deep_filter_profile_for(mode: AudioEnhancementMode) -> _EnhancementProfile:
+    if mode is AudioEnhancementMode.STRONG:
+        return _EnhancementProfile(
+            highpass_frequency=110,
+            lowpass_frequency=6800,
+            click_threshold=3,
+            click_burst=4,
+            clip_threshold=8,
+            noise_reduction=22,
+            noise_floor=-58,
+            gain_smooth=10,
+            gate_threshold=0.035,
+            gate_ratio=3.0,
+            gate_range=0.30,
+            gate_attack=30,
+            gate_release=420,
+            speech_expansion=10.0,
+            speech_release=0.00005,
+        )
+    return _EnhancementProfile(
+        highpass_frequency=90,
+        lowpass_frequency=7600,
+        click_threshold=6,
+        click_burst=2,
+        clip_threshold=12,
+        noise_reduction=14,
+        noise_floor=-50,
+        gain_smooth=6,
+        gate_threshold=0.022,
+        gate_ratio=1.6,
+        gate_range=0.65,
+        gate_attack=20,
+        gate_release=240,
+        speech_expansion=6.0,
+        speech_release=0.00008,
+    )
 
 
 @lru_cache(maxsize=None)

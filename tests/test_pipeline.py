@@ -5,7 +5,14 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from lecture_processor.config import AIProviderName, AudioQuality, BatchConfig, RecordingSpeed, TranscriptionEngine
+from lecture_processor.config import (
+    AIProviderName,
+    AudioEnhancementMode,
+    AudioQuality,
+    BatchConfig,
+    RecordingSpeed,
+    TranscriptionEngine,
+)
 from lecture_processor.control import update_control_file
 from lecture_processor.errors import LectureProcessorError, ProcessingStopped
 from lecture_processor.models import FileStatus, MediaInfo, TranscriptResult, TranscriptSegment
@@ -78,6 +85,20 @@ class FakeAudioExtractor:
             return self.extract(source, destination, media_info, stop_requested=stop_requested)
         destination.write_text("audio", encoding="utf-8")
         return destination
+
+
+class FakeAudioEnhancer:
+    def __init__(self):
+        self.calls = []
+        self.last_command_text = "deep-filter fake"
+
+    def enhance(self, source, destination, mode, stop_requested=None):
+        self.calls.append((source, destination, mode))
+        destination.write_text("enhanced audio", encoding="utf-8")
+        return destination
+
+    def command_text_for(self, destination):
+        return self.last_command_text
 
 
 class FakeTranscriber:
@@ -512,6 +533,41 @@ class BatchProcessorTests(unittest.TestCase):
             self.assertIn("Audio", log)
             self.assertIn("16 kHz mono WAV", log)
             self.assertIn("Audio cmd: ffmpeg -i fake -vn -ac 1 -ar 16000 fake.wav", log)
+
+    def test_audio_enhancement_runs_before_transcription(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "lecture.mov"
+            source.write_text("video", encoding="utf-8")
+            output = root / "out"
+            audio_enhancer = FakeAudioEnhancer()
+            transcriber = FakeTranscriber()
+            config = BatchConfig(
+                input_dir=root,
+                output_dir=output,
+                audio_enhancement=AudioEnhancementMode.HYBRID,
+            )
+
+            summary = BatchProcessor(
+                config=config,
+                inspector=FakeInspector({"lecture.mov": 120.0}),
+                normalizer=FakeNormalizer(),
+                audio_extractor=FakeAudioExtractor(),
+                audio_enhancer=audio_enhancer,
+                transcriber=transcriber,
+                slide_extractor=FakeSlideExtractor(),
+            ).run()
+
+            self.assertEqual(summary.completed, 1)
+            self.assertEqual(audio_enhancer.calls[0][0].name, ".transcription_audio.wav")
+            self.assertEqual(audio_enhancer.calls[0][2], AudioEnhancementMode.HYBRID)
+            self.assertEqual(transcriber.inputs[0].name, ".enhanced_transcription_audio.wav")
+            self.assertFalse((output / "lecture" / ".transcription_audio.wav").exists())
+            self.assertFalse((output / "lecture" / ".enhanced_transcription_audio.wav").exists())
+            log = (output / "lecture" / "processing_log.txt").read_text(encoding="utf-8")
+            self.assertIn("EnhanceAudio", log)
+            self.assertIn("hybrid DeepFilterNet", log)
+            self.assertIn("Audio enhancement cmd: deep-filter fake", log)
 
     def test_temp_normalized_video_is_removed_after_downstream_failure(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -14,7 +14,7 @@ End-user value when revisited:
 
 ## DeepFilterNet Speaker-Focused Audio Enhancement
 
-Status: Backlog request from product on 2026-04-29.
+Status: Implemented in app config and pipeline on 2026-04-30. Live noisy-lecture quality benchmarking remains a follow-up because it requires an installed `deep-filter` binary and a representative noisy lecture.
 
 Add an optional audio enhancement step that uses the same DeepFilterNet-based approach from the ClearVoice app (`https://github.com/aaramos/Clear-Voice-`) to clean lecture audio before transcription. The goal is to improve speaker focus and reduce background noise before Whisper/MLX transcription runs.
 

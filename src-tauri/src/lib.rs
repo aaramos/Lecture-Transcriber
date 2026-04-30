@@ -14,11 +14,13 @@ use std::os::unix::process::CommandExt;
 const EVENT_PREFIX: &str = "__LECTURE_PROCESSOR_EVENT__ ";
 const KEYCHAIN_SERVICE: &str = "Lecture Processor";
 const SLIDE_TEMP_PREFIX: &str = "lecture-slides-";
+const DEEP_FILTER_TEMP_PREFIX: &str = "lecture-deepfilter-";
 const OUTPUT_LOCK_FILE: &str = ".lecture_processor.lock";
 const CONTROL_FILE: &str = ".lecture_processor_control.json";
 const RUNTIME_VERSION_FILE: &str = ".processor_runtime_version";
 const NORMALIZED_WORK_FILE: &str = ".normalized_work.mp4";
 const TRANSCRIPTION_AUDIO_FILE: &str = ".transcription_audio.wav";
+const ENHANCED_TRANSCRIPTION_AUDIO_FILE: &str = ".enhanced_transcription_audio.wav";
 const FFMPEG_TEMP_SUFFIX: &str = ".ffmpeg.tmp";
 const ATOMIC_TEMP_FILES: [&str; 9] = [
     ".batch.json.tmp",
@@ -89,6 +91,8 @@ struct ProcessRequest {
     concurrent_files: u8,
     save_normalized_video: bool,
     audio_quality: String,
+    #[serde(default = "default_audio_enhancement")]
+    audio_enhancement: String,
     #[serde(default = "default_transcription_profile")]
     transcription_profile: String,
     #[serde(default = "default_whisper_model")]
@@ -212,6 +216,10 @@ fn default_whisper_model() -> String {
 
 fn default_gemini_max_concurrency() -> u8 {
     6
+}
+
+fn default_audio_enhancement() -> String {
+    "none".to_string()
 }
 
 #[tauri::command]
@@ -1007,6 +1015,9 @@ fn run_process_batch(
     if request.gemini_max_concurrency == 0 || request.gemini_max_concurrency > 12 {
         return Err("Gemini concurrency must be between 1 and 12.".to_string());
     }
+    if !matches!(request.audio_enhancement.as_str(), "none" | "hybrid" | "strong") {
+        return Err("Audio enhancement must be None, Hybrid, or Strong.".to_string());
+    }
     if !enhance_mode && request.output_dir.trim().is_empty() {
         return Err("Choose an output folder before starting.".to_string());
     }
@@ -1071,6 +1082,8 @@ fn run_process_batch(
             request.concurrent_files.to_string(),
             "--audio-quality".to_string(),
             request.audio_quality.clone(),
+            "--audio-enhancement".to_string(),
+            request.audio_enhancement.clone(),
             "--transcription-profile".to_string(),
             request.transcription_profile.clone(),
             "--slide-sensitivity".to_string(),
@@ -1788,7 +1801,7 @@ fn cleanup_slide_temp_dirs() -> usize {
             entry
                 .file_name()
                 .to_str()
-                .map(|name| name.starts_with(SLIDE_TEMP_PREFIX))
+                .map(|name| name.starts_with(SLIDE_TEMP_PREFIX) || name.starts_with(DEEP_FILTER_TEMP_PREFIX))
                 .unwrap_or(false)
         })
         .filter(|entry| {
@@ -1843,6 +1856,7 @@ fn is_output_temp_file(path: &Path) -> bool {
     };
     name == NORMALIZED_WORK_FILE
         || name == TRANSCRIPTION_AUDIO_FILE
+        || name == ENHANCED_TRANSCRIPTION_AUDIO_FILE
         || name.ends_with(FFMPEG_TEMP_SUFFIX)
         || ATOMIC_TEMP_FILES.contains(&name)
 }

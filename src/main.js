@@ -9,6 +9,7 @@ const STEP_LABELS = {
   Probe: "Checking file",
   Normalize: "Normalizing",
   Audio: "Preparing audio",
+  EnhanceAudio: "Enhancing audio",
   Transcribe: "Transcribing",
   Slides: "Extracting slides",
   Enrich: "Creating study notes",
@@ -20,20 +21,22 @@ const STEP_SHORT_LABELS = {
   Probe: "Check",
   Normalize: "Normalize",
   Audio: "Audio",
+  EnhanceAudio: "Clean",
   Transcribe: "Transcript",
   Slides: "Slides",
   Enrich: "Gemini",
   Render: "HTML",
 };
 
-const STEP_ORDER = ["Import", "Probe", "Normalize", "Audio", "Transcribe", "Slides", "Enrich", "Render"];
+const STEP_ORDER = ["Import", "Probe", "Normalize", "Audio", "EnhanceAudio", "Transcribe", "Slides", "Enrich", "Render"];
 
 const STEP_START_PROGRESS = {
   Import: 18,
   Probe: 8,
   Normalize: 22,
-  Audio: 44,
-  Transcribe: 54,
+  Audio: 42,
+  EnhanceAudio: 50,
+  Transcribe: 58,
   Slides: 82,
   Enrich: 88,
   Render: 96,
@@ -42,8 +45,9 @@ const STEP_START_PROGRESS = {
 const STEP_DONE_PROGRESS = {
   Import: 72,
   Probe: 18,
-  Normalize: 42,
-  Audio: 52,
+  Normalize: 40,
+  Audio: 48,
+  EnhanceAudio: 56,
   Transcribe: 78,
   Slides: 96,
   Enrich: 94,
@@ -55,6 +59,7 @@ const LAST_OUTPUT_STORAGE_KEY = "lectureProcessor.lastOutputDir.v1";
 const DEFAULT_SETTINGS = Object.freeze({
   recordingSpeed: "1x",
   audioQuality: "high",
+  audioEnhancement: "none",
   transcriptionProfile: "quality",
   slideSensitivity: "medium",
   aiModel: "gemini-2.5-flash",
@@ -163,6 +168,7 @@ const elements = {
   skippedCount: document.querySelector("#skippedCount"),
   canceledCount: document.querySelector("#canceledCount"),
   audioQuality: document.querySelector("#audioQuality"),
+  audioEnhancement: document.querySelector("#audioEnhancement"),
   transcriptionProfile: document.querySelector("#transcriptionProfile"),
   transcriptionProfileHelp: document.querySelector("#transcriptionProfileHelp"),
   slideSensitivity: document.querySelector("#slideSensitivity"),
@@ -242,6 +248,7 @@ elements.geminiMaxConcurrency.addEventListener("input", () => {
 
 [
   elements.audioQuality,
+  elements.audioEnhancement,
   elements.transcriptionProfile,
   elements.slideSensitivity,
   elements.enhanceWithGemini,
@@ -390,6 +397,7 @@ async function startBatch() {
     concurrentFiles: finalConcurrentFiles,
     saveNormalizedVideo: elements.saveNormalized.checked,
     audioQuality: elements.audioQuality.value,
+    audioEnhancement: elements.audioEnhancement.value,
     transcriptionProfile: elements.transcriptionProfile.value,
     slideSensitivity: elements.slideSensitivity.value,
     aiProvider: needsGemini() ? "gemini" : "none",
@@ -1635,6 +1643,7 @@ function applySettings(settings) {
     ? settings.recordingSpeed
     : DEFAULT_SETTINGS.recordingSpeed;
   setSelectValue(elements.audioQuality, settings.audioQuality, DEFAULT_SETTINGS.audioQuality);
+  setSelectValue(elements.audioEnhancement, settings.audioEnhancement, DEFAULT_SETTINGS.audioEnhancement);
   setSelectValue(elements.transcriptionProfile, settings.transcriptionProfile, DEFAULT_SETTINGS.transcriptionProfile);
   setSelectValue(elements.slideSensitivity, settings.slideSensitivity, DEFAULT_SETTINGS.slideSensitivity);
   setSelectValue(elements.aiModel, settings.aiModel, DEFAULT_SETTINGS.aiModel);
@@ -1677,6 +1686,7 @@ function saveCurrentSettings() {
   const settings = {
     recordingSpeed: state.recordingSpeed,
     audioQuality: elements.audioQuality.value,
+    audioEnhancement: elements.audioEnhancement.value,
     transcriptionProfile: elements.transcriptionProfile.value,
     slideSensitivity: elements.slideSensitivity.value,
     enhanceWithGemini: state.folderMode === "processed" ? state.enhanceWithGeminiPreference : elements.enhanceWithGemini.checked,
@@ -1877,13 +1887,21 @@ function runDescription() {
     return `${ready} ${noun}${ready === 1 ? "" : "s"} · ${concurrent} at a time · Gemini${skippedText}`;
   }
   const profileText = selectedProfileLabel();
+  const audioText = selectedAudioEnhancementLabel();
   const aiText = needsGemini() ? " · Gemini" : "";
-  return `${ready} ${noun}${ready === 1 ? "" : "s"} · ${concurrent} at a time · ${speed} · ${profileText}${aiText}${skippedText}`;
+  return `${ready} ${noun}${ready === 1 ? "" : "s"} · ${concurrent} at a time · ${speed} · ${profileText}${audioText}${aiText}${skippedText}`;
 }
 
 function selectedProfileLabel() {
   const profile = currentProfileStatus();
   return profile?.displayName || PROFILE_LABELS[elements.transcriptionProfile.value] || "Quality";
+}
+
+function selectedAudioEnhancementLabel() {
+  const value = elements.audioEnhancement.value || DEFAULT_SETTINGS.audioEnhancement;
+  if (value === "hybrid") return " · Hybrid audio";
+  if (value === "strong") return " · Strong audio";
+  return "";
 }
 
 function startElapsedTimer() {

@@ -11,6 +11,7 @@ from pathlib import Path
 
 from .config import (
     AIProviderName,
+    AudioEnhancementMode,
     AudioQuality,
     BatchConfig,
     FfmpegHwAccel,
@@ -50,6 +51,7 @@ def build_parser() -> argparse.ArgumentParser:
     process.add_argument("--min-duration", type=float, default=60.0)
     process.add_argument("--no-save-normalized-video", action="store_true")
     process.add_argument("--audio-quality", choices=[item.value for item in AudioQuality], default="high")
+    process.add_argument("--audio-enhancement", choices=[item.value for item in AudioEnhancementMode], default="none")
     process.add_argument("--slide-sensitivity", choices=[item.value for item in SlideSensitivity], default="medium")
     process.add_argument("--slide-backend", choices=[item.value for item in SlideBackend], default="auto")
     process.add_argument(
@@ -80,6 +82,7 @@ def build_parser() -> argparse.ArgumentParser:
     process.add_argument("--control-file", type=Path, default=None, help=argparse.SUPPRESS)
     process.add_argument("--ffmpeg", default="ffmpeg")
     process.add_argument("--ffprobe", default="ffprobe")
+    process.add_argument("--deep-filter", default="")
     process.add_argument("--json-events", action="store_true", help=argparse.SUPPRESS)
 
     enrich = subparsers.add_parser("enrich", help="Enrich an existing lecture.json artifact")
@@ -144,6 +147,7 @@ def _run_process(args) -> int:
         min_duration_seconds=args.min_duration,
         save_normalized_video=not args.no_save_normalized_video,
         audio_quality=AudioQuality(args.audio_quality),
+        audio_enhancement=AudioEnhancementMode(args.audio_enhancement),
         slide_sensitivity=SlideSensitivity(args.slide_sensitivity),
         slide_backend=SlideBackend(args.slide_backend),
         transcription_profile=args.transcription_profile
@@ -155,6 +159,7 @@ def _run_process(args) -> int:
         require_whisper_cpp_coreml=args.require_whisper_cpp_coreml,
         ffmpeg_path=args.ffmpeg,
         ffprobe_path=args.ffprobe,
+        deep_filter_path=args.deep_filter,
         ffmpeg_hwaccel=FfmpegHwAccel(args.ffmpeg_hwaccel),
         apple_silicon=apple_silicon,
         ai_provider=AIProviderName(args.ai_provider),
@@ -189,6 +194,10 @@ def _run_process(args) -> int:
             )
             if needs_ffmpeg:
                 _prepend_tool_parent_to_path(config.ffmpeg_path)
+        if media_files and config.audio_enhancement is not AudioEnhancementMode.NONE:
+            from .media import ensure_audio_enhancement_tools
+
+            ensure_audio_enhancement_tools(config.deep_filter_path)
         transcriber = None
         if media_files:
             transcriber = build_transcriber(

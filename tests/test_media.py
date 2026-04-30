@@ -8,19 +8,23 @@ from pathlib import Path
 from shlex import quote as shlex_quote
 from subprocess import CompletedProcess
 
-from lecture_processor.config import AudioQuality, FfmpegHwAccel, RecordingSpeed
+from lecture_processor.config import AudioEnhancementMode, AudioQuality, FfmpegHwAccel, RecordingSpeed
 from lecture_processor.errors import DependencyMissingError, ProcessingError, ProcessingStopped
 from lecture_processor.media import (
     CleanAudioExtractor,
+    DeepFilterAudioEnhancer,
     MediaNormalizer,
     _audio_filter_for,
     _clean_audio_filter_for,
+    _deep_filter_postprocess_filter_for,
+    _deep_filter_preprocess_filter_for,
     _hwaccel_args,
     _has_audio_stream,
     _require_command,
     _run_interruptible,
     _transcription_audio_filter_for,
     ensure_media_tools,
+    resolve_deep_filter_tool,
 )
 from lecture_processor.models import MediaInfo
 
@@ -76,6 +80,63 @@ class MediaDependencyTests(unittest.TestCase):
         )
 
         self.assertEqual(audio_filter, "highpass=f=80,loudnorm=I=-18:TP=-2:LRA=11")
+
+    def test_deep_filter_resolves_explicit_binary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            binary = Path(tmp) / "deep-filter"
+            binary.write_text("binary", encoding="utf-8")
+
+            self.assertEqual(resolve_deep_filter_tool(str(binary)), str(binary))
+
+    def test_deep_filter_hybrid_and_strong_filters_are_distinct(self):
+        hybrid_pre = _deep_filter_preprocess_filter_for(AudioEnhancementMode.HYBRID)
+        strong_pre = _deep_filter_preprocess_filter_for(AudioEnhancementMode.STRONG)
+
+        self.assertIn("afftdn=nr=14", hybrid_pre)
+        self.assertIn("afftdn=nr=22", strong_pre)
+        self.assertIn("lowpass=f=7800", _deep_filter_postprocess_filter_for(AudioEnhancementMode.HYBRID))
+        self.assertIn("lowpass=f=7200", _deep_filter_postprocess_filter_for(AudioEnhancementMode.STRONG))
+
+    def test_deep_filter_audio_enhancer_runs_preprocess_model_and_postprocess(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            ffmpeg = root / "ffmpeg"
+            deep_filter = root / "deep-filter"
+            ffmpeg.write_text("binary", encoding="utf-8")
+            deep_filter.write_text("binary", encoding="utf-8")
+            source = root / "source.wav"
+            source.write_text("audio", encoding="utf-8")
+            destination = root / "out" / ".enhanced_transcription_audio.wav"
+            commands = []
+
+            def runner(command, capture_output, text):
+                commands.append(command)
+                executable = Path(command[0]).name
+                if executable == "deep-filter":
+                    output_dir = Path(command[command.index("-o") + 1])
+                    output_dir.mkdir(parents=True, exist_ok=True)
+                    (output_dir / Path(command[-1]).name).write_text("enhanced", encoding="utf-8")
+                else:
+                    Path(command[-1]).parent.mkdir(parents=True, exist_ok=True)
+                    Path(command[-1]).write_text("wav", encoding="utf-8")
+                return CompletedProcess(command, 0, "", "")
+
+            enhancer = DeepFilterAudioEnhancer(
+                ffmpeg_path=str(ffmpeg),
+                deep_filter_path=str(deep_filter),
+                runner=runner,
+            )
+            enhancer.enhance(source, destination, AudioEnhancementMode.STRONG)
+
+            self.assertEqual(len(commands), 3)
+            self.assertEqual(commands[0][commands[0].index("-ar") + 1], "48000")
+            self.assertIn("afftdn=nr=22", commands[0][commands[0].index("-af") + 1])
+            self.assertIn("--compensate-delay", commands[1])
+            self.assertEqual(commands[2][commands[2].index("-ar") + 1], "16000")
+            self.assertEqual(commands[2][commands[2].index("-c:a") + 1], "pcm_s16le")
+            self.assertEqual(commands[2][-3:-1], ["-f", "wav"])
+            self.assertTrue(destination.exists())
+            self.assertIn("deep-filter", enhancer.command_text_for(destination))
 
     def test_clean_audio_extractor_writes_mono_wav_and_removes_temp_file(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -17,6 +17,12 @@ class AudioQuality(str, Enum):
     HIGH = "high"
 
 
+class AudioEnhancementMode(str, Enum):
+    NONE = "none"
+    HYBRID = "hybrid"
+    STRONG = "strong"
+
+
 class SlideSensitivity(str, Enum):
     LOW = "low"
     MEDIUM = "medium"
@@ -65,6 +71,7 @@ class BatchConfig:
     min_duration_seconds: float = 60.0
     save_normalized_video: bool = True
     audio_quality: AudioQuality = AudioQuality.HIGH
+    audio_enhancement: AudioEnhancementMode = AudioEnhancementMode.NONE
     slide_sensitivity: SlideSensitivity = SlideSensitivity.MEDIUM
     transcription_profile: str = DEFAULT_PROFILE_ID
     transcription_engine: TranscriptionEngine = TranscriptionEngine.FASTER_WHISPER
@@ -74,6 +81,7 @@ class BatchConfig:
     require_whisper_cpp_coreml: bool = False
     ffmpeg_path: str = "ffmpeg"
     ffprobe_path: str = "ffprobe"
+    deep_filter_path: str = ""
     ffmpeg_hwaccel: FfmpegHwAccel = FfmpegHwAccel.AUTO
     slide_backend: SlideBackend = SlideBackend.AUTO
     apple_silicon: bool = False

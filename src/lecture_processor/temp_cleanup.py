@@ -8,8 +8,10 @@ from typing import Optional
 OUTPUT_LOCK_FILE = ".lecture_processor.lock"
 NORMALIZED_WORK_FILE = ".normalized_work.mp4"
 TRANSCRIPTION_AUDIO_FILE = ".transcription_audio.wav"
+ENHANCED_TRANSCRIPTION_AUDIO_FILE = ".enhanced_transcription_audio.wav"
 FFMPEG_TEMP_SUFFIX = ".ffmpeg.tmp"
 SLIDE_TEMP_PREFIX = "lecture-slides-"
+DEEP_FILTER_TEMP_PREFIX = "lecture-deepfilter-"
 ATOMIC_TEMP_FILES = {
     ".batch.json.tmp",
     ".batch_error.txt.tmp",
@@ -52,9 +54,12 @@ def cleanup_slide_temp_dirs(temp_root: Optional[Path] = None) -> int:
 
     removed = 0
     for child in root.iterdir():
-        if not child.name.startswith(SLIDE_TEMP_PREFIX) or not child.is_dir():
+        if not (
+            child.name.startswith(SLIDE_TEMP_PREFIX)
+            or child.name.startswith(DEEP_FILTER_TEMP_PREFIX)
+        ) or not child.is_dir():
             continue
-        pid = _pid_from_slide_temp_name(child.name)
+        pid = _pid_from_temp_name(child.name, SLIDE_TEMP_PREFIX)
         if pid and _pid_is_running(pid):
             continue
         removed += remove_temp_path(child)
@@ -81,6 +86,7 @@ def _iter_output_temp_files(output_dir: Path):
             if (
                 filename == NORMALIZED_WORK_FILE
                 or filename == TRANSCRIPTION_AUDIO_FILE
+                or filename == ENHANCED_TRANSCRIPTION_AUDIO_FILE
                 or filename in ATOMIC_TEMP_FILES
                 or filename.endswith(FFMPEG_TEMP_SUFFIX)
             ):
@@ -96,8 +102,8 @@ def _lock_owner_is_running(lock_path: Path) -> bool:
     return isinstance(pid, int) and pid > 0 and _pid_is_running(pid)
 
 
-def _pid_from_slide_temp_name(name: str) -> Optional[int]:
-    remainder = name.removeprefix(SLIDE_TEMP_PREFIX)
+def _pid_from_temp_name(name: str, prefix: str) -> Optional[int]:
+    remainder = name.removeprefix(prefix)
     token = remainder.split("-", 1)[0]
     return int(token) if token.isdigit() else None
 

@@ -11,12 +11,12 @@ from typing import Callable, Dict, Iterator, List, Optional
 
 from .artifacts import LECTURE_ARTIFACT_NAME, load_json, utc_now_iso, write_batch_artifact, write_lecture_artifact
 from .ai.enrichment import enrich_lecture_artifact
-from .config import BatchConfig, RecordingSpeed, TranscriptionEngine
+from .config import AudioEnhancementMode, BatchConfig, RecordingSpeed, TranscriptionEngine
 from .control import ProcessingControl, default_control_file
 from .errors import LectureProcessorError
 from .errors import ProcessingStopped
 from .html_renderer import render_batch_index, render_lecture_page
-from .media import CleanAudioExtractor, MediaInspector, MediaNormalizer
+from .media import CleanAudioExtractor, DeepFilterAudioEnhancer, MediaInspector, MediaNormalizer
 from .models import BatchSummary, FileResult, FileStatus, MediaInfo, TranscriptResult
 from .slides import SlideExtractor
 from .sources import discover_source_files, is_transcript_source, source_kind
@@ -37,6 +37,7 @@ class BatchProcessor:
         inspector: Optional[MediaInspector] = None,
         normalizer: Optional[MediaNormalizer] = None,
         audio_extractor: Optional[CleanAudioExtractor] = None,
+        audio_enhancer: Optional[DeepFilterAudioEnhancer] = None,
         transcriber: Optional[Transcriber] = None,
         slide_extractor: Optional[SlideExtractor] = None,
         progress_callback: Optional[Callable[[Dict], None]] = None,
@@ -49,6 +50,10 @@ class BatchProcessor:
             apple_silicon=config.apple_silicon,
         )
         self.audio_extractor = audio_extractor or CleanAudioExtractor(config.ffmpeg_path)
+        self.audio_enhancer = audio_enhancer or DeepFilterAudioEnhancer(
+            config.ffmpeg_path,
+            config.deep_filter_path,
+        )
         self.transcriber = transcriber
         self.slide_extractor = slide_extractor or SlideExtractor(
             config.slide_sensitivity,
@@ -78,6 +83,7 @@ class BatchProcessor:
                 transcription_profile=transcriber_metadata.get("profile") or self.config.transcription_profile,
                 transcription_engine=transcriber_metadata.get("resolved_engine") or self.config.transcription_engine.value,
                 transcription_model=transcriber_metadata.get("model") or self.config.whisper_model,
+                audio_enhancement=self.config.audio_enhancement.value,
             )
             results: List[FileResult] = []
             skip_files = set(self.config.skip_files) | self.control.skipped_files()
@@ -144,6 +150,7 @@ class BatchProcessor:
         ]
         temp_normalized: Optional[Path] = None
         temp_transcription_audio: Optional[Path] = None
+        temp_enhanced_audio: Optional[Path] = None
         normalized_output: Optional[Path] = None
         normalized_duration = None
         media_info = None
@@ -278,6 +285,24 @@ class BatchProcessor:
                 log_lines[-1] = f"{log_lines[-1]} (16 kHz mono WAV)"
                 self._append_audio_command_log(log_lines, temp_transcription_audio)
 
+            if should_transcribe and self.config.audio_enhancement is not AudioEnhancementMode.NONE:
+                temp_enhanced_audio = output_dir / ".enhanced_transcription_audio.wav"
+                transcription_input = self._time_step(
+                    "EnhanceAudio",
+                    source,
+                    log_lines,
+                    step_state,
+                    stage_timings,
+                    lambda: self.audio_enhancer.enhance(
+                        source=transcription_input,
+                        destination=temp_enhanced_audio,
+                        mode=self.config.audio_enhancement,
+                        stop_requested=lambda: self.control.should_stop(source.name),
+                    ),
+                )
+                log_lines[-1] = f"{log_lines[-1]} ({self.config.audio_enhancement.value} DeepFilterNet)"
+                self._append_audio_enhancement_command_log(log_lines, temp_enhanced_audio)
+
             if not self.transcriber:
                 raise LectureProcessorError("Transcription runtime is not available for media files.")
             transcript = self._time_step(
@@ -293,6 +318,9 @@ class BatchProcessor:
             if temp_transcription_audio:
                 remove_temp_path(temp_transcription_audio)
                 temp_transcription_audio = None
+            if temp_enhanced_audio:
+                remove_temp_path(temp_enhanced_audio)
+                temp_enhanced_audio = None
             transcript = _scale_transcript(transcript, self.config.normalized_timestamp_scale)
             write_transcript(output_dir, transcript)
             log_lines[-1] = f"{log_lines[-1]} ({transcript.word_count} words)"
@@ -389,6 +417,9 @@ class BatchProcessor:
             if temp_transcription_audio:
                 remove_temp_path(temp_transcription_audio)
                 temp_transcription_audio = None
+            if temp_enhanced_audio:
+                remove_temp_path(temp_enhanced_audio)
+                temp_enhanced_audio = None
             if temp_normalized:
                 remove_temp_path(temp_normalized)
                 temp_normalized = None
@@ -410,6 +441,8 @@ class BatchProcessor:
             log_lines.append(f"{step}  ERROR: {message}")
             if step == "Audio":
                 self._append_audio_command_log(log_lines)
+            if step == "EnhanceAudio":
+                self._append_audio_enhancement_command_log(log_lines, temp_enhanced_audio)
             log_lines.append("Partial output preserved for review. File marked failed.")
             elapsed = time.monotonic() - started
             try:
@@ -449,6 +482,8 @@ class BatchProcessor:
         finally:
             if temp_transcription_audio:
                 remove_temp_path(temp_transcription_audio)
+            if temp_enhanced_audio:
+                remove_temp_path(temp_enhanced_audio)
             if temp_normalized:
                 remove_temp_path(temp_normalized)
 
@@ -643,6 +678,19 @@ class BatchProcessor:
             command_text = getattr(self.audio_extractor, "last_command_text", "")
         if command_text and not any(line.startswith("Audio cmd:") for line in log_lines):
             log_lines.append(f"Audio cmd: {command_text}")
+
+    def _append_audio_enhancement_command_log(
+        self,
+        log_lines: List[str],
+        destination: Optional[Path] = None,
+    ) -> None:
+        command_text = ""
+        if destination and hasattr(self.audio_enhancer, "command_text_for"):
+            command_text = self.audio_enhancer.command_text_for(destination)
+        if not command_text:
+            command_text = getattr(self.audio_enhancer, "last_command_text", "")
+        if command_text and not any(line.startswith("Audio enhancement cmd:") for line in log_lines):
+            log_lines.append(f"Audio enhancement cmd: {command_text}")
 
     def _prepare_double_speed_media(
         self,

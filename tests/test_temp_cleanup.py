@@ -15,6 +15,7 @@ class TempCleanupTests(unittest.TestCase):
             nested.mkdir(parents=True)
             (nested / ".normalized_work.mp4").write_text("temp", encoding="utf-8")
             (nested / ".transcription_audio.wav").write_text("temp", encoding="utf-8")
+            (nested / ".enhanced_transcription_audio.wav").write_text("temp", encoding="utf-8")
             (nested / ".transcript.txt.tmp").write_text("temp", encoding="utf-8")
             (nested / ".lecture.json.tmp").write_text("temp", encoding="utf-8")
             (nested / ".index.html.tmp").write_text("temp", encoding="utf-8")
@@ -25,9 +26,10 @@ class TempCleanupTests(unittest.TestCase):
 
             removed = cleanup_output_temp_files(output)
 
-            self.assertEqual(removed, 7)
+            self.assertEqual(removed, 8)
             self.assertFalse((nested / ".normalized_work.mp4").exists())
             self.assertFalse((nested / ".transcription_audio.wav").exists())
+            self.assertFalse((nested / ".enhanced_transcription_audio.wav").exists())
             self.assertFalse((nested / ".transcript.txt.tmp").exists())
             self.assertFalse((nested / ".lecture.json.tmp").exists())
             self.assertFalse((nested / ".index.html.tmp").exists())

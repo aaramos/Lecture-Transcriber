@@ -115,6 +115,7 @@ def build_lecture_artifact(
             "engine": _resolved_transcription_engine(transcriber_metadata, config),
             "model": str(transcriber_metadata.get("model") or config.whisper_model or ""),
             "profile": str(transcriber_metadata.get("profile") or config.transcription_profile or ""),
+            "audio_enhancement": config.audio_enhancement.value,
             "quality": str(transcriber_metadata.get("quality") or config.transcription_quality.value),
             "compute_type": str(transcriber_metadata.get("compute_type") or ""),
             "coreml_used": bool(transcriber_metadata.get("coreml_used", False)),
@@ -211,6 +212,7 @@ def build_batch_artifact(
         "config": {
             "recording_speed": config.recording_speed.value,
             "audio_quality": config.audio_quality.value,
+            "audio_enhancement": config.audio_enhancement.value,
             "transcription_profile": config.transcription_profile,
             "transcription_engine": config.transcription_engine.value,
             "transcription_quality": config.transcription_quality.value,
