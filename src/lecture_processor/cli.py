@@ -74,6 +74,7 @@ def build_parser() -> argparse.ArgumentParser:
     process.add_argument("--ffmpeg-hwaccel", choices=[item.value for item in FfmpegHwAccel], default="auto")
     process.add_argument("--ai-provider", choices=[item.value for item in AIProviderName], default="none")
     process.add_argument("--ai-model", default="")
+    process.add_argument("--gemini-max-concurrency", type=int, default=6)
     process.add_argument("--no-render-html", action="store_true")
     process.add_argument("--skip-file", action="append", default=[], help=argparse.SUPPRESS)
     process.add_argument("--control-file", type=Path, default=None, help=argparse.SUPPRESS)
@@ -85,6 +86,7 @@ def build_parser() -> argparse.ArgumentParser:
     enrich.add_argument("lecture_json", type=Path)
     enrich.add_argument("--ai-provider", choices=["mock", "gemini"], default="mock")
     enrich.add_argument("--ai-model", default="")
+    enrich.add_argument("--gemini-max-concurrency", type=int, default=6)
     enrich.add_argument("--render-html", action="store_true")
 
     enrich_batch = subparsers.add_parser("enrich-batch", help="Enhance an existing processed batch folder")
@@ -92,6 +94,7 @@ def build_parser() -> argparse.ArgumentParser:
     enrich_batch.add_argument("--ai-provider", choices=["mock", "gemini"], default="gemini")
     enrich_batch.add_argument("--ai-model", default="")
     enrich_batch.add_argument("--concurrent", type=int, default=1)
+    enrich_batch.add_argument("--gemini-max-concurrency", type=int, default=6)
     enrich_batch.add_argument("--skip-file", action="append", default=[], help=argparse.SUPPRESS)
     enrich_batch.add_argument("--no-render-html", action="store_true")
     enrich_batch.add_argument("--json-events", action="store_true", help=argparse.SUPPRESS)
@@ -156,6 +159,7 @@ def _run_process(args) -> int:
         apple_silicon=apple_silicon,
         ai_provider=AIProviderName(args.ai_provider),
         ai_model=args.ai_model,
+        gemini_max_concurrency=args.gemini_max_concurrency,
         render_html=not args.no_render_html,
         skip_files=tuple(args.skip_file or ()),
         control_file=args.control_file,
@@ -255,6 +259,7 @@ def _run_enrich(args) -> int:
         transcription_engine=TranscriptionEngine.NONE,
         ai_provider=provider,
         ai_model=args.ai_model,
+        gemini_max_concurrency=args.gemini_max_concurrency,
     )
     try:
         artifact = enrich_lecture_artifact(lecture_json, config)
@@ -285,6 +290,7 @@ def _run_enrich_batch(args) -> int:
         concurrent_files=args.concurrent,
         ai_provider=provider,
         ai_model=args.ai_model,
+        gemini_max_concurrency=args.gemini_max_concurrency,
         render_html=not args.no_render_html,
         skip_files=tuple(args.skip_file or ()),
     )

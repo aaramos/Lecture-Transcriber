@@ -79,6 +79,7 @@ class BatchConfig:
     apple_silicon: bool = False
     ai_provider: AIProviderName = AIProviderName.NONE
     ai_model: str = ""
+    gemini_max_concurrency: int = 6
     render_html: bool = True
     skip_files: Tuple[str, ...] = ()
     control_file: Optional[Path] = None
@@ -92,6 +93,8 @@ class BatchConfig:
             raise LectureProcessorError("--concurrent must be between 1 and 8")
         if self.min_duration_seconds < 0:
             raise LectureProcessorError("--min-duration must be zero or greater")
+        if self.gemini_max_concurrency < 1 or self.gemini_max_concurrency > 12:
+            raise LectureProcessorError("--gemini-max-concurrency must be between 1 and 12")
         try:
             object.__setattr__(self, "transcription_profile", normalize_profile_id(self.transcription_profile))
         except ValueError as exc:

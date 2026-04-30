@@ -245,6 +245,12 @@
               <span class="field-help">Use 2 by default. Use 3 only on stronger Macs.</span>
             </label>
 
+            <label>
+              Gemini Concurrency
+              <input id="geminiMaxConcurrency" type="number" min="1" max="12" value="6" />
+              <span class="field-help">Use 6 by default. Lower this if Gemini rate-limits a run.</span>
+            </label>
+
             <label class="checkbox-row">
               <input id="saveNormalized" type="checkbox" checked />
               <span>Save normalized video</span>

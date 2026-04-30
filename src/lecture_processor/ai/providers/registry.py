@@ -3,12 +3,16 @@ from .gemini import GeminiProvider
 from .mock import MockProvider
 
 
-def build_provider(name: str, *, api_key: str = "", model: str = ""):
+def build_provider(name: str, *, api_key: str = "", model: str = "", max_concurrency: int = 6):
     normalized = (name or "none").lower()
     if normalized == "mock":
         return MockProvider(api_key=api_key, model=model or MockProvider.info().default_model)
     if normalized == "gemini":
-        return GeminiProvider(api_key=api_key, model=model or GeminiProvider.info().default_model)
+        return GeminiProvider(
+            api_key=api_key,
+            model=model or GeminiProvider.info().default_model,
+            max_concurrency=max_concurrency,
+        )
     raise ProviderRequestError(f"Unsupported AI provider: {name}")
 
 

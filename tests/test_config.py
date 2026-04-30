@@ -35,6 +35,18 @@ class BatchConfigTests(unittest.TestCase):
             with self.assertRaises(LectureProcessorError):
                 config.validate()
 
+    def test_validates_gemini_concurrency_range(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            config = BatchConfig(
+                input_dir=folder,
+                output_dir=folder / "out",
+                gemini_max_concurrency=13,
+            )
+
+            with self.assertRaises(LectureProcessorError):
+                config.validate()
+
     def test_defaults_match_app_recommendations(self):
         with tempfile.TemporaryDirectory() as tmp:
             folder = Path(tmp)
@@ -44,6 +56,7 @@ class BatchConfigTests(unittest.TestCase):
             self.assertEqual(config.transcription_profile, QUALITY_PROFILE_ID)
             self.assertIs(config.transcription_quality, TranscriptionQuality.ACCURATE)
             self.assertEqual(config.whisper_model, "medium.en")
+            self.assertEqual(config.gemini_max_concurrency, 6)
 
 
 if __name__ == "__main__":

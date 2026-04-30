@@ -30,6 +30,7 @@ def enrich_lecture_artifact(
         config.ai_provider.value,
         api_key=_api_key_for(config.ai_provider),
         model=config.ai_model or info.default_model,
+        max_concurrency=config.gemini_max_concurrency,
     )
     request = _request_from_artifact(artifact, lecture_json_path.parent)
     chunked_analyzer = getattr(provider, "analyze_lecture_chunked", None)

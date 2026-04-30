@@ -219,6 +219,7 @@ def build_batch_artifact(
             "concurrent_files": config.concurrent_files,
             "ai_provider": config.ai_provider.value,
             "ai_model": config.ai_model or None,
+            "gemini_max_concurrency": config.gemini_max_concurrency,
             "render_html": config.render_html,
         },
         "lectures": lectures,

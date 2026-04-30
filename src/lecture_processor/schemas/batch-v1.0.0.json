@@ -25,7 +25,8 @@
         "slide_sensitivity": {"type": "string", "enum": ["low", "medium", "high"]},
         "concurrent_files": {"type": "integer", "minimum": 1, "maximum": 8},
         "ai_provider": {"type": ["string", "null"]},
-        "ai_model": {"type": ["string", "null"]}
+        "ai_model": {"type": ["string", "null"]},
+        "gemini_max_concurrency": {"type": "integer", "minimum": 1, "maximum": 12}
       }
     },
     "lectures": {

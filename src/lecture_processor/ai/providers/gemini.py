@@ -1,5 +1,13 @@
 import importlib
+import io
 import json
+import math
+import random
+import re
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 
@@ -17,15 +25,32 @@ from .base import (
 )
 
 DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
-TRANSCRIPT_CHUNK_MAX_CHARS = 12000
-SLIDE_BATCH_SIZE = 5
+TRANSCRIPT_CHUNK_MAX_CHARS = 6000
+SLIDE_BATCH_SIZE = 10
+DEFAULT_MAX_CONCURRENCY = 6
+MAX_RETRY_ATTEMPTS = 4
+SLIDE_IMAGE_MAX_EDGE = 1024
+SLIDE_IMAGE_WEBP_QUALITY = 80
+SLIDE_ENTROPY_MIN_BITS = 1.0
+SLIDE_PHASH_DISTANCE_THRESHOLD = 5
+SLIDE_PHASH_SIZE = 8
+SLIDE_PHASH_SAMPLE_SIZE = 32
+MIN_RESOURCE_COUNT = 3
+MAX_RESOURCE_COUNT = 4
 
 
 class GeminiProvider:
-    def __init__(self, api_key: str, model: str = DEFAULT_GEMINI_MODEL) -> None:
+    def __init__(
+        self,
+        api_key: str,
+        model: str = DEFAULT_GEMINI_MODEL,
+        *,
+        max_concurrency: int = DEFAULT_MAX_CONCURRENCY,
+    ) -> None:
         if not api_key:
             raise ProviderAuthError("Gemini API key is required.")
         self.model = model or DEFAULT_GEMINI_MODEL
+        self.max_concurrency = _bounded_concurrency(max_concurrency)
         try:
             genai = importlib.import_module("google.genai")
             types = importlib.import_module("google.genai.types")
@@ -73,7 +98,11 @@ class GeminiProvider:
         warnings = list(cache.get("warnings") or [])
         usage = {"input": 0, "output": 0}
         transcript_chunks = _transcript_chunks(request)
-        slide_batches = _slide_batches(request.slides)
+        slides_for_gemini, filtered_slides = _filter_slides_for_gemini(request)
+        slide_filter_warning = _slide_filter_warning(filtered_slides)
+        if slide_filter_warning:
+            warnings.append(slide_filter_warning)
+        slide_batches = _slide_batches(slides_for_gemini)
         total_steps = 2 + len(transcript_chunks) + len(slide_batches)
         completed_steps = 0
 
@@ -97,6 +126,7 @@ class GeminiProvider:
                     use_google_search=False,
                     include_images=False,
                     context="Gemini overview",
+                    response_schema=_overview_response_schema(),
                 )
                 _add_usage(usage, response)
             except ProviderResponseError as exc:
@@ -113,86 +143,87 @@ class GeminiProvider:
         emit("overview")
 
         transcript_cache = chunks.setdefault("transcript", {})
-        formatted_parts = []
-        for chunk in transcript_chunks:
-            key = str(chunk["index"])
-            payload = transcript_cache.get(key)
-            if not payload:
-                try:
-                    payload, response = self._generate_json(
-                        _transcript_chunk_prompt(request, chunk),
-                        request,
-                        use_google_search=False,
-                        include_images=False,
-                        context=f"Gemini transcript chunk {key}",
-                    )
-                    _add_usage(usage, response)
-                except ProviderResponseError as exc:
-                    payload = {
-                        "formatted_transcript": chunk["text"],
-                        "warnings": [f"Transcript chunk {key} used raw transcript fallback: {exc}"],
-                    }
-                transcript_cache[key] = payload
-                _save_chunk_cache(cache_path, cache)
-            formatted_parts.append(str(payload.get("formatted_transcript") or chunk["text"]).strip())
-            warnings.extend(payload.get("warnings") or [])
-            completed_steps += 1
-            emit(f"transcript {chunk['index']}/{len(transcript_chunks)}")
-
         slide_cache = chunks.setdefault("slides", {})
-        slide_analysis = []
-        for batch_index, batch in enumerate(slide_batches, start=1):
-            key = _slide_batch_key(batch)
-            payload = slide_cache.get(key)
-            if not payload:
-                try:
-                    payload, response = self._generate_json(
-                        _slide_batch_prompt(request, batch, overview),
+        cache_lock = threading.Lock()
+        jobs = []
+        for chunk in transcript_chunks:
+            jobs.append(
+                (
+                    "transcript",
+                    chunk["index"],
+                    lambda chunk=chunk: self._analyze_transcript_chunk(
                         request,
-                        slides=batch,
-                        use_google_search=False,
-                        include_images=True,
-                        context=f"Gemini slide batch {batch_index}",
-                    )
-                    _add_usage(usage, response)
-                    payload["slide_analysis"] = _normalize_slide_analysis(
-                        payload.get("slide_analysis") or [],
+                        chunk,
+                        transcript_cache,
+                        cache,
+                        cache_path,
+                        cache_lock,
+                    ),
+                )
+            )
+        for batch_index, batch in enumerate(slide_batches, start=1):
+            jobs.append(
+                (
+                    "slides",
+                    batch_index,
+                    lambda batch=batch, batch_index=batch_index: self._analyze_slide_batch(
                         request,
                         batch,
-                    )
-                except ProviderResponseError as exc:
-                    payload = {
-                        "slide_analysis": _fallback_slide_analysis(request, batch),
-                        "warnings": [f"Slides {key} used transcript fallback: {exc}"],
-                    }
-                slide_cache[key] = payload
-                _save_chunk_cache(cache_path, cache)
-            slide_analysis.extend(payload.get("slide_analysis") or [])
-            warnings.extend(payload.get("warnings") or [])
-            completed_steps += 1
-            emit(f"slides {batch_index}/{len(slide_batches)}")
-
-        resources = chunks.get("resources")
-        if not resources:
-            try:
-                resources, response = self._generate_json(
-                    _resources_prompt(request, overview),
-                    request,
-                    use_google_search=True,
-                    include_images=False,
-                    context="Gemini resources",
+                        batch_index,
+                        overview,
+                        slide_cache,
+                        cache,
+                        cache_path,
+                        cache_lock,
+                    ),
                 )
+            )
+        jobs.append(
+            (
+                "resources",
+                1,
+                lambda: self._analyze_resources(
+                    request,
+                    overview,
+                    chunks,
+                    cache,
+                    cache_path,
+                    cache_lock,
+                ),
+            )
+        )
+
+        transcript_results: Dict[int, Dict] = {}
+        slide_results: Dict[int, Dict] = {}
+        resources = {"resources": [], "warnings": []}
+        max_workers = min(self.max_concurrency, max(1, len(jobs)))
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(job): (kind, index) for kind, index, job in jobs}
+            for future in as_completed(futures):
+                kind, index = futures[future]
+                payload, response = future.result()
                 _add_usage(usage, response)
-            except ProviderResponseError as exc:
-                resources = {
-                    "resources": [],
-                    "warnings": [f"External resources skipped: {exc}"],
-                }
-            chunks["resources"] = resources
-            _save_chunk_cache(cache_path, cache)
-        warnings.extend(resources.get("warnings") or [])
-        completed_steps += 1
-        emit("resources")
+                warnings.extend(payload.get("warnings") or [])
+                if kind == "transcript":
+                    transcript_results[index] = payload
+                    step = f"transcript {index}/{len(transcript_chunks)}"
+                elif kind == "slides":
+                    slide_results[index] = payload
+                    step = f"slides {index}/{len(slide_batches)}"
+                else:
+                    resources = payload
+                    step = "resources"
+                completed_steps += 1
+                emit(step)
+
+        formatted_parts = [
+            str(transcript_results.get(chunk["index"], {}).get("formatted_transcript") or chunk["text"]).strip()
+            for chunk in transcript_chunks
+        ]
+        slide_analysis = []
+        for index in range(1, len(slide_batches) + 1):
+            slide_analysis.extend(slide_results.get(index, {}).get("slide_analysis") or [])
+        slide_analysis = _backfill_filtered_slide_analysis(request, slide_analysis, filtered_slides)
 
         formatted_transcript = "\n\n".join(part for part in formatted_parts if part).strip()
         if not formatted_transcript:
@@ -209,6 +240,140 @@ class GeminiProvider:
             raw_response_id="chunked",
             warnings=_dedupe_warnings(warnings),
         )
+
+    def _analyze_transcript_chunk(
+        self,
+        request: AnalyzeLectureRequest,
+        chunk: Dict,
+        transcript_cache: Dict,
+        cache: Dict,
+        cache_path: Optional[Path],
+        cache_lock: threading.Lock,
+    ) -> Tuple[Dict, Optional[object]]:
+        key = str(chunk["index"])
+        with cache_lock:
+            payload = transcript_cache.get(key)
+        if payload:
+            return payload, None
+
+        response = None
+        try:
+            payload, response = self._generate_json(
+                _transcript_chunk_prompt(request, chunk),
+                request,
+                use_google_search=False,
+                include_images=False,
+                context=f"Gemini transcript chunk {key}",
+                max_output_tokens=4096,
+                response_schema=_transcript_chunk_response_schema(),
+            )
+        except ProviderResponseError as exc:
+            payload = {
+                "formatted_transcript": chunk["text"],
+                "warnings": [f"Transcript chunk {key} used raw transcript fallback: {exc}"],
+            }
+        with cache_lock:
+            transcript_cache[key] = payload
+            _save_chunk_cache(cache_path, cache)
+        return payload, response
+
+    def _analyze_slide_batch(
+        self,
+        request: AnalyzeLectureRequest,
+        batch: List[Dict],
+        batch_index: int,
+        overview: Dict,
+        slide_cache: Dict,
+        cache: Dict,
+        cache_path: Optional[Path],
+        cache_lock: threading.Lock,
+    ) -> Tuple[Dict, Optional[object]]:
+        key = _slide_batch_key(batch)
+        with cache_lock:
+            payload = slide_cache.get(key)
+        if payload:
+            return payload, None
+
+        response = None
+        try:
+            payload, response = self._generate_json(
+                _slide_batch_prompt(request, batch, overview),
+                request,
+                slides=batch,
+                use_google_search=False,
+                include_images=True,
+                context=f"Gemini slide batch {batch_index}",
+                max_output_tokens=8192,
+                response_schema=_slide_batch_response_schema(),
+            )
+            payload["slide_analysis"] = _normalize_slide_analysis(
+                payload.get("slide_analysis") or [],
+                request,
+                batch,
+            )
+        except ProviderResponseError as exc:
+            payload = {
+                "slide_analysis": _fallback_slide_analysis(request, batch),
+                "warnings": [f"Slides {key} used transcript fallback: {exc}"],
+            }
+        with cache_lock:
+            slide_cache[key] = payload
+            _save_chunk_cache(cache_path, cache)
+        return payload, response
+
+    def _analyze_resources(
+        self,
+        request: AnalyzeLectureRequest,
+        overview: Dict,
+        chunks: Dict,
+        cache: Dict,
+        cache_path: Optional[Path],
+        cache_lock: threading.Lock,
+    ) -> Tuple[Dict, Optional[object]]:
+        with cache_lock:
+            resources = chunks.get("resources")
+        if resources:
+            return resources, None
+
+        response = None
+        try:
+            resources, response = self._generate_json(
+                _resources_prompt(request, overview),
+                request,
+                use_google_search=True,
+                include_images=False,
+                context="Gemini resources",
+                max_output_tokens=4096,
+                response_schema=_resources_response_schema(),
+            )
+            resources = _normalize_resources_payload(resources)
+            if _complete_resource_count(resources) < MIN_RESOURCE_COUNT:
+                retry_resources, retry_response = self._generate_json(
+                    _resources_retry_prompt(request, overview, resources),
+                    request,
+                    use_google_search=True,
+                    include_images=False,
+                    context="Gemini resources retry",
+                    max_output_tokens=4096,
+                    response_schema=_resources_response_schema(),
+                )
+                retry_resources = _normalize_resources_payload(retry_resources)
+                response = _combined_response(response, retry_response)
+                if _complete_resource_count(retry_resources) >= _complete_resource_count(resources):
+                    resources = retry_resources
+            if _complete_resource_count(resources) < MIN_RESOURCE_COUNT:
+                resources.setdefault("warnings", []).append(
+                    f"Resources returned only {_complete_resource_count(resources)} complete item(s); expected 3-4."
+                )
+        except ProviderResponseError as exc:
+            resources = {
+                "resources": [],
+                "warnings": [f"External resources skipped: {exc}"],
+            }
+        with cache_lock:
+            chunks["resources"] = resources
+            _save_chunk_cache(cache_path, cache)
+        return resources, response
 
     def analyze_lecture_single_call(self, request: AnalyzeLectureRequest) -> AnalyzeLectureResponse:
         prompt = _build_prompt(request)
@@ -237,28 +402,44 @@ class GeminiProvider:
         use_google_search: bool,
         include_images: bool,
         context: str,
+        max_output_tokens: Optional[int] = None,
+        response_schema: Optional[Dict] = None,
     ) -> Tuple[Dict, object]:
-        attempts = [include_images]
-        if include_images:
-            attempts.append(False)
-        else:
-            attempts.append(False)
+        attempts = [True, False] if include_images else [False]
         last_error: Optional[Exception] = None
         for attempt_index, attempt_images in enumerate(attempts, start=1):
+            contents = _contents_for_request(
+                request,
+                prompt,
+                self._types,
+                slides=slides,
+                include_images=attempt_images,
+            )
             try:
-                response = self._client.models.generate_content(
+                response = _generate_content_with_retry(
+                    self._client.models,
                     model=self.model,
-                    contents=_contents_for_request(
-                        request,
-                        prompt,
+                    contents=contents,
+                    config=_generate_content_config(
                         self._types,
-                        slides=slides,
-                        include_images=attempt_images,
+                        use_google_search=use_google_search,
+                        max_output_tokens=max_output_tokens,
+                        response_schema=response_schema,
                     ),
-                    config=_generate_content_config(self._types, use_google_search=use_google_search),
                 )
-            except Exception as exc:
-                raise _map_gemini_error(exc) from exc
+            except ProviderRequestError:
+                if use_google_search or not response_schema:
+                    raise
+                response = _generate_content_with_retry(
+                    self._client.models,
+                    model=self.model,
+                    contents=contents,
+                    config=_generate_content_config(
+                        self._types,
+                        use_google_search=use_google_search,
+                        max_output_tokens=max_output_tokens,
+                    ),
+                )
 
             text = _response_text(response)
             if not text:
@@ -268,14 +449,53 @@ class GeminiProvider:
                 )
                 continue
             try:
-                return _json_from_response_text(text), response
+                return _json_payload_from_response(response, text), response
             except ProviderResponseError as exc:
-                last_error = exc
+                if response_schema:
+                    try:
+                        repaired_payload, repair_response = self._repair_json_response(
+                            text,
+                            response_schema,
+                            context=context,
+                            max_output_tokens=max_output_tokens,
+                        )
+                        return repaired_payload, _combined_response(response, repair_response)
+                    except ProviderResponseError as repair_exc:
+                        last_error = ProviderResponseError(f"{exc}; repair failed: {repair_exc}")
+                    except Exception as repair_exc:
+                        last_error = ProviderResponseError(f"{exc}; repair failed: {repair_exc}")
+                else:
+                    last_error = exc
                 if attempt_index >= len(attempts):
                     break
         if last_error:
             raise last_error
         raise ProviderResponseError(f"{context} did not return usable JSON.")
+
+    def _repair_json_response(
+        self,
+        malformed_text: str,
+        response_schema: Dict,
+        *,
+        context: str,
+        max_output_tokens: Optional[int],
+    ) -> Tuple[Dict, object]:
+        prompt = _json_repair_prompt(malformed_text, response_schema, context=context)
+        response = _generate_content_with_retry(
+            self._client.models,
+            model=self.model,
+            contents=prompt,
+            config=_generate_content_config(
+                self._types,
+                use_google_search=False,
+                max_output_tokens=max_output_tokens,
+                response_schema=response_schema,
+            ),
+        )
+        text = _response_text(response)
+        if not text:
+            raise _empty_response_error(response, f"{context} JSON repair")
+        return _json_payload_from_response(response, text), response
 
 
 def build_manual_test_prompt(artifact: Dict, *, selected_slides: list = None) -> str:
@@ -372,12 +592,22 @@ Use the transcript for what the instructor says about it.
 """.strip()
 
 
-def _generate_content_config(types_module, *, use_google_search: bool = True):
-    if not use_google_search:
-        return types_module.GenerateContentConfig()
-    return types_module.GenerateContentConfig(
-        tools=[types_module.Tool(google_search=types_module.GoogleSearch())],
-    )
+def _generate_content_config(
+    types_module,
+    *,
+    use_google_search: bool = True,
+    max_output_tokens: Optional[int] = None,
+    response_schema: Optional[Dict] = None,
+):
+    kwargs = {}
+    if max_output_tokens:
+        kwargs["max_output_tokens"] = int(max_output_tokens)
+    if use_google_search:
+        kwargs["tools"] = [types_module.Tool(google_search=types_module.GoogleSearch())]
+    elif response_schema:
+        kwargs["response_mime_type"] = "application/json"
+        kwargs["response_json_schema"] = response_schema
+    return types_module.GenerateContentConfig(**kwargs)
 
 
 def _contents_for_request(
@@ -405,7 +635,7 @@ def _slide_image_parts(request: AnalyzeLectureRequest, types_module, *, slides: 
         image_path = _slide_image_path(request.lecture_dir, slide)
         if not image_path:
             continue
-        mime_type = _mime_type_for_image(image_path)
+        data, mime_type = _slide_image_bytes(image_path)
         if not mime_type:
             continue
         parts.append(
@@ -413,7 +643,7 @@ def _slide_image_parts(request: AnalyzeLectureRequest, types_module, *, slides: 
                 text=f"Slide {slide.get('id')}: {slide.get('filename') or image_path.name}"
             )
         )
-        parts.append(types_module.Part.from_bytes(data=image_path.read_bytes(), mime_type=mime_type))
+        parts.append(types_module.Part.from_bytes(data=data, mime_type=mime_type))
     return parts
 
 
@@ -434,6 +664,293 @@ def _mime_type_for_image(path: Path) -> Optional[str]:
     if suffix == ".webp":
         return "image/webp"
     return None
+
+
+def _slide_image_bytes(path: Path) -> Tuple[bytes, Optional[str]]:
+    cached = _cached_webp_path(path)
+    if cached and cached.exists():
+        try:
+            return cached.read_bytes(), "image/webp"
+        except OSError:
+            pass
+
+    try:
+        image_module = importlib.import_module("PIL.Image")
+        with image_module.open(path) as image:
+            image.load()
+            width, height = image.size
+            if max(width, height) > SLIDE_IMAGE_MAX_EDGE:
+                scale = SLIDE_IMAGE_MAX_EDGE / max(width, height)
+                next_size = (max(1, int(width * scale)), max(1, int(height * scale)))
+                resampling = getattr(getattr(image_module, "Resampling", image_module), "LANCZOS")
+                image = image.resize(next_size, resampling)
+            buffer = io.BytesIO()
+            image.convert("RGB").save(
+                buffer,
+                format="WEBP",
+                quality=SLIDE_IMAGE_WEBP_QUALITY,
+                method=4,
+            )
+            data = buffer.getvalue()
+            if cached:
+                try:
+                    cached.parent.mkdir(parents=True, exist_ok=True)
+                    cached.write_bytes(data)
+                except OSError:
+                    pass
+            return data, "image/webp"
+    except Exception:
+        mime_type = _mime_type_for_image(path)
+        if not mime_type:
+            return b"", None
+        try:
+            return path.read_bytes(), mime_type
+        except OSError:
+            return b"", None
+
+
+def _cached_webp_path(path: Path) -> Optional[Path]:
+    try:
+        return path.parent / ".cache" / f"{path.stem}.webp"
+    except Exception:
+        return None
+
+
+def _filter_slides_for_gemini(request: AnalyzeLectureRequest) -> Tuple[List[Dict], Dict[int, Dict]]:
+    if not request.slides or not request.lecture_dir:
+        return list(request.slides), {}
+
+    kept: List[Tuple[Dict, int, Optional[Dict]]] = []
+    filtered: Dict[int, Dict] = {}
+    precursors_by_parent: Dict[int, List[int]] = {}
+    slides_by_id: Dict[int, Dict] = {}
+
+    for index, slide in enumerate(request.slides, start=1):
+        slide_id = _slide_id(slide, fallback=index)
+        slides_by_id[slide_id] = slide
+        image_path = _slide_image_path(request.lecture_dir, slide)
+        signature = _slide_signature(image_path) if image_path else None
+        if signature is None:
+            kept.append((slide, slide_id, None))
+            continue
+
+        if float(signature["entropy"]) < SLIDE_ENTROPY_MIN_BITS:
+            filtered[slide_id] = {
+                "status": "blank",
+                "reason": "low_entropy",
+                "parent_slide_id": None,
+            }
+            _set_slide_filter_status(slide, "skipped", reason="blank")
+            continue
+
+        if kept:
+            _previous_slide, previous_id, previous_signature = kept[-1]
+            if previous_signature is not None:
+                distance = _hamming_distance(int(previous_signature["phash"]), int(signature["phash"]))
+                if distance <= SLIDE_PHASH_DISTANCE_THRESHOLD:
+                    kept[-1] = (slide, slide_id, signature)
+                    earlier_precursors = precursors_by_parent.pop(previous_id, [])
+                    for precursor_id in earlier_precursors:
+                        filtered[precursor_id]["parent_slide_id"] = slide_id
+                        _set_slide_filter_status(
+                            slides_by_id[precursor_id],
+                            "merged",
+                            reason="near_duplicate",
+                            parent_slide_id=slide_id,
+                        )
+                    filtered[previous_id] = {
+                        "status": "build_precursor",
+                        "reason": "near_duplicate",
+                        "parent_slide_id": slide_id,
+                    }
+                    _set_slide_filter_status(
+                        slides_by_id[previous_id],
+                        "merged",
+                        reason="near_duplicate",
+                        parent_slide_id=slide_id,
+                    )
+                    precursors_by_parent[slide_id] = earlier_precursors + [previous_id]
+                    continue
+
+        kept.append((slide, slide_id, signature))
+
+    for slide, _slide_id_value, _signature in kept:
+        _set_slide_filter_status(slide, "sent_to_gemini")
+    return [slide for slide, _slide_id_value, _signature in kept], filtered
+
+
+def _set_slide_filter_status(
+    slide: Dict,
+    status: str,
+    *,
+    reason: Optional[str] = None,
+    parent_slide_id: Optional[int] = None,
+) -> None:
+    payload = {"status": status}
+    if reason:
+        payload["reason"] = reason
+    if parent_slide_id is not None:
+        payload["parent_slide_id"] = parent_slide_id
+    slide["filter_status"] = payload
+
+
+def _slide_signature(path: Path) -> Optional[Dict]:
+    try:
+        image_module = importlib.import_module("PIL.Image")
+        with image_module.open(path) as image:
+            image.load()
+            grayscale = image.convert("L")
+            resampling = getattr(getattr(image_module, "Resampling", image_module), "LANCZOS")
+            sampled = grayscale.resize((SLIDE_PHASH_SAMPLE_SIZE, SLIDE_PHASH_SAMPLE_SIZE), resampling)
+            pixels = list(sampled.getdata())
+            entropy = _image_entropy(pixels)
+            phash = _perceptual_hash(pixels, SLIDE_PHASH_SAMPLE_SIZE)
+            return {"entropy": entropy, "phash": phash}
+    except Exception:
+        return None
+
+
+def _image_entropy(pixels: List[int]) -> float:
+    if not pixels:
+        return 0.0
+    histogram = [0] * 256
+    for pixel in pixels:
+        histogram[int(pixel)] += 1
+    total = float(len(pixels))
+    entropy = 0.0
+    for count in histogram:
+        if count:
+            probability = count / total
+            entropy -= probability * math.log2(probability)
+    return entropy
+
+
+def _perceptual_hash(pixels: List[int], size: int) -> int:
+    coefficients = []
+    for u in range(SLIDE_PHASH_SIZE):
+        for v in range(SLIDE_PHASH_SIZE):
+            total = 0.0
+            for y in range(size):
+                row_offset = y * size
+                cos_y = math.cos(((2 * y + 1) * u * math.pi) / (2 * size))
+                for x in range(size):
+                    cos_x = math.cos(((2 * x + 1) * v * math.pi) / (2 * size))
+                    total += float(pixels[row_offset + x]) * cos_x * cos_y
+            coefficients.append(total)
+
+    comparable = coefficients[1:] or coefficients
+    median = sorted(comparable)[len(comparable) // 2]
+    value = 0
+    for coefficient in comparable:
+        value = (value << 1) | int(coefficient > median)
+    return value
+
+
+def _hamming_distance(left: int, right: int) -> int:
+    return bin(left ^ right).count("1")
+
+
+def _slide_filter_warning(filtered_slides: Dict[int, Dict]) -> Optional[str]:
+    if not filtered_slides:
+        return None
+    blank_count = sum(1 for item in filtered_slides.values() if item.get("status") == "blank")
+    duplicate_count = sum(1 for item in filtered_slides.values() if item.get("status") == "build_precursor")
+    parts = []
+    if blank_count:
+        parts.append(f"{blank_count} blank/transition")
+    if duplicate_count:
+        parts.append(f"{duplicate_count} near-duplicate build frame")
+    detail = ", ".join(parts) if parts else f"{len(filtered_slides)} filtered"
+    return f"Slide pre-filter skipped {detail} before Gemini."
+
+
+def _backfill_filtered_slide_analysis(
+    request: AnalyzeLectureRequest,
+    analyzed_items: List[Dict],
+    filtered_slides: Dict[int, Dict],
+) -> List[Dict]:
+    if not filtered_slides:
+        return analyzed_items
+
+    by_id = {}
+    for item in analyzed_items:
+        slide_id = _coerce_int(item.get("slide_id"))
+        if slide_id is not None:
+            by_id[slide_id] = item
+
+    fallback = {item["slide_id"]: item for item in _fallback_slide_analysis(request, request.slides)}
+    ordered = []
+    for index, slide in enumerate(request.slides, start=1):
+        slide_id = _slide_id(slide, fallback=index)
+        if slide_id in by_id:
+            ordered.append(by_id[slide_id])
+            continue
+
+        filter_info = filtered_slides.get(slide_id)
+        if not filter_info:
+            if slide_id in fallback:
+                ordered.append(fallback[slide_id])
+            continue
+
+        if filter_info.get("status") == "build_precursor":
+            ordered.append(
+                _build_precursor_slide_analysis(
+                    slide_id,
+                    int(filter_info.get("parent_slide_id") or slide_id),
+                    by_id,
+                    fallback,
+                )
+            )
+        else:
+            ordered.append(_blank_slide_analysis(slide_id, fallback))
+    return ordered
+
+
+def _build_precursor_slide_analysis(
+    slide_id: int,
+    parent_slide_id: int,
+    analyzed_by_id: Dict[int, Dict],
+    fallback_by_id: Dict[int, Dict],
+) -> Dict:
+    fallback_item = fallback_by_id[slide_id]
+    parent_item = analyzed_by_id.get(parent_slide_id) or fallback_by_id.get(parent_slide_id) or fallback_item
+    parent_summary = str(parent_item.get("summary") or "").strip()
+    summary = f"Build precursor merged into slide {parent_slide_id} before Gemini analysis."
+    if parent_summary:
+        summary = f"{summary} {parent_summary}"
+    tags = _dedupe_tags(list(parent_item.get("tags") or fallback_item["tags"]) + ["filtered", "build-precursor"])
+    return {
+        "slide_id": slide_id,
+        "descriptive_filename": fallback_item["descriptive_filename"],
+        "caption": parent_item.get("caption"),
+        "summary": summary,
+        "tags": tags,
+        "instructor_commentary": str(parent_item.get("instructor_commentary") or fallback_item["instructor_commentary"]),
+    }
+
+
+def _blank_slide_analysis(slide_id: int, fallback_by_id: Dict[int, Dict]) -> Dict:
+    fallback_item = fallback_by_id[slide_id]
+    tags = _dedupe_tags(list(fallback_item["tags"]) + ["filtered", "blank"])
+    return {
+        "slide_id": slide_id,
+        "descriptive_filename": fallback_item["descriptive_filename"],
+        "caption": None,
+        "summary": "Blank or transition slide filtered before Gemini.",
+        "tags": tags,
+        "instructor_commentary": "",
+    }
+
+
+def _dedupe_tags(tags: List[str]) -> List[str]:
+    result = []
+    seen = set()
+    for tag in tags:
+        clean = str(tag or "").strip()
+        if clean and clean not in seen:
+            seen.add(clean)
+            result.append(clean)
+    return result
 
 
 def _overview_prompt(request: AnalyzeLectureRequest) -> str:
@@ -544,6 +1061,7 @@ def _resources_prompt(request: AnalyzeLectureRequest, overview: Dict) -> str:
 Use Google Search grounding to find 3-4 high-quality external resources relevant to this lecture.
 
 Return JSON only. Do not include markdown fences.
+Keep every JSON string on one line. Do not put raw line breaks inside string values.
 
 Expected JSON keys:
 - resources
@@ -561,6 +1079,52 @@ Only include URLs confirmed by grounding. Do not invent or guess URLs.
 Lecture id: {request.lecture_id}
 Lecture title: {overview.get("title") or request.lecture_id}
 Lecture summary: {overview.get("executive_summary") or _fallback_summary(request.transcript_text)}
+""".strip()
+
+
+def _resources_retry_prompt(request: AnalyzeLectureRequest, overview: Dict, previous_payload: Dict) -> str:
+    complete_count = _complete_resource_count(previous_payload)
+    return f"""
+Use Google Search grounding to find 3-4 complete, high-quality external resources relevant to this lecture.
+
+The previous resource attempt returned only {complete_count} complete item(s). Search again and return only complete entries.
+
+Return JSON only. Do not include markdown fences.
+Keep every JSON string on one line. Do not put raw line breaks inside string values.
+
+Each resource must include a non-empty:
+- title
+- url
+- summary
+- source_quality ("high" or "medium")
+
+Only include URLs confirmed by grounding. Do not invent or guess URLs.
+Prefer peer-reviewed papers, WEF/McKinsey/industry reports, or reputable educational sources.
+
+Lecture id: {request.lecture_id}
+Lecture title: {overview.get("title") or request.lecture_id}
+Lecture summary: {overview.get("executive_summary") or _fallback_summary(request.transcript_text)}
+
+Previous resource payload:
+{json.dumps(previous_payload, sort_keys=True)}
+""".strip()
+
+
+def _json_repair_prompt(malformed_text: str, response_schema: Dict, *, context: str) -> str:
+    return f"""
+Convert the following {context} response into valid JSON that matches the schema.
+
+Rules:
+- Preserve all factual content, URLs, slide IDs, and transcript text from the original response.
+- Do not add new facts.
+- Do not include markdown fences.
+- Return JSON only.
+
+Schema:
+{json.dumps(response_schema, sort_keys=True)}
+
+Malformed response:
+{malformed_text}
 """.strip()
 
 
@@ -734,6 +1298,51 @@ def _normalize_slide_analysis(items: List[Dict], request: AnalyzeLectureRequest,
     return normalized
 
 
+def _normalize_resources_payload(payload: Dict) -> Dict:
+    resources = []
+    warnings = list(payload.get("warnings") or [])
+    seen_urls = set()
+    incomplete_count = 0
+
+    for item in payload.get("resources") or []:
+        normalized = _normalize_resource_item(item)
+        if not normalized:
+            incomplete_count += 1
+            continue
+        url_key = normalized["url"].strip().lower()
+        if url_key in seen_urls:
+            continue
+        seen_urls.add(url_key)
+        resources.append(normalized)
+
+    if incomplete_count:
+        warnings.append(f"{incomplete_count} incomplete resource item(s) were discarded.")
+    return {"resources": resources[:MAX_RESOURCE_COUNT], "warnings": warnings}
+
+
+def _normalize_resource_item(item: Dict) -> Optional[Dict]:
+    title = str(item.get("title") or "").strip()
+    url = str(item.get("url") or "").strip()
+    summary = str(item.get("summary") or "").strip()
+    quality = str(item.get("source_quality") or "").strip().lower()
+    if not title or not url or not summary:
+        return None
+    if not (url.startswith("http://") or url.startswith("https://")):
+        return None
+    if quality not in {"high", "medium"}:
+        quality = "medium"
+    return {
+        "title": title,
+        "url": url,
+        "summary": summary,
+        "source_quality": quality,
+    }
+
+
+def _complete_resource_count(payload: Dict) -> int:
+    return len(payload.get("resources") or [])
+
+
 def _slide_id(slide: Dict, *, fallback: int) -> int:
     return _coerce_int(slide.get("id")) or fallback
 
@@ -759,6 +1368,99 @@ def _dedupe_warnings(warnings: List[str]) -> List[str]:
     return result
 
 
+def _overview_response_schema() -> Dict:
+    return {
+        "type": "object",
+        "properties": {
+            "title": {"type": "string"},
+            "executive_summary": {"type": "string"},
+            "outline": {"type": "array", "items": _outline_item_schema()},
+            "warnings": {"type": "array", "items": {"type": "string"}},
+        },
+        "required": ["title", "executive_summary", "outline", "warnings"],
+    }
+
+
+def _transcript_chunk_response_schema() -> Dict:
+    return {
+        "type": "object",
+        "properties": {
+            "formatted_transcript": {"type": "string"},
+            "warnings": {"type": "array", "items": {"type": "string"}},
+        },
+        "required": ["formatted_transcript", "warnings"],
+    }
+
+
+def _slide_batch_response_schema() -> Dict:
+    return {
+        "type": "object",
+        "properties": {
+            "slide_analysis": {"type": "array", "items": _slide_analysis_item_schema()},
+            "warnings": {"type": "array", "items": {"type": "string"}},
+        },
+        "required": ["slide_analysis", "warnings"],
+    }
+
+
+def _outline_item_schema() -> Dict:
+    return {
+        "type": "object",
+        "properties": {
+            "id": {"type": "integer"},
+            "heading": {"type": "string"},
+            "slide_ids": {"type": "array", "items": {"type": "integer"}},
+        },
+        "required": ["id", "heading", "slide_ids"],
+    }
+
+
+def _slide_analysis_item_schema() -> Dict:
+    return {
+        "type": "object",
+        "properties": {
+            "slide_id": {"type": "integer"},
+            "descriptive_filename": {"type": "string", "nullable": True},
+            "caption": {"type": "string", "nullable": True},
+            "summary": {"type": "string"},
+            "tags": {"type": "array", "items": {"type": "string"}},
+            "instructor_commentary": {"type": "string"},
+        },
+        "required": [
+            "slide_id",
+            "descriptive_filename",
+            "caption",
+            "summary",
+            "tags",
+            "instructor_commentary",
+        ],
+    }
+
+
+def _resource_item_schema() -> Dict:
+    return {
+        "type": "object",
+        "properties": {
+            "title": {"type": "string"},
+            "url": {"type": "string"},
+            "summary": {"type": "string"},
+            "source_quality": {"type": "string", "enum": ["high", "medium"]},
+        },
+        "required": ["title", "url", "summary", "source_quality"],
+    }
+
+
+def _resources_response_schema() -> Dict:
+    return {
+        "type": "object",
+        "properties": {
+            "resources": {"type": "array", "items": _resource_item_schema()},
+            "warnings": {"type": "array", "items": {"type": "string"}},
+        },
+        "required": ["resources", "warnings"],
+    }
+
+
 def _response_schema() -> Dict:
     return {
         "type": "object",
@@ -766,53 +1468,9 @@ def _response_schema() -> Dict:
             "title": {"type": "string"},
             "executive_summary": {"type": "string"},
             "formatted_transcript": {"type": "string"},
-            "outline": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "id": {"type": "integer"},
-                        "heading": {"type": "string"},
-                        "slide_ids": {"type": "array", "items": {"type": "integer"}},
-                    },
-                    "required": ["id", "heading", "slide_ids"],
-                },
-            },
-            "slide_analysis": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "slide_id": {"type": "integer"},
-                        "descriptive_filename": {"type": ["string", "null"]},
-                        "caption": {"type": ["string", "null"]},
-                        "summary": {"type": "string"},
-                        "tags": {"type": "array", "items": {"type": "string"}},
-                        "instructor_commentary": {"type": "string"},
-                    },
-                    "required": [
-                        "slide_id",
-                        "descriptive_filename",
-                        "caption",
-                        "summary",
-                        "tags",
-                        "instructor_commentary",
-                    ],
-                },
-            },
-            "resources": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "title": {"type": "string"},
-                        "url": {"type": "string"},
-                        "summary": {"type": "string"},
-                        "source_quality": {"type": "string", "enum": ["high", "medium"]},
-                    },
-                    "required": ["title", "url", "summary", "source_quality"],
-                },
-            },
+            "outline": {"type": "array", "items": _outline_item_schema()},
+            "slide_analysis": {"type": "array", "items": _slide_analysis_item_schema()},
+            "resources": {"type": "array", "items": _resource_item_schema()},
             "warnings": {"type": "array", "items": {"type": "string"}},
         },
         "required": [
@@ -888,6 +1546,97 @@ def _add_usage(usage: Dict[str, int], response) -> None:
     usage["output"] += int(getattr(metadata, "candidates_token_count", 0) or 0)
 
 
+class _UsageTotals:
+    def __init__(self, prompt_token_count: int, candidates_token_count: int) -> None:
+        self.prompt_token_count = prompt_token_count
+        self.candidates_token_count = candidates_token_count
+
+
+class _CombinedResponse:
+    def __init__(self, responses: List[object]) -> None:
+        prompt_tokens = 0
+        candidate_tokens = 0
+        for response in responses:
+            metadata = getattr(response, "usage_metadata", None)
+            prompt_tokens += int(getattr(metadata, "prompt_token_count", 0) or 0) if metadata else 0
+            candidate_tokens += int(getattr(metadata, "candidates_token_count", 0) or 0) if metadata else 0
+        self.usage_metadata = _UsageTotals(prompt_tokens, candidate_tokens)
+
+
+def _combined_response(*responses) -> object:
+    valid = [response for response in responses if response is not None]
+    if not valid:
+        return None
+    if len(valid) == 1:
+        return valid[0]
+    return _CombinedResponse(valid)
+
+
+def _generate_content_with_retry(models, **kwargs):
+    last_error: Optional[Exception] = None
+    for attempt in range(1, MAX_RETRY_ATTEMPTS + 1):
+        try:
+            return models.generate_content(**kwargs)
+        except Exception as exc:
+            mapped = _map_gemini_error(exc)
+            if not isinstance(mapped, ProviderTransientError) or attempt >= MAX_RETRY_ATTEMPTS:
+                raise mapped from exc
+            last_error = mapped
+            time.sleep(_retry_delay_seconds(exc, attempt))
+    if last_error:
+        raise last_error
+    raise ProviderTransientError("Gemini request failed before a response was returned.")
+
+
+def _retry_delay_seconds(exc: Exception, attempt: int) -> float:
+    retry_after = _retry_after_seconds(exc)
+    if retry_after is not None:
+        return max(0.0, min(60.0, retry_after))
+    base = min(30.0, 2.0 ** max(0, attempt - 1))
+    return base + random.uniform(0.0, 0.25)
+
+
+def _retry_after_seconds(exc: Exception) -> Optional[float]:
+    headers = _exception_headers(exc)
+    if not headers:
+        return None
+    value = None
+    for key in ("retry-after", "Retry-After"):
+        try:
+            value = headers.get(key)
+        except AttributeError:
+            value = headers.get(key) if isinstance(headers, dict) else None
+        if value:
+            break
+    if not value:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        pass
+    try:
+        retry_at = parsedate_to_datetime(str(value))
+    except (TypeError, ValueError, IndexError, OverflowError):
+        return None
+    return max(0.0, retry_at.timestamp() - time.time())
+
+
+def _exception_headers(exc: Exception):
+    response = getattr(exc, "response", None)
+    headers = getattr(response, "headers", None)
+    if headers:
+        return headers
+    return getattr(exc, "headers", None)
+
+
+def _bounded_concurrency(value: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = DEFAULT_MAX_CONCURRENCY
+    return max(1, min(12, parsed))
+
+
 def _response_text(response) -> str:
     try:
         return str(getattr(response, "text", "") or "").strip()
@@ -955,11 +1704,16 @@ def _json_from_response_text(text: str) -> Dict:
     end = cleaned.rfind("}")
     if start != -1 and end != -1 and end > start:
         candidates.append(cleaned[start : end + 1])
+    candidates.extend(_json_repair_candidates(candidates))
 
     last_error = None
+    seen = set()
     for candidate in candidates:
         if not candidate:
             continue
+        if candidate in seen:
+            continue
+        seen.add(candidate)
         try:
             payload = json.loads(candidate)
         except json.JSONDecodeError as exc:
@@ -969,6 +1723,52 @@ def _json_from_response_text(text: str) -> Dict:
             raise ProviderResponseError("Gemini JSON response must be an object.")
         return payload
     raise ProviderResponseError(f"Gemini returned invalid JSON: {last_error}")
+
+
+def _json_payload_from_response(response, text: str) -> Dict:
+    parsed = getattr(response, "parsed", None)
+    if isinstance(parsed, dict):
+        return parsed
+    return _json_from_response_text(text)
+
+
+def _json_repair_candidates(candidates: List[str]) -> List[str]:
+    repaired = []
+    for candidate in candidates:
+        if not candidate:
+            continue
+        control_fixed = _replace_raw_control_chars_in_strings(candidate)
+        trailing_fixed = _remove_trailing_json_commas(control_fixed)
+        repaired.extend([control_fixed, trailing_fixed])
+    return repaired
+
+
+def _replace_raw_control_chars_in_strings(text: str) -> str:
+    result = []
+    in_string = False
+    escaped = False
+    for character in text:
+        if escaped:
+            result.append(character)
+            escaped = False
+            continue
+        if character == "\\" and in_string:
+            result.append(character)
+            escaped = True
+            continue
+        if character == '"':
+            result.append(character)
+            in_string = not in_string
+            continue
+        if in_string and ord(character) < 32:
+            result.append(" ")
+            continue
+        result.append(character)
+    return "".join(result)
+
+
+def _remove_trailing_json_commas(text: str) -> str:
+    return re.sub(r",\s*([}\]])", r"\1", text)
 
 
 def _map_gemini_error(exc: Exception) -> Exception:

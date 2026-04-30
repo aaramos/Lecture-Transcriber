@@ -13,7 +13,7 @@ The app does **not** send the whole job to Gemini as one giant request in the no
 3. Analyze slides in small batches.
 4. Find external resources with Google Search grounding.
 
-Each completed Gemini chunk is cached in `.enrichment_partial.json`, so if a run fails or is retried, already-completed chunks can be reused instead of spending the same API calls again.
+After the overview call, Gemini transcript chunks, slide batches, and resource lookup run in parallel with a bounded concurrency limit. Each completed Gemini chunk is cached in `.enrichment_partial.json`, so if a run fails or is retried, already-completed chunks can be reused instead of spending the same API calls again.
 
 ## Source Data Used
 
@@ -22,8 +22,8 @@ Each completed Gemini chunk is cached in `.enrichment_partial.json`, so if a run
 | `lecture_id` | `lecture.json` | Stable lecture identifier, usually the output folder name. |
 | Transcript text | `lecture.json.transcript.text` | Full transcript for overview and fallback context. |
 | Transcript segments | `lecture.json.transcript.segments` | Segment IDs, start/end timestamps, and text. Used for chunking and slide context. |
-| Slides | `lecture.json.slides` | Slide IDs, filenames, timestamps, image paths, and linked segment IDs. |
-| Slide images | `slides/*.png` under the lecture folder | Uploaded only during slide-batch calls, five slides at a time. |
+| Slides | `lecture.json.slides` | Slide IDs, filenames, timestamps, image paths, linked segment IDs, and local `filter_status` after enrichment. |
+| Slide images | `slides/*.png` under the lecture folder | Blank frames and near-duplicate build frames are filtered locally first. Remaining slides are uploaded during slide-batch calls, ten slides at a time. |
 | Duration | `lecture.json.media.duration_seconds` | Sent as minutes in overview/manual prompts. |
 | Model | App setting, default `gemini-2.5-flash` | Used for all Gemini calls in a run. |
 
@@ -33,8 +33,8 @@ Each completed Gemini chunk is cached in `.enrichment_partial.json`, so if a run
 |---|---:|---:|---|---|---|---|
 | 0 | Connection test | Optional, settings/test only | Text: `Reply with OK.` | No tools, no images, max output 4 tokens | Any short OK-style response | Confirm the saved API key and selected model work. |
 | 1 | Overview | 1 per lecture | Lecture ID, duration, full transcript, slide IDs, timestamps, linked segment IDs | No Google Search, no images | `title`, `executive_summary`, `outline`, `warnings` | Build the top-level study structure before chunk-specific work. |
-| 2 | Transcript chunk | 1 to N per lecture | One transcript chunk, built from timestamped segments. Max chunk target is 12,000 chars. | No Google Search, no images | `formatted_transcript`, `warnings` | Lightly clean the transcript while preserving the instructor's meaning. |
-| 3 | Slide batch | 0 to N per lecture, 5 slides per batch | Slide IDs, filenames, timestamps, overview title/summary, nearby transcript for each slide, slide images when available | Images included on first attempt; no Google Search | `slide_analysis`, `warnings` | Produce slide captions, summaries, tags, and instructor commentary. |
+| 2 | Transcript chunk | 1 to N per lecture, parallel after Overview | One transcript chunk, built from timestamped segments. Max chunk target is 6,000 chars. | No Google Search, no images | `formatted_transcript`, `warnings` | Lightly clean the transcript while preserving the instructor's meaning. |
+| 3 | Slide batch | 0 to N per lecture, 10 slides per batch, parallel after Overview | Slide IDs, filenames, timestamps, overview title/summary, nearby transcript for each slide, downscaled WebP slide images when available. Blank frames and near-duplicate build frames are skipped before upload and backfilled locally. | Images included on first attempt; no Google Search | `slide_analysis`, `warnings` | Produce slide captions, summaries, tags, and instructor commentary. |
 | 4 | Resources | 1 per lecture | Lecture ID, overview title, overview summary, transcript fallback summary | Google Search grounding enabled, no images | `resources`, `warnings` | Find 3-4 grounded external resources with real URLs. |
 | 5 | Final assembly | No Gemini call | Cached outputs from the steps above | None | App writes `lecture.json.enrichment` | Merge Gemini outputs into the final lecture artifact and render HTML. |
 
@@ -42,12 +42,15 @@ Each completed Gemini chunk is cached in `.enrichment_partial.json`, so if a run
 
 | Behavior | What happens |
 |---|---|
-| Progress events | After each chunk completes, the backend emits `enrichment_progress` with completed step count and cumulative token counts. |
+| Progress events | After each chunk completes, the backend emits `enrichment_progress` with completed step count and cumulative token counts. Parallel chunks report in completion order, not submission order. |
 | Token counts | The app totals Gemini `prompt_token_count` as tokens in and `candidates_token_count` as tokens out. |
 | Cache file | `.enrichment_partial.json` stores completed overview, transcript chunks, slide batches, resources, model, lecture ID, and warnings. |
-| Retry behavior | If the cache matches the lecture ID and model, completed chunks are reused. Missing chunks are submitted to Gemini. |
-| JSON parsing | Gemini is instructed to return JSON only. The app accepts plain JSON, fenced JSON, or text containing one JSON object. |
+| Retry behavior | If the cache matches the lecture ID and model, completed chunks are reused. Missing chunks are submitted to Gemini. Transient Gemini errors are retried with exponential backoff, respecting `Retry-After` when Gemini provides it. |
+| JSON reliability | Overview, Transcript, and Slide calls use Gemini's structured JSON response mode. The Resources call stays on text JSON parsing because Google Search grounding has rejected forced JSON mode in this SDK path. |
+| JSON parsing | The app accepts plain JSON, fenced JSON, or text containing one JSON object. It also repairs common Gemini formatting slips such as raw line breaks inside JSON strings and trailing commas. |
 | Google Search | Only the Resources step uses Google Search grounding. Other steps do not. |
+| Resource quality | Resource entries missing title, URL, summary, or source quality are discarded. If fewer than 3 complete resources remain, the app makes one grounded retry before saving the result. |
+| Slide pre-filter | Before slide-batch calls, the app uses local image checks to skip blank/uniform frames and merge near-duplicate build frames into the last frame in the run. Filtered slides are still represented in final `slide_analysis`; they are just not sent to Gemini. Each slide record gets `filter_status` so the decision is visible in `lecture.json`. |
 | Image fallback | Slide-batch calls first try with images. If the response is empty or unusable, the app retries without images using the same prompt. |
 | Failure fallback | Some response failures fall back to local transcript/slide-derived content with warnings, so one bad chunk does not always fail the whole lecture. |
 
@@ -121,7 +124,7 @@ Data sent:
 |---|---|
 | `lecture_id` | Output folder / lecture ID. |
 | `chunk_index` / `chunk_total` | Position of this transcript chunk. |
-| `chunk_text` | Transcript segment lines in the form `[id] start-end: text`, grouped up to about 12,000 characters. |
+| `chunk_text` | Transcript segment lines in the form `[id] start-end: text`, grouped up to about 6,000 characters. |
 
 Expected JSON:
 
@@ -168,8 +171,8 @@ Data sent:
 |---|---|
 | `overview.title` | Title from the Overview step. |
 | `overview.executive_summary` | Summary from the Overview step. |
-| `slides` | Five slides per batch by default. |
-| `slide image bytes` | PNG/JPEG/WebP image bytes when available. |
+| `slides` | Ten content-bearing slides per batch by default. Blank frames and near-duplicate build precursors are filtered locally before the batch is sent. |
+| `slide image bytes` | Cached WebP bytes when Pillow can read the slide image; otherwise the original PNG/JPEG/WebP bytes. WebP uploads target about 1024px on the long edge at quality 80. |
 | `nearby transcript` | Text from linked transcript segments; if none, text within about 90 seconds of the slide timestamp, capped around 2,200 characters per slide. |
 
 Expected JSON:
@@ -260,6 +263,7 @@ Prompt:
 Use Google Search grounding to find 3-4 high-quality external resources relevant to this lecture.
 
 Return JSON only. Do not include markdown fences.
+Keep every JSON string on one line. Do not put raw line breaks inside string values.
 
 Expected JSON keys:
 - resources
@@ -321,9 +325,9 @@ The manual prompt includes the same transcript-editing, slide-caption, and exter
 
 | Product question | Current answer |
 |---|---|
-| Why can Gemini take a long time? | A lecture may trigger many calls: one overview, several transcript chunks, one call per five slides, and one resources call. A lecture with 300 slides can generate many slide-batch calls. |
-| Why do token counts update during Gemini? | Each completed chunk emits cumulative token counts. |
+| Why can Gemini take a long time? | A lecture may trigger many calls: one overview, several transcript chunks, one call per ten slides, and one resources call. Post-overview work runs in parallel, but very large decks can still generate many slide-batch calls. |
+| Why do token counts update during Gemini? | Each completed chunk emits cumulative token counts. Because calls run in parallel, updates may arrive from transcript, slide, or resource work in whichever order finishes first. |
 | Why do re-runs sometimes skip work? | Completed chunks are cached in `.enrichment_partial.json` and reused when lecture ID and model match. |
 | Which call uses the internet/search? | Only the Resources call uses Google Search grounding. |
-| Are slide images sent? | Yes, only for slide-batch calls, five slides at a time by default. |
+| Are slide images sent? | Yes, only for slide-batch calls, ten content-bearing slides at a time by default. Blank frames and near-duplicate build frames are filtered locally first. |
 | Are videos or audio sent? | No. Gemini receives text artifacts and slide images, not the source video/audio. |

@@ -60,6 +60,7 @@ const DEFAULT_SETTINGS = Object.freeze({
   aiModel: "gemini-2.5-flash",
   enhanceWithGemini: false,
   concurrentFiles: 2,
+  geminiMaxConcurrency: 6,
   saveNormalized: true,
 });
 const PROFILE_ORDER = ["quality", "fast", "turbo"];
@@ -171,6 +172,7 @@ const elements = {
   saveGeminiKeyButton: document.querySelector("#saveGeminiKeyButton"),
   geminiKeyStatus: document.querySelector("#geminiKeyStatus"),
   concurrentFiles: document.querySelector("#concurrentFiles"),
+  geminiMaxConcurrency: document.querySelector("#geminiMaxConcurrency"),
   saveNormalized: document.querySelector("#saveNormalized"),
   restoreDefaultsButton: document.querySelector("#restoreDefaultsButton"),
   speedSegments: [...document.querySelectorAll(".segment")],
@@ -230,6 +232,10 @@ elements.confirmCheckbox.addEventListener("change", () => {
   elements.confirmContinue.disabled = !elements.confirmCheckbox.checked;
 });
 elements.concurrentFiles.addEventListener("input", () => {
+  validateSettings({ showDialogOnError: false });
+  saveCurrentSettings();
+});
+elements.geminiMaxConcurrency.addEventListener("input", () => {
   validateSettings({ showDialogOnError: false });
   saveCurrentSettings();
 });
@@ -367,6 +373,7 @@ async function startBatch() {
   await refreshGeminiKeyStatus();
   const finalConcurrentFiles = validateSettings();
   if (!finalConcurrentFiles) return;
+  const finalGeminiConcurrency = validGeminiConcurrency(elements.geminiMaxConcurrency.value);
 
   resetResults();
   setRunning(true);
@@ -387,6 +394,7 @@ async function startBatch() {
     slideSensitivity: elements.slideSensitivity.value,
     aiProvider: needsGemini() ? "gemini" : "none",
     aiModel: elements.aiModel.value,
+    geminiMaxConcurrency: finalGeminiConcurrency,
     minDuration: 60,
     skippedFiles: manualSkippedFiles(),
   };
@@ -1013,6 +1021,17 @@ function validateSettings(options = {}) {
     elements.runMeta.textContent = "Concurrent files must be between 1 and 3.";
     return null;
   }
+  const geminiValue = Number.parseInt(elements.geminiMaxConcurrency.value, 10);
+  const geminiValid = Number.isInteger(geminiValue) && geminiValue >= 1 && geminiValue <= 12;
+  elements.geminiMaxConcurrency.classList.toggle("invalid", !geminiValid);
+  if (!geminiValid) {
+    if (showDialogOnError) {
+      showDialog(elements.settingsDialog);
+    }
+    elements.geminiMaxConcurrency.focus();
+    elements.runMeta.textContent = "Gemini concurrency must be between 1 and 12.";
+    return null;
+  }
   const selectedProfile = currentProfileStatus();
   if (selectedProfile && selectedProfile.available === false) {
     if (showDialogOnError) {
@@ -1622,6 +1641,7 @@ function applySettings(settings) {
   state.enhanceWithGeminiPreference = Boolean(settings.enhanceWithGemini);
   elements.enhanceWithGemini.checked = state.enhanceWithGeminiPreference;
   elements.concurrentFiles.value = String(validConcurrentFiles(settings.concurrentFiles));
+  elements.geminiMaxConcurrency.value = String(validGeminiConcurrency(settings.geminiMaxConcurrency));
   elements.saveNormalized.checked = Boolean(settings.saveNormalized);
   syncSpeedSegments();
   renderTranscriptionProfileOptions();
@@ -1651,6 +1671,8 @@ function legacyProfileFromSettings(settings) {
 function saveCurrentSettings() {
   const concurrentFiles = Number.parseInt(elements.concurrentFiles.value, 10);
   if (!Number.isInteger(concurrentFiles) || concurrentFiles < 1 || concurrentFiles > 3) return;
+  const geminiMaxConcurrency = Number.parseInt(elements.geminiMaxConcurrency.value, 10);
+  if (!Number.isInteger(geminiMaxConcurrency) || geminiMaxConcurrency < 1 || geminiMaxConcurrency > 12) return;
 
   const settings = {
     recordingSpeed: state.recordingSpeed,
@@ -1660,6 +1682,7 @@ function saveCurrentSettings() {
     enhanceWithGemini: state.folderMode === "processed" ? state.enhanceWithGeminiPreference : elements.enhanceWithGemini.checked,
     aiModel: elements.aiModel.value,
     concurrentFiles,
+    geminiMaxConcurrency,
     saveNormalized: elements.saveNormalized.checked,
   };
 
@@ -1797,6 +1820,11 @@ function setSelectValue(select, value, fallback) {
 function validConcurrentFiles(value) {
   const parsed = Number.parseInt(value, 10);
   return Number.isInteger(parsed) && parsed >= 1 && parsed <= 3 ? parsed : DEFAULT_SETTINGS.concurrentFiles;
+}
+
+function validGeminiConcurrency(value) {
+  const parsed = Number.parseInt(value, 10);
+  return Number.isInteger(parsed) && parsed >= 1 && parsed <= 12 ? parsed : DEFAULT_SETTINGS.geminiMaxConcurrency;
 }
 
 function renderNormalizationWarning() {

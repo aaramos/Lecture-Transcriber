@@ -96,6 +96,8 @@ struct ProcessRequest {
     slide_sensitivity: String,
     ai_provider: String,
     ai_model: String,
+    #[serde(default = "default_gemini_max_concurrency")]
+    gemini_max_concurrency: u8,
     min_duration: f64,
     skipped_files: Vec<String>,
 }
@@ -206,6 +208,10 @@ fn default_transcription_profile() -> String {
 
 fn default_whisper_model() -> String {
     "medium.en".to_string()
+}
+
+fn default_gemini_max_concurrency() -> u8 {
+    6
 }
 
 #[tauri::command]
@@ -998,6 +1004,9 @@ fn run_process_batch(
     if request.concurrent_files == 0 || request.concurrent_files > 3 {
         return Err("Concurrent files must be between 1 and 3.".to_string());
     }
+    if request.gemini_max_concurrency == 0 || request.gemini_max_concurrency > 12 {
+        return Err("Gemini concurrency must be between 1 and 12.".to_string());
+    }
     if !enhance_mode && request.output_dir.trim().is_empty() {
         return Err("Choose an output folder before starting.".to_string());
     }
@@ -1036,6 +1045,8 @@ fn run_process_batch(
             request.ai_model.clone(),
             "--concurrent".to_string(),
             request.concurrent_files.to_string(),
+            "--gemini-max-concurrency".to_string(),
+            request.gemini_max_concurrency.to_string(),
         ]
     } else {
         let control_file = Path::new(&request.output_dir).join(CONTROL_FILE);
@@ -1068,6 +1079,8 @@ fn run_process_batch(
             request.ai_provider.clone(),
             "--ai-model".to_string(),
             request.ai_model.clone(),
+            "--gemini-max-concurrency".to_string(),
+            request.gemini_max_concurrency.to_string(),
             "--min-duration".to_string(),
             request.min_duration.to_string(),
             "--control-file".to_string(),
