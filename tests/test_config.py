@@ -66,6 +66,9 @@ class BatchConfigTests(unittest.TestCase):
             self.assertIs(config.transcription_quality, TranscriptionQuality.ACCURATE)
             self.assertEqual(config.whisper_model, "medium.en")
             self.assertEqual(config.gemini_max_concurrency, 6)
+            self.assertEqual(config.mlx_text_base_url, "http://localhost:8001/v1")
+            self.assertEqual(config.mlx_vision_base_url, "http://localhost:8000/v1")
+            self.assertEqual(config.mlx_request_timeout_seconds, 120)
             self.assertEqual(
                 config.ai_model_routing,
                 {
@@ -83,14 +86,15 @@ class BatchConfigTests(unittest.TestCase):
                 input_dir=folder,
                 output_dir=folder / "out",
                 ai_provider=AIProviderName.GEMINI,
-                ai_transcript_provider=AIModelProvider.LOCAL_STUB,
+                ai_transcript_provider=AIModelProvider.MLX_TEXT,
                 ai_resources_provider=AIModelProvider.OFF,
             )
             config.validate()
 
             self.assertTrue(config.ai_uses_gemini)
-            self.assertTrue(config.ai_uses_local_stub)
-            self.assertEqual(config.ai_step_model("transcript"), "local-stub-v0")
+            self.assertFalse(config.ai_uses_local_stub)
+            self.assertTrue(config.ai_uses_mlx)
+            self.assertEqual(config.ai_step_model("transcript"), "default")
             self.assertEqual(config.ai_step_model("resources"), "off")
 
 

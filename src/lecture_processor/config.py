@@ -1,4 +1,5 @@
-from dataclasses import dataclass
+import os
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Optional, Tuple
@@ -63,6 +64,8 @@ class AIProviderName(str, Enum):
 
 class AIModelProvider(str, Enum):
     GEMINI = "gemini"
+    MLX_TEXT = "mlx-text"
+    MLX_VISION = "mlx-vision"
     LOCAL_STUB = "local-stub"
     OFF = "off"
 
@@ -101,6 +104,13 @@ class BatchConfig:
     ai_slides_model: str = ""
     ai_resources_provider: AIModelProvider = AIModelProvider.GEMINI
     ai_resources_model: str = ""
+    mlx_text_base_url: str = field(
+        default_factory=lambda: os.environ.get("MLX_TEXT_SERVER_URL", "http://localhost:8001/v1")
+    )
+    mlx_vision_base_url: str = field(
+        default_factory=lambda: os.environ.get("MLX_VISION_SERVER_URL", "http://localhost:8000/v1")
+    )
+    mlx_request_timeout_seconds: int = 120
     gemini_max_concurrency: int = 6
     render_html: bool = True
     skip_files: Tuple[str, ...] = ()
@@ -117,6 +127,8 @@ class BatchConfig:
             raise LectureProcessorError("--min-duration must be zero or greater")
         if self.gemini_max_concurrency < 1 or self.gemini_max_concurrency > 12:
             raise LectureProcessorError("--gemini-max-concurrency must be between 1 and 12")
+        if self.mlx_request_timeout_seconds < 10 or self.mlx_request_timeout_seconds > 600:
+            raise LectureProcessorError("--mlx-timeout must be between 10 and 600 seconds")
         try:
             object.__setattr__(self, "transcription_profile", normalize_profile_id(self.transcription_profile))
         except ValueError as exc:
@@ -144,6 +156,8 @@ class BatchConfig:
             return explicit
         if provider is AIModelProvider.GEMINI:
             return self.ai_model or "gemini-2.5-flash"
+        if provider in (AIModelProvider.MLX_TEXT, AIModelProvider.MLX_VISION):
+            return "default"
         if provider is AIModelProvider.LOCAL_STUB:
             return "local-stub-v0"
         return "off"
@@ -161,6 +175,13 @@ class BatchConfig:
     def ai_uses_local_stub(self) -> bool:
         return any(
             self.ai_step_provider(step) is AIModelProvider.LOCAL_STUB
+            for step in ("overview", "transcript", "slides", "resources")
+        )
+
+    @property
+    def ai_uses_mlx(self) -> bool:
+        return any(
+            self.ai_step_provider(step) in (AIModelProvider.MLX_TEXT, AIModelProvider.MLX_VISION)
             for step in ("overview", "transcript", "slides", "resources")
         )
 

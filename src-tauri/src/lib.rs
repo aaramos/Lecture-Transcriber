@@ -118,6 +118,12 @@ struct ProcessRequest {
     ai_resources_model: String,
     #[serde(default = "default_gemini_max_concurrency")]
     gemini_max_concurrency: u8,
+    #[serde(default = "default_mlx_text_url")]
+    mlx_text_url: String,
+    #[serde(default = "default_mlx_vision_url")]
+    mlx_vision_url: String,
+    #[serde(default = "default_mlx_timeout")]
+    mlx_timeout: u16,
     min_duration: f64,
     skipped_files: Vec<String>,
 }
@@ -236,6 +242,18 @@ fn default_gemini_max_concurrency() -> u8 {
 
 fn default_ai_route_provider() -> String {
     "gemini".to_string()
+}
+
+fn default_mlx_text_url() -> String {
+    "http://localhost:8001/v1".to_string()
+}
+
+fn default_mlx_vision_url() -> String {
+    "http://localhost:8000/v1".to_string()
+}
+
+fn default_mlx_timeout() -> u16 {
+    120
 }
 
 fn default_audio_enhancement() -> String {
@@ -1041,11 +1059,22 @@ fn run_process_batch(
         &request.ai_slides_provider,
         &request.ai_resources_provider,
     ] {
-        if !matches!(provider.as_str(), "gemini" | "local-stub" | "off") {
-            return Err("Model route providers must be Gemini, Local Stub, or Off.".to_string());
+        if !matches!(
+            provider.as_str(),
+            "gemini" | "mlx-text" | "mlx-vision" | "local-stub" | "off"
+        ) {
+            return Err(
+                "Model route providers must be Gemini, Local MLX, Local Stub, or Off.".to_string(),
+            );
         }
     }
-    if !matches!(request.audio_enhancement.as_str(), "none" | "hybrid" | "strong") {
+    if request.mlx_timeout < 10 || request.mlx_timeout > 600 {
+        return Err("MLX timeout must be between 10 and 600 seconds.".to_string());
+    }
+    if !matches!(
+        request.audio_enhancement.as_str(),
+        "none" | "hybrid" | "strong"
+    ) {
         return Err("Audio enhancement must be None, Hybrid, or Strong.".to_string());
     }
     if !enhance_mode && request.output_dir.trim().is_empty() {
@@ -1113,6 +1142,12 @@ fn run_process_batch(
             request.concurrent_files.to_string(),
             "--gemini-max-concurrency".to_string(),
             request.gemini_max_concurrency.to_string(),
+            "--mlx-text-url".to_string(),
+            request.mlx_text_url.clone(),
+            "--mlx-vision-url".to_string(),
+            request.mlx_vision_url.clone(),
+            "--mlx-timeout".to_string(),
+            request.mlx_timeout.to_string(),
         ]
     } else {
         let control_file = Path::new(&request.output_dir).join(CONTROL_FILE);
@@ -1165,6 +1200,12 @@ fn run_process_batch(
             request.ai_resources_model.clone(),
             "--gemini-max-concurrency".to_string(),
             request.gemini_max_concurrency.to_string(),
+            "--mlx-text-url".to_string(),
+            request.mlx_text_url.clone(),
+            "--mlx-vision-url".to_string(),
+            request.mlx_vision_url.clone(),
+            "--mlx-timeout".to_string(),
+            request.mlx_timeout.to_string(),
             "--min-duration".to_string(),
             request.min_duration.to_string(),
             "--control-file".to_string(),
@@ -1872,7 +1913,9 @@ fn cleanup_slide_temp_dirs() -> usize {
             entry
                 .file_name()
                 .to_str()
-                .map(|name| name.starts_with(SLIDE_TEMP_PREFIX) || name.starts_with(DEEP_FILTER_TEMP_PREFIX))
+                .map(|name| {
+                    name.starts_with(SLIDE_TEMP_PREFIX) || name.starts_with(DEEP_FILTER_TEMP_PREFIX)
+                })
                 .unwrap_or(false)
         })
         .filter(|entry| {

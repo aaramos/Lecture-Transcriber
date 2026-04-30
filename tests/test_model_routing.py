@@ -1,6 +1,7 @@
 import json
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 from lecture_processor.ai.enrichment import enrich_lecture_artifact
@@ -65,6 +66,39 @@ class ModelRoutingTests(unittest.TestCase):
         self.assertEqual(response.resources[0]["title"], "Gemini resource")
         self.assertIn("local-stub", response.slide_analysis[0]["tags"])
 
+    def test_mlx_routes_are_experimental_and_skip_gemini_for_local_steps(self):
+        request = AnalyzeLectureRequest(
+            lecture_id="lecture",
+            transcript_text="hello lecture",
+            segments=[{"id": 1, "text": "hello lecture"}],
+            slides=[],
+            duration_minutes=2.0,
+        )
+        config = BatchConfig(
+            input_dir=Path("."),
+            output_dir=Path("."),
+            ai_provider=AIProviderName.GEMINI,
+            ai_overview_provider=AIModelProvider.MLX_TEXT,
+            ai_transcript_provider=AIModelProvider.GEMINI,
+            ai_slides_provider=AIModelProvider.OFF,
+            ai_resources_provider=AIModelProvider.GEMINI,
+        )
+        provider = FakeGeminiProvider()
+
+        with mock.patch(
+            "lecture_processor.ai.model_routing.MLXTextProvider",
+            return_value=FakeMLXTextProvider(),
+        ):
+            response = routed_analyze_lecture(request, config, gemini_provider=provider)
+
+        self.assertTrue(uses_experimental_routing(config))
+        self.assertFalse(provider.kwargs["include_overview"])
+        self.assertTrue(provider.kwargs["include_transcript"])
+        self.assertTrue(provider.kwargs["include_resources"])
+        self.assertEqual(provider.kwargs["overview_override"]["title"], "MLX title")
+        self.assertEqual(response.title, "MLX title")
+        self.assertEqual(response.formatted_transcript, "Gemini transcript")
+
 
 class FakeGeminiProvider:
     def __init__(self):
@@ -100,6 +134,18 @@ class FakeGeminiProvider:
             raw_response_id="fake",
             warnings=[],
         )
+
+
+class FakeMLXTextProvider:
+    def analyze_overview(self, request):
+        return {
+            "title": "MLX title",
+            "executive_summary": "MLX summary",
+            "outline": [{"id": 1, "heading": "MLX", "slide_ids": []}],
+            "warnings": [],
+            "input_tokens": 10,
+            "output_tokens": 5,
+        }
 
 
 def _artifact():

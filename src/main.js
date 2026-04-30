@@ -71,6 +71,9 @@ const DEFAULT_SETTINGS = Object.freeze({
   aiSlidesModel: "",
   aiResourcesProvider: "gemini",
   aiResourcesModel: "",
+  mlxTextUrl: "http://localhost:8001/v1",
+  mlxVisionUrl: "http://localhost:8000/v1",
+  mlxTimeout: 120,
   enhanceWithGemini: false,
   concurrentFiles: 2,
   geminiMaxConcurrency: 6,
@@ -190,6 +193,9 @@ const elements = {
   aiSlidesModel: document.querySelector("#aiSlidesModel"),
   aiResourcesProvider: document.querySelector("#aiResourcesProvider"),
   aiResourcesModel: document.querySelector("#aiResourcesModel"),
+  mlxTextUrl: document.querySelector("#mlxTextUrl"),
+  mlxVisionUrl: document.querySelector("#mlxVisionUrl"),
+  mlxTimeout: document.querySelector("#mlxTimeout"),
   geminiApiKey: document.querySelector("#geminiApiKey"),
   saveGeminiKeyButton: document.querySelector("#saveGeminiKeyButton"),
   geminiKeyStatus: document.querySelector("#geminiKeyStatus"),
@@ -261,6 +267,10 @@ elements.geminiMaxConcurrency.addEventListener("input", () => {
   validateSettings({ showDialogOnError: false });
   saveCurrentSettings();
 });
+elements.mlxTimeout.addEventListener("input", () => {
+  validateSettings({ showDialogOnError: false });
+  saveCurrentSettings();
+});
 
 [
   elements.audioQuality,
@@ -293,6 +303,8 @@ elements.geminiMaxConcurrency.addEventListener("input", () => {
   elements.aiTranscriptModel,
   elements.aiSlidesModel,
   elements.aiResourcesModel,
+  elements.mlxTextUrl,
+  elements.mlxVisionUrl,
 ].forEach((element) => {
   element.addEventListener("input", () => {
     saveCurrentSettings();
@@ -441,6 +453,9 @@ async function startBatch() {
     aiSlidesModel: elements.aiSlidesModel.value.trim(),
     aiResourcesProvider: elements.aiResourcesProvider.value,
     aiResourcesModel: elements.aiResourcesModel.value.trim(),
+    mlxTextUrl: elements.mlxTextUrl.value.trim(),
+    mlxVisionUrl: elements.mlxVisionUrl.value.trim(),
+    mlxTimeout: validMlxTimeout(elements.mlxTimeout.value),
     geminiMaxConcurrency: finalGeminiConcurrency,
     minDuration: 60,
     skippedFiles: manualSkippedFiles(),
@@ -1081,6 +1096,17 @@ function validateSettings(options = {}) {
     elements.runMeta.textContent = "Gemini concurrency must be between 1 and 12.";
     return null;
   }
+  const mlxTimeout = Number.parseInt(elements.mlxTimeout.value, 10);
+  const mlxTimeoutValid = Number.isInteger(mlxTimeout) && mlxTimeout >= 10 && mlxTimeout <= 600;
+  elements.mlxTimeout.classList.toggle("invalid", !mlxTimeoutValid);
+  if (!mlxTimeoutValid) {
+    if (showDialogOnError) {
+      showDialog(elements.settingsDialog);
+    }
+    elements.mlxTimeout.focus();
+    elements.runMeta.textContent = "MLX timeout must be between 10 and 600 seconds.";
+    return null;
+  }
   const selectedProfile = currentProfileStatus();
   if (selectedProfile && selectedProfile.available === false) {
     if (showDialogOnError) {
@@ -1713,6 +1739,9 @@ function applySettings(settings) {
   elements.aiSlidesModel.value = settings.aiSlidesModel || DEFAULT_SETTINGS.aiSlidesModel;
   setSelectValue(elements.aiResourcesProvider, settings.aiResourcesProvider, DEFAULT_SETTINGS.aiResourcesProvider);
   elements.aiResourcesModel.value = settings.aiResourcesModel || DEFAULT_SETTINGS.aiResourcesModel;
+  elements.mlxTextUrl.value = settings.mlxTextUrl || DEFAULT_SETTINGS.mlxTextUrl;
+  elements.mlxVisionUrl.value = settings.mlxVisionUrl || DEFAULT_SETTINGS.mlxVisionUrl;
+  elements.mlxTimeout.value = String(validMlxTimeout(settings.mlxTimeout));
   state.enhanceWithGeminiPreference = Boolean(settings.enhanceWithGemini);
   elements.enhanceWithGemini.checked = state.enhanceWithGeminiPreference;
   elements.concurrentFiles.value = String(validConcurrentFiles(settings.concurrentFiles));
@@ -1748,6 +1777,8 @@ function saveCurrentSettings() {
   if (!Number.isInteger(concurrentFiles) || concurrentFiles < 1 || concurrentFiles > 3) return;
   const geminiMaxConcurrency = Number.parseInt(elements.geminiMaxConcurrency.value, 10);
   if (!Number.isInteger(geminiMaxConcurrency) || geminiMaxConcurrency < 1 || geminiMaxConcurrency > 12) return;
+  const mlxTimeout = Number.parseInt(elements.mlxTimeout.value, 10);
+  if (!Number.isInteger(mlxTimeout) || mlxTimeout < 10 || mlxTimeout > 600) return;
 
   const settings = {
     recordingSpeed: state.recordingSpeed,
@@ -1765,6 +1796,9 @@ function saveCurrentSettings() {
     aiSlidesModel: elements.aiSlidesModel.value.trim(),
     aiResourcesProvider: elements.aiResourcesProvider.value,
     aiResourcesModel: elements.aiResourcesModel.value.trim(),
+    mlxTextUrl: elements.mlxTextUrl.value.trim(),
+    mlxVisionUrl: elements.mlxVisionUrl.value.trim(),
+    mlxTimeout,
     concurrentFiles,
     geminiMaxConcurrency,
     saveNormalized: elements.saveNormalized.checked,
@@ -1830,6 +1864,9 @@ function renderAiControls() {
     elements.aiSlidesModel,
     elements.aiResourcesProvider,
     elements.aiResourcesModel,
+    elements.mlxTextUrl,
+    elements.mlxVisionUrl,
+    elements.mlxTimeout,
   ].forEach((element) => {
     element.disabled = state.running;
   });
@@ -1921,6 +1958,11 @@ function validConcurrentFiles(value) {
 function validGeminiConcurrency(value) {
   const parsed = Number.parseInt(value, 10);
   return Number.isInteger(parsed) && parsed >= 1 && parsed <= 12 ? parsed : DEFAULT_SETTINGS.geminiMaxConcurrency;
+}
+
+function validMlxTimeout(value) {
+  const parsed = Number.parseInt(value, 10);
+  return Number.isInteger(parsed) && parsed >= 10 && parsed <= 600 ? parsed : DEFAULT_SETTINGS.mlxTimeout;
 }
 
 function renderNormalizationWarning() {
@@ -2105,8 +2147,8 @@ function applyTokenUsage(event) {
 function renderTokenMetrics() {
   elements.tokensSentMetric.textContent = formatTokenCount(state.tokensSent);
   elements.tokensReceivedMetric.textContent = formatTokenCount(state.tokensReceived);
-  elements.tokensSentMetricStatus.textContent = state.tokensSent ? "Gemini prompt" : "Waiting";
-  elements.tokensReceivedMetricStatus.textContent = state.tokensReceived ? "Gemini output" : "Waiting";
+  elements.tokensSentMetricStatus.textContent = state.tokensSent ? "AI prompt" : "Waiting";
+  elements.tokensReceivedMetricStatus.textContent = state.tokensReceived ? "AI output" : "Waiting";
 }
 
 function formatTokenCount(value) {

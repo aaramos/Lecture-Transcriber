@@ -259,6 +259,8 @@
                   Overview
                   <select id="aiOverviewProvider">
                     <option value="gemini" selected>Gemini</option>
+                    <option value="mlx-text">Local MLX Text</option>
+                    <option value="mlx-vision">Local MLX Vision</option>
                     <option value="local-stub">Local Stub</option>
                     <option value="off">Off</option>
                   </select>
@@ -268,6 +270,8 @@
                   Transcript Edit
                   <select id="aiTranscriptProvider">
                     <option value="gemini" selected>Gemini</option>
+                    <option value="mlx-text">Local MLX Text</option>
+                    <option value="mlx-vision">Local MLX Vision</option>
                     <option value="local-stub">Local Stub</option>
                     <option value="off">Off</option>
                   </select>
@@ -277,6 +281,8 @@
                   Slides
                   <select id="aiSlidesProvider">
                     <option value="gemini" selected>Gemini</option>
+                    <option value="mlx-text">Local MLX Text</option>
+                    <option value="mlx-vision">Local MLX Vision</option>
                     <option value="local-stub">Local Stub</option>
                     <option value="off">Off</option>
                   </select>
@@ -286,13 +292,37 @@
                   Resources
                   <select id="aiResourcesProvider">
                     <option value="gemini" selected>Gemini</option>
+                    <option value="mlx-text">Local MLX Text</option>
+                    <option value="mlx-vision">Local MLX Vision</option>
                     <option value="local-stub">Local Stub</option>
                     <option value="off">Off</option>
                   </select>
                   <input id="aiResourcesModel" type="text" autocomplete="off" placeholder="Model name optional" />
                 </label>
               </div>
-              <span class="field-help">Gemini routes use the Gemini Model above. Local Stub does not run a real model yet; it marks the route for future local-model wiring.</span>
+              <span class="field-help">Local MLX Text defaults to port 8001. Local MLX Vision defaults to port 8000. Local Stub still returns placeholders.</span>
+            </div>
+
+            <div class="wide-field model-routing">
+              <div class="model-routing-head">
+                <span>Local MLX Servers</span>
+                <small>OpenAI-compatible endpoints from the integration guide.</small>
+              </div>
+              <div class="model-route-grid">
+                <label>
+                  Text Server URL
+                  <input id="mlxTextUrl" type="text" autocomplete="off" value="http://localhost:8001/v1" />
+                </label>
+                <label>
+                  Vision Server URL
+                  <input id="mlxVisionUrl" type="text" autocomplete="off" value="http://localhost:8000/v1" />
+                </label>
+                <label>
+                  Timeout Seconds
+                  <input id="mlxTimeout" type="number" min="10" max="600" value="120" />
+                </label>
+              </div>
+              <span class="field-help">Use model name "default" unless the local server exposes a different OpenAI-compatible model id.</span>
             </div>
 
             <label>
