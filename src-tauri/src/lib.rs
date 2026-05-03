@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
@@ -124,6 +124,8 @@ struct ProcessRequest {
     mlx_vision_url: String,
     #[serde(default = "default_mlx_timeout")]
     mlx_timeout: u16,
+    #[serde(default)]
+    skip_ai_reason: String,
     min_duration: f64,
     skipped_files: Vec<String>,
 }
@@ -194,6 +196,12 @@ struct ProfileStatusResponse {
     profiles: Vec<ProfileStatus>,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LmStudioModelsResponse {
+    models: Vec<String>,
+}
+
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct DependencyEvent {
@@ -245,11 +253,11 @@ fn default_ai_route_provider() -> String {
 }
 
 fn default_mlx_text_url() -> String {
-    "http://localhost:8001/v1".to_string()
+    "http://192.168.86.101:1234/v1".to_string()
 }
 
 fn default_mlx_vision_url() -> String {
-    "http://localhost:8000/v1".to_string()
+    "http://192.168.86.101:1234/v1".to_string()
 }
 
 fn default_mlx_timeout() -> u16 {
@@ -723,6 +731,32 @@ async fn process_batch(
 }
 
 #[tauri::command]
+fn lm_studio_models(base_urls: Vec<String>) -> Result<LmStudioModelsResponse, String> {
+    let mut models = Vec::new();
+    let mut errors = Vec::new();
+    let api_token = read_lm_studio_api_token()?;
+    let urls = if base_urls.is_empty() {
+        vec![default_mlx_text_url()]
+    } else {
+        base_urls
+    };
+
+    for base_url in urls {
+        match fetch_lm_studio_models(&base_url, api_token.as_deref()) {
+            Ok(found) => models.extend(found),
+            Err(error) => errors.push(format!("{base_url}: {error}")),
+        }
+    }
+
+    models.sort();
+    models.dedup();
+    if models.is_empty() && !errors.is_empty() {
+        return Err(errors.join("; "));
+    }
+    Ok(LmStudioModelsResponse { models })
+}
+
+#[tauri::command]
 fn cancel_batch(state: tauri::State<'_, AppState>) -> Result<CancelResponse, String> {
     let process_to_cancel = mark_active_process_cancelled(&state.active_process);
 
@@ -1064,7 +1098,7 @@ fn run_process_batch(
             "gemini" | "mlx-text" | "mlx-vision" | "local-stub" | "off"
         ) {
             return Err(
-                "Model route providers must be Gemini, Local MLX, Local Stub, or Off.".to_string(),
+                "Model route providers must be Gemini, LM Studio, Local Stub, or Off.".to_string(),
             );
         }
     }
@@ -1081,6 +1115,7 @@ fn run_process_batch(
         return Err("Choose an output folder before starting.".to_string());
     }
     let uses_gemini_route = request.ai_provider == "gemini"
+        && request.skip_ai_reason.trim().is_empty()
         && [
             &request.ai_overview_provider,
             &request.ai_transcript_provider,
@@ -1097,6 +1132,7 @@ fn run_process_batch(
     } else {
         None
     };
+    let lm_studio_api_token = read_lm_studio_api_token()?;
     if active_process
         .lock()
         .unwrap_or_else(|error| error.into_inner())
@@ -1148,6 +1184,8 @@ fn run_process_batch(
             request.mlx_vision_url.clone(),
             "--mlx-timeout".to_string(),
             request.mlx_timeout.to_string(),
+            "--skip-ai-reason".to_string(),
+            request.skip_ai_reason.clone(),
         ]
     } else {
         let control_file = Path::new(&request.output_dir).join(CONTROL_FILE);
@@ -1206,6 +1244,8 @@ fn run_process_batch(
             request.mlx_vision_url.clone(),
             "--mlx-timeout".to_string(),
             request.mlx_timeout.to_string(),
+            "--skip-ai-reason".to_string(),
+            request.skip_ai_reason.clone(),
             "--min-duration".to_string(),
             request.min_duration.to_string(),
             "--control-file".to_string(),
@@ -1273,6 +1313,10 @@ fn run_process_batch(
     }
     if let Some(api_key) = ai_api_key {
         command.env("GEMINI_API_KEY", api_key);
+    }
+    if let Some(token) = lm_studio_api_token {
+        command.env("LM_STUDIO_API_KEY", &token);
+        command.env("LM_API_TOKEN", token);
     }
 
     #[cfg(unix)]
@@ -1464,8 +1508,20 @@ fn platform_open_command(path: &str) -> Command {
 fn keychain_account(provider: &str) -> Result<String, String> {
     match provider {
         "gemini" => Ok("gemini_api_key".to_string()),
+        "lm-studio" | "lmstudio" | "lm_studio" => Ok("lm_studio_api_token".to_string()),
         _ => Err(format!("Unsupported API key provider: {provider}")),
     }
+}
+
+fn read_lm_studio_api_token() -> Result<Option<String>, String> {
+    if let Some(token) = read_api_key("lm-studio")? {
+        return Ok(Some(token));
+    }
+    Ok(env::var("LM_STUDIO_API_KEY")
+        .ok()
+        .or_else(|| env::var("LM_API_TOKEN").ok())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty()))
 }
 
 fn read_api_key(provider: &str) -> Result<Option<String>, String> {
@@ -1895,6 +1951,116 @@ fn update_control_file(path: &Path, skip: &[&str], stop: &[&str]) -> Result<(), 
     Ok(())
 }
 
+fn fetch_lm_studio_models(base_url: &str, api_token: Option<&str>) -> Result<Vec<String>, String> {
+    let api_models = lm_studio_api_url(base_url, "/api/v1/models")?;
+    let payload = http_get_json(&api_models, api_token)?;
+    let models = native_lm_studio_model_ids(&payload);
+    if models.is_empty() {
+        return Err("LM Studio returned no LLM models.".to_string());
+    }
+    Ok(models)
+}
+
+fn native_lm_studio_model_ids(payload: &serde_json::Value) -> Vec<String> {
+    let mut ids = Vec::new();
+    let Some(models) = payload.get("models").and_then(|value| value.as_array()) else {
+        return ids;
+    };
+    for model in models {
+        if model.get("type").and_then(|value| value.as_str()) != Some("llm") {
+            continue;
+        }
+        if let Some(instances) = model.get("loaded_instances").and_then(|value| value.as_array()) {
+            for instance in instances {
+                if let Some(id) = instance.get("id").and_then(|value| value.as_str()) {
+                    push_unique_model_id(&mut ids, id);
+                }
+            }
+        }
+        if let Some(key) = model.get("key").and_then(|value| value.as_str()) {
+            push_unique_model_id(&mut ids, key);
+        }
+    }
+    ids
+}
+
+fn push_unique_model_id(ids: &mut Vec<String>, value: &str) {
+    let id = value.trim();
+    if !id.is_empty() && !ids.iter().any(|existing| existing == id) {
+        ids.push(id.to_string());
+    }
+}
+
+fn lm_studio_api_url(base_url: &str, path: &str) -> Result<String, String> {
+    let (host, port, _base_path) = parse_http_url(base_url)?;
+    Ok(format!("http://{host}:{port}{path}"))
+}
+
+fn http_get_json(url: &str, api_token: Option<&str>) -> Result<serde_json::Value, String> {
+    let (host, port, path) = parse_http_url(url)?;
+    let address = format!("{host}:{port}");
+    let socket: std::net::SocketAddr = address
+        .parse()
+        .map_err(|error| format!("Invalid server address {address}: {error}"))?;
+    let mut stream = std::net::TcpStream::connect_timeout(&socket, Duration::from_secs(5))
+        .map_err(|error| format!("Could not connect to {address}: {error}"))?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .map_err(|error| format!("Could not set read timeout: {error}"))?;
+    let authorization = api_token
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| format!("Authorization: Bearer {value}\r\n"))
+        .unwrap_or_default();
+    let request = format!(
+        "GET {path} HTTP/1.1\r\nHost: {host}:{port}\r\nAccept: application/json\r\n{authorization}Connection: close\r\n\r\n"
+    );
+    stream
+        .write_all(request.as_bytes())
+        .map_err(|error| format!("Could not request {path}: {error}"))?;
+
+    let mut raw = String::new();
+    stream
+        .read_to_string(&mut raw)
+        .map_err(|error| format!("Could not read response: {error}"))?;
+    let (headers, body) = raw
+        .split_once("\r\n\r\n")
+        .ok_or_else(|| "LM Studio returned an invalid HTTP response.".to_string())?;
+    let status = headers.lines().next().unwrap_or_default();
+    if !status.contains(" 200 ") {
+        if status.contains(" 401 ")
+            || status.contains(" 403 ")
+            || body.contains("invalid_api_key")
+            || body.contains("API token is required")
+        {
+            return Err("LM Studio needs a valid API token saved in Settings.".to_string());
+        }
+        return Err(format!("LM Studio returned {status}"));
+    }
+    serde_json::from_str(body.trim())
+        .map_err(|error| format!("LM Studio returned invalid JSON: {error}"))
+}
+
+fn parse_http_url(raw: &str) -> Result<(String, u16, String), String> {
+    let url = raw.trim().trim_end_matches('/');
+    let Some(rest) = url.strip_prefix("http://") else {
+        return Err("Only http:// LM Studio URLs are supported.".to_string());
+    };
+    let (host_port, path) = rest.split_once('/').unwrap_or((rest, ""));
+    let (host, port) = if let Some((host, port_text)) = host_port.rsplit_once(':') {
+        let parsed_port = port_text
+            .parse::<u16>()
+            .map_err(|error| format!("Invalid LM Studio port {port_text}: {error}"))?;
+        (host.to_string(), parsed_port)
+    } else {
+        (host_port.to_string(), 80)
+    };
+    if host.is_empty() {
+        return Err("LM Studio URL is missing a host.".to_string());
+    }
+    Ok((host, port, format!("/{}", path.trim_start_matches('/'))))
+}
+
 fn cleanup_slide_temp_dirs() -> usize {
     let temp_dir = env::temp_dir();
     let Ok(entries) = std::fs::read_dir(temp_dir) else {
@@ -2068,6 +2234,7 @@ pub fn run() {
             transcription_profile_status,
             setup_dependencies,
             process_batch,
+            lm_studio_models,
             cancel_batch,
             update_file_control
         ])

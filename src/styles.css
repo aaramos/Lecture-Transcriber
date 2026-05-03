@@ -408,15 +408,6 @@ button:disabled {
   font-size: 13px;
 }
 
-.inline-warning {
-  border: 1px solid rgba(215, 173, 87, 0.4);
-  border-radius: 6px;
-  padding: 10px 12px;
-  background: rgba(215, 173, 87, 0.12);
-  color: #ebd39c;
-  font-size: 13px;
-}
-
 .hidden {
   display: none;
 }
@@ -847,27 +838,6 @@ button:disabled {
   padding: 18px;
 }
 
-.settings-toolbar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  margin-top: 14px;
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  padding: 10px 12px;
-  background: var(--panel-soft);
-}
-
-.settings-toolbar span {
-  color: var(--muted);
-  font-size: 12px;
-}
-
-.settings-toolbar .secondary-button {
-  min-width: 132px;
-}
-
 .field-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -909,10 +879,16 @@ input[type="text"] {
 
 .model-routing-head {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   justify-content: space-between;
   gap: 12px;
   margin-bottom: 10px;
+}
+
+.model-routing-head > div {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
 }
 
 .model-routing-head span {
@@ -925,6 +901,10 @@ input[type="text"] {
   color: var(--muted);
   font-size: 12px;
   text-align: right;
+}
+
+.model-routing-head > div small {
+  text-align: left;
 }
 
 .model-route-grid {
@@ -984,15 +964,8 @@ select.invalid {
   height: 16px;
 }
 
-.warning {
-  border-left: 3px solid var(--accent);
-  padding: 10px 12px;
-  background: rgba(222, 118, 83, 0.12);
-  color: #e9b39f;
-  font-size: 13px;
-}
-
 .dialog-actions {
+  gap: 10px;
   justify-content: flex-end;
   margin-top: 16px;
 }

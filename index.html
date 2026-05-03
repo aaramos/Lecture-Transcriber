@@ -77,10 +77,6 @@
           </div>
         </div>
 
-        <div id="normalizationWarning" class="inline-warning hidden">
-          Only choose 2× → 1× when every file in the batch was recorded at 2× speed.
-        </div>
-
         <div class="output-row">
           <div>
             <label>Output</label>
@@ -92,7 +88,7 @@
         <label class="enhance-toggle">
           <input id="enhanceWithGemini" type="checkbox" />
           <span>
-            <strong>Enhance with Gemini</strong>
+            <strong>AI Enhance</strong>
             <small>Add AI titles, summaries, outlines, and slide notes.</small>
           </span>
         </label>
@@ -196,10 +192,10 @@
             <button class="icon-button" value="cancel" title="Close" aria-label="Close">×</button>
           </div>
 
-          <div class="settings-toolbar">
-            <span>Configuration</span>
-            <button id="restoreDefaultsButton" class="secondary-button" type="button">Restore Defaults</button>
-          </div>
+          <select id="aiModel" hidden aria-hidden="true">
+            <option value="gemini-2.5-flash" selected>2.5 Flash</option>
+            <option value="gemini-2.5-flash-lite">2.5 Flash-Lite</option>
+          </select>
 
           <div class="field-grid">
             <label>
@@ -241,88 +237,56 @@
               </select>
             </label>
 
-            <label>
-              Gemini Model
-              <select id="aiModel">
-                <option value="gemini-2.5-flash" selected>2.5 Flash</option>
-                <option value="gemini-2.5-flash-lite">2.5 Flash-Lite</option>
-              </select>
-            </label>
-
             <div class="wide-field model-routing">
               <div class="model-routing-head">
                 <span>Experimental Model Routing</span>
-                <small>Choose Gemini or a local placeholder for each AI step.</small>
+                <small>Choose models by capability.</small>
               </div>
               <div class="model-route-grid">
+                <input id="aiOverviewProvider" type="hidden" value="mlx-text" />
+                <input id="aiTranscriptProvider" type="hidden" value="mlx-text" />
+                <input id="aiTranscriptModel" type="hidden" />
+                <input id="aiSlidesProvider" type="hidden" value="mlx-vision" />
+                <input id="aiResourcesProvider" type="hidden" value="mlx-text" />
                 <label>
-                  Overview
-                  <select id="aiOverviewProvider">
-                    <option value="gemini" selected>Gemini</option>
-                    <option value="mlx-text">Local MLX Text</option>
-                    <option value="mlx-vision">Local MLX Vision</option>
-                    <option value="local-stub">Local Stub</option>
-                    <option value="off">Off</option>
-                  </select>
-                  <input id="aiOverviewModel" type="text" autocomplete="off" placeholder="Model name optional" />
+                  Text Model
+                  <select id="aiOverviewModel"></select>
                 </label>
                 <label>
-                  Transcript Edit
-                  <select id="aiTranscriptProvider">
-                    <option value="gemini" selected>Gemini</option>
-                    <option value="mlx-text">Local MLX Text</option>
-                    <option value="mlx-vision">Local MLX Vision</option>
-                    <option value="local-stub">Local Stub</option>
-                    <option value="off">Off</option>
-                  </select>
-                  <input id="aiTranscriptModel" type="text" autocomplete="off" placeholder="Model name optional" />
+                  Vision Model
+                  <select id="aiSlidesModel"></select>
                 </label>
                 <label>
-                  Slides
-                  <select id="aiSlidesProvider">
-                    <option value="gemini" selected>Gemini</option>
-                    <option value="mlx-text">Local MLX Text</option>
-                    <option value="mlx-vision">Local MLX Vision</option>
-                    <option value="local-stub">Local Stub</option>
-                    <option value="off">Off</option>
-                  </select>
-                  <input id="aiSlidesModel" type="text" autocomplete="off" placeholder="Model name optional" />
-                </label>
-                <label>
-                  Resources
-                  <select id="aiResourcesProvider">
-                    <option value="gemini" selected>Gemini</option>
-                    <option value="mlx-text">Local MLX Text</option>
-                    <option value="mlx-vision">Local MLX Vision</option>
-                    <option value="local-stub">Local Stub</option>
-                    <option value="off">Off</option>
-                  </select>
-                  <input id="aiResourcesModel" type="text" autocomplete="off" placeholder="Model name optional" />
+                  Resource Model
+                  <select id="aiResourcesModel"></select>
                 </label>
               </div>
-              <span class="field-help">Local MLX Text defaults to port 8001. Local MLX Vision defaults to port 8000. Local Stub still returns placeholders.</span>
+              <span class="field-help">Text handles overview and transcript. Vision handles slides. Resource uses Gemini or the Text Server URL.</span>
             </div>
 
             <div class="wide-field model-routing">
               <div class="model-routing-head">
-                <span>Local MLX Servers</span>
-                <small>OpenAI-compatible endpoints from the integration guide.</small>
+                <div>
+                  <span>LM Studio Server</span>
+                  <small id="localModelStatus">Models not checked</small>
+                </div>
+                <button id="refreshLocalModelsButton" class="secondary-button" type="button">Force Refresh Models</button>
               </div>
               <div class="model-route-grid">
                 <label>
                   Text Server URL
-                  <input id="mlxTextUrl" type="text" autocomplete="off" value="http://localhost:8001/v1" />
+                  <input id="mlxTextUrl" type="text" autocomplete="off" value="http://192.168.86.101:1234/v1" />
                 </label>
                 <label>
                   Vision Server URL
-                  <input id="mlxVisionUrl" type="text" autocomplete="off" value="http://localhost:8000/v1" />
+                  <input id="mlxVisionUrl" type="text" autocomplete="off" value="http://192.168.86.101:1234/v1" />
                 </label>
                 <label>
                   Timeout Seconds
                   <input id="mlxTimeout" type="number" min="10" max="600" value="120" />
                 </label>
               </div>
-              <span class="field-help">Use model name "default" unless the local server exposes a different OpenAI-compatible model id.</span>
+              <span class="field-help">Text and Resource calls use Text Server URL. Slide analysis uses Vision Server URL. If you run one LM Studio server, set both URLs the same.</span>
             </div>
 
             <label>
@@ -332,14 +296,9 @@
             </label>
 
             <label>
-              Gemini Concurrency
-              <input id="geminiMaxConcurrency" type="number" min="1" max="12" value="6" />
-              <span class="field-help">Use 6 by default. Lower this if Gemini rate-limits a run.</span>
-            </label>
-
-            <label class="checkbox-row">
-              <input id="saveNormalized" type="checkbox" checked />
-              <span>Save normalized video</span>
+              AI Concurrency
+              <input id="geminiMaxConcurrency" type="number" min="1" max="12" value="3" />
+              <span class="field-help">Use 3 by default when local models are enabled. Lower this if runs feel heavy.</span>
             </label>
           </div>
 
@@ -352,11 +311,17 @@
             <span id="geminiKeyStatus">No key saved</span>
           </div>
 
-          <div class="warning">
-            2× normalization can create half-speed output if the batch is already 1×.
+          <div class="key-row">
+            <label>
+              LM Studio API Token
+              <input id="lmStudioToken" type="password" autocomplete="off" placeholder="Saved in macOS Keychain" />
+            </label>
+            <button id="saveLmStudioTokenButton" class="secondary-button" type="button">Save Token</button>
+            <span id="lmStudioTokenStatus">No token saved</span>
           </div>
 
           <div class="dialog-actions">
+            <button id="restoreDefaultsButton" class="secondary-button" type="button">Restore Defaults</button>
             <button class="primary-button" value="default">Done</button>
           </div>
         </form>

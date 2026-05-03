@@ -66,8 +66,8 @@ class BatchConfigTests(unittest.TestCase):
             self.assertIs(config.transcription_quality, TranscriptionQuality.ACCURATE)
             self.assertEqual(config.whisper_model, "medium.en")
             self.assertEqual(config.gemini_max_concurrency, 6)
-            self.assertEqual(config.mlx_text_base_url, "http://localhost:8001/v1")
-            self.assertEqual(config.mlx_vision_base_url, "http://localhost:8000/v1")
+            self.assertEqual(config.mlx_text_base_url, "http://192.168.86.101:1234/v1")
+            self.assertEqual(config.mlx_vision_base_url, "http://192.168.86.101:1234/v1")
             self.assertEqual(config.mlx_request_timeout_seconds, 120)
             self.assertEqual(
                 config.ai_model_routing,

@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 
 from lecture_processor.config import (
+    AIModelProvider,
     AIProviderName,
     AudioEnhancementMode,
     AudioQuality,
@@ -837,6 +838,77 @@ class BatchProcessorTests(unittest.TestCase):
             batch = json.loads((output / "batch.json").read_text(encoding="utf-8"))
             self.assertEqual(batch["summary"]["enriched"], 1)
 
+    def test_batch_finishes_base_processing_before_ai_enrichment(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for name in ["alpha.mov", "beta.mov"]:
+                (root / name).write_text("video", encoding="utf-8")
+            output = root / "out"
+            enrichment_snapshots = []
+            file_finished_events = []
+
+            def record_event(event):
+                if event["kind"] == "enrichment_started":
+                    enrichment_snapshots.append(
+                        sorted(path.parent.name for path in output.glob("*/lecture.json"))
+                    )
+                if event["kind"] == "file_finished":
+                    file_finished_events.append(event)
+
+            config = BatchConfig(
+                input_dir=root,
+                output_dir=output,
+                ai_provider=AIProviderName.MOCK,
+                concurrent_files=2,
+            )
+
+            summary = BatchProcessor(
+                config=config,
+                inspector=FakeInspector({"alpha.mov": 120.0, "beta.mov": 120.0}),
+                normalizer=FakeNormalizer(),
+                audio_extractor=FakeAudioExtractor(),
+                transcriber=FakeTranscriber(),
+                slide_extractor=FakeSlideExtractor(),
+                progress_callback=record_event,
+            ).run()
+
+            self.assertEqual(summary.completed, 2)
+            self.assertEqual(enrichment_snapshots[0], ["alpha", "beta"])
+            self.assertTrue(all(event["enriched"] for event in file_finished_events))
+
+    def test_unavailable_local_model_skips_ai_but_completes_non_ai_work(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "lecture.mov"
+            source.write_text("video", encoding="utf-8")
+            output = root / "out"
+            config = BatchConfig(
+                input_dir=root,
+                output_dir=output,
+                ai_provider=AIProviderName.MOCK,
+                skip_ai_enrichment_reason="LM Studio model(s) unavailable: missing-model",
+            )
+
+            summary = BatchProcessor(
+                config=config,
+                inspector=FakeInspector({"lecture.mov": 120.0}),
+                normalizer=FakeNormalizer(),
+                audio_extractor=FakeAudioExtractor(),
+                transcriber=FakeTranscriber(),
+                slide_extractor=FakeSlideExtractor(),
+            ).run()
+
+            self.assertEqual(summary.completed, 1)
+            self.assertFalse(summary.results[0].enriched)
+            lecture_json = json.loads((output / "lecture" / "lecture.json").read_text(encoding="utf-8"))
+            self.assertIsNone(lecture_json["enrichment"])
+            log = (output / "lecture" / "processing_log.txt").read_text(encoding="utf-8")
+            self.assertIn("AI enrichment skipped", log)
+            self.assertIn("missing-model", log)
+            self.assertTrue((output / "lecture" / "html" / "index.html").exists())
+            batch = json.loads((output / "batch.json").read_text(encoding="utf-8"))
+            self.assertEqual(batch["summary"]["enriched"], 0)
+
     def test_processed_batch_enrichment_skips_already_enhanced_lectures(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -916,6 +988,60 @@ class BatchProcessorTests(unittest.TestCase):
             artifact = json.loads((lecture_dir / "lecture.json").read_text(encoding="utf-8"))
             self.assertEqual(artifact["enrichment"]["provider"], "mock")
             self.assertTrue((lecture_dir / "html" / "index.html").exists())
+
+    def test_processed_batch_enhance_uses_staged_ai_order(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for name in ("first", "second"):
+                lecture_dir = root / name
+                lecture_dir.mkdir()
+                (lecture_dir / "lecture.json").write_text(
+                    json.dumps(
+                        {
+                            "lecture_id": name,
+                            "source": {"filename": f"{name}.mov"},
+                            "media": {"duration_seconds": 120},
+                            "transcript": {"text": f"{name} transcript", "word_count": 2, "segments": []},
+                            "slides": [{"id": 1, "linked_segment_ids": []}],
+                            "processing": {"status": "completed"},
+                            "enrichment": None,
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+            config = BatchConfig(
+                input_dir=root,
+                output_dir=root,
+                transcription_engine=TranscriptionEngine.NONE,
+                ai_provider=AIProviderName.GEMINI,
+                ai_overview_provider=AIModelProvider.LOCAL_STUB,
+                ai_transcript_provider=AIModelProvider.LOCAL_STUB,
+                ai_slides_provider=AIModelProvider.LOCAL_STUB,
+                ai_resources_provider=AIModelProvider.LOCAL_STUB,
+            )
+            events = []
+
+            summary = enrich_processed_batch(config, progress_callback=events.append)
+
+            self.assertEqual(summary.completed, 2)
+            progress = [
+                (event["step"], event["source"])
+                for event in events
+                if event["kind"] == "enrichment_progress"
+            ]
+            self.assertEqual(
+                [
+                    ("staged text overview", "first.mov"),
+                    ("staged text overview", "second.mov"),
+                    ("staged text transcript", "first.mov"),
+                    ("staged text transcript", "second.mov"),
+                    ("staged vision slides", "first.mov"),
+                    ("staged vision slides", "second.mov"),
+                    ("staged resource resources", "first.mov"),
+                    ("staged resource resources", "second.mov"),
+                ],
+                progress,
+            )
 
 
 if __name__ == "__main__":

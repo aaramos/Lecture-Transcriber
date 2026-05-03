@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "node scripts/dev-server.mjs",
     "build": "node scripts/build-frontend.mjs",
-    "tauri": "cargo tauri"
+    "lint": "node scripts/lint.mjs",
+    "tauri": "node scripts/tauri.mjs"
   }
 }

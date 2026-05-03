@@ -21,6 +21,8 @@ from .config import (
     SlideSensitivity,
     TranscriptionEngine,
     TranscriptionQuality,
+    default_local_text_base_url,
+    default_local_vision_base_url,
 )
 from .ai.enrichment import enrich_lecture_artifact
 from .errors import LectureProcessorError
@@ -89,6 +91,7 @@ def build_parser() -> argparse.ArgumentParser:
     process.add_argument("--mlx-text-url", default="")
     process.add_argument("--mlx-vision-url", default="")
     process.add_argument("--mlx-timeout", type=int, default=120)
+    process.add_argument("--skip-ai-reason", default="", help=argparse.SUPPRESS)
     process.add_argument("--no-render-html", action="store_true")
     process.add_argument("--skip-file", action="append", default=[], help=argparse.SUPPRESS)
     process.add_argument("--control-file", type=Path, default=None, help=argparse.SUPPRESS)
@@ -113,6 +116,7 @@ def build_parser() -> argparse.ArgumentParser:
     enrich.add_argument("--mlx-text-url", default="")
     enrich.add_argument("--mlx-vision-url", default="")
     enrich.add_argument("--mlx-timeout", type=int, default=120)
+    enrich.add_argument("--skip-ai-reason", default="", help=argparse.SUPPRESS)
     enrich.add_argument("--render-html", action="store_true")
 
     enrich_batch = subparsers.add_parser("enrich-batch", help="Enhance an existing processed batch folder")
@@ -132,6 +136,7 @@ def build_parser() -> argparse.ArgumentParser:
     enrich_batch.add_argument("--mlx-text-url", default="")
     enrich_batch.add_argument("--mlx-vision-url", default="")
     enrich_batch.add_argument("--mlx-timeout", type=int, default=120)
+    enrich_batch.add_argument("--skip-ai-reason", default="", help=argparse.SUPPRESS)
     enrich_batch.add_argument("--skip-file", action="append", default=[], help=argparse.SUPPRESS)
     enrich_batch.add_argument("--no-render-html", action="store_true")
     enrich_batch.add_argument("--json-events", action="store_true", help=argparse.SUPPRESS)
@@ -207,9 +212,10 @@ def _run_process(args) -> int:
         ai_resources_provider=AIModelProvider(args.ai_resources_provider),
         ai_resources_model=args.ai_resources_model,
         gemini_max_concurrency=args.gemini_max_concurrency,
-        mlx_text_base_url=args.mlx_text_url or os.environ.get("MLX_TEXT_SERVER_URL", "http://localhost:8001/v1"),
-        mlx_vision_base_url=args.mlx_vision_url or os.environ.get("MLX_VISION_SERVER_URL", "http://localhost:8000/v1"),
+        mlx_text_base_url=args.mlx_text_url or default_local_text_base_url(),
+        mlx_vision_base_url=args.mlx_vision_url or default_local_vision_base_url(),
         mlx_request_timeout_seconds=args.mlx_timeout,
+        skip_ai_enrichment_reason=args.skip_ai_reason,
         render_html=not args.no_render_html,
         skip_files=tuple(args.skip_file or ()),
         control_file=args.control_file,
@@ -217,9 +223,9 @@ def _run_process(args) -> int:
 
     try:
         config.validate()
-        if config.ai_uses_gemini and not _gemini_api_key_available():
+        if not config.skip_ai_enrichment_reason and config.ai_uses_gemini and not _gemini_api_key_available():
             raise LectureProcessorError("Gemini enrichment requires a saved or exported GEMINI_API_KEY.")
-        if config.ai_uses_gemini and not _gemini_dependency_available():
+        if not config.skip_ai_enrichment_reason and config.ai_uses_gemini and not _gemini_dependency_available():
             raise LectureProcessorError("Gemini support is not installed. Install with: python3 -m pip install -e '.[ai]'")
         source_files = discover_mov_files(config.input_dir)
         if not source_files:
@@ -316,15 +322,16 @@ def _run_enrich(args) -> int:
         ai_resources_provider=AIModelProvider(args.ai_resources_provider),
         ai_resources_model=args.ai_resources_model,
         gemini_max_concurrency=args.gemini_max_concurrency,
-        mlx_text_base_url=args.mlx_text_url or os.environ.get("MLX_TEXT_SERVER_URL", "http://localhost:8001/v1"),
-        mlx_vision_base_url=args.mlx_vision_url or os.environ.get("MLX_VISION_SERVER_URL", "http://localhost:8000/v1"),
+        mlx_text_base_url=args.mlx_text_url or default_local_text_base_url(),
+        mlx_vision_base_url=args.mlx_vision_url or default_local_vision_base_url(),
         mlx_request_timeout_seconds=args.mlx_timeout,
+        skip_ai_enrichment_reason=args.skip_ai_reason,
     )
     config.validate()
-    if config.ai_uses_gemini and not _gemini_api_key_available():
+    if not config.skip_ai_enrichment_reason and config.ai_uses_gemini and not _gemini_api_key_available():
         print("Error: Gemini enrichment requires GEMINI_API_KEY.", file=sys.stderr)
         return 2
-    if config.ai_uses_gemini and not _gemini_dependency_available():
+    if not config.skip_ai_enrichment_reason and config.ai_uses_gemini and not _gemini_dependency_available():
         print("Error: Gemini support is not installed. Install with: python3 -m pip install -e '.[ai]'", file=sys.stderr)
         return 2
     try:
@@ -359,17 +366,18 @@ def _run_enrich_batch(args) -> int:
         ai_resources_provider=AIModelProvider(args.ai_resources_provider),
         ai_resources_model=args.ai_resources_model,
         gemini_max_concurrency=args.gemini_max_concurrency,
-        mlx_text_base_url=args.mlx_text_url or os.environ.get("MLX_TEXT_SERVER_URL", "http://localhost:8001/v1"),
-        mlx_vision_base_url=args.mlx_vision_url or os.environ.get("MLX_VISION_SERVER_URL", "http://localhost:8000/v1"),
+        mlx_text_base_url=args.mlx_text_url or default_local_text_base_url(),
+        mlx_vision_base_url=args.mlx_vision_url or default_local_vision_base_url(),
         mlx_request_timeout_seconds=args.mlx_timeout,
+        skip_ai_enrichment_reason=args.skip_ai_reason,
         render_html=not args.no_render_html,
         skip_files=tuple(args.skip_file or ()),
     )
     config.validate()
-    if config.ai_uses_gemini and not _gemini_api_key_available():
+    if not config.skip_ai_enrichment_reason and config.ai_uses_gemini and not _gemini_api_key_available():
         print("Error: Gemini enrichment requires GEMINI_API_KEY.", file=sys.stderr)
         return 2
-    if config.ai_uses_gemini and not _gemini_dependency_available():
+    if not config.skip_ai_enrichment_reason and config.ai_uses_gemini and not _gemini_dependency_available():
         print("Error: Gemini support is not installed. Install with: python3 -m pip install -e '.[ai]'", file=sys.stderr)
         return 2
     try:

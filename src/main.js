@@ -13,6 +13,10 @@ const STEP_LABELS = {
   Transcribe: "Transcribing",
   Slides: "Extracting slides",
   Enrich: "Creating study notes",
+  AIOverview: "AI overview",
+  AITranscript: "AI transcript cleanup",
+  AISlides: "AI slide analysis",
+  AIResources: "AI resources",
   Render: "Building HTML",
 };
 
@@ -25,10 +29,26 @@ const STEP_SHORT_LABELS = {
   Transcribe: "Transcript",
   Slides: "Slides",
   Enrich: "AI",
+  AIOverview: "Overview",
+  AITranscript: "Text AI",
+  AISlides: "Slide AI",
+  AIResources: "Resources",
   Render: "HTML",
 };
 
-const STEP_ORDER = ["Import", "Probe", "Normalize", "Audio", "EnhanceAudio", "Transcribe", "Slides", "Enrich", "Render"];
+const AI_STEP_ORDER = ["AIOverview", "AITranscript", "AISlides", "AIResources"];
+const STEP_ORDER = [
+  "Import",
+  "Probe",
+  "Normalize",
+  "Audio",
+  "EnhanceAudio",
+  "Transcribe",
+  "Slides",
+  "Enrich",
+  ...AI_STEP_ORDER,
+  "Render",
+];
 
 const STEP_START_PROGRESS = {
   Import: 18,
@@ -39,6 +59,10 @@ const STEP_START_PROGRESS = {
   Transcribe: 58,
   Slides: 82,
   Enrich: 88,
+  AIOverview: 86,
+  AITranscript: 89,
+  AISlides: 92,
+  AIResources: 94,
   Render: 96,
 };
 
@@ -51,11 +75,32 @@ const STEP_DONE_PROGRESS = {
   Transcribe: 78,
   Slides: 96,
   Enrich: 94,
+  AIOverview: 89,
+  AITranscript: 92,
+  AISlides: 94,
+  AIResources: 96,
   Render: 100,
 };
 
 const SETTINGS_STORAGE_KEY = "lectureProcessor.settings.v2";
 const LAST_OUTPUT_STORAGE_KEY = "lectureProcessor.lastOutputDir.v1";
+const LOCAL_MODELS_STORAGE_KEY = "lectureProcessor.lmStudioModels.v2";
+const MODEL_SELECTION_VERSION = 1;
+const UI_SETTINGS_VERSION = 1;
+const LM_STUDIO_OPENAI_URL = "http://192.168.86.101:1234/v1";
+const GEMINI_RESOURCES_MODEL_VALUE = "__gemini_resources__";
+const GEMINI_RESOURCE_PREFIX = "gemini:";
+const GEMINI_MODELS = Object.freeze([
+  { value: "gemini-2.5-flash", label: "Gemini 2.5 Flash" },
+  { value: "gemini-2.5-flash-lite", label: "Gemini 2.5 Flash-Lite" },
+]);
+const LEGACY_LOCAL_MODEL_IDS = new Set(["gemma4:26b", "llama3", "qwen3", "gemma3"]);
+const LEGACY_LOCAL_OPENAI_URLS = new Set([
+  "http://localhost:11434/v1",
+  "http://localhost:1234/v1",
+  "http://localhost:8000/v1",
+  "http://localhost:8001/v1",
+]);
 const DEFAULT_SETTINGS = Object.freeze({
   recordingSpeed: "1x",
   audioQuality: "high",
@@ -63,20 +108,20 @@ const DEFAULT_SETTINGS = Object.freeze({
   transcriptionProfile: "quality",
   slideSensitivity: "medium",
   aiModel: "gemini-2.5-flash",
-  aiOverviewProvider: "gemini",
+  aiOverviewProvider: "mlx-text",
   aiOverviewModel: "",
-  aiTranscriptProvider: "gemini",
+  aiTranscriptProvider: "mlx-text",
   aiTranscriptModel: "",
-  aiSlidesProvider: "gemini",
+  aiSlidesProvider: "mlx-vision",
   aiSlidesModel: "",
-  aiResourcesProvider: "gemini",
+  aiResourcesProvider: "mlx-text",
   aiResourcesModel: "",
-  mlxTextUrl: "http://localhost:8001/v1",
-  mlxVisionUrl: "http://localhost:8000/v1",
+  mlxTextUrl: LM_STUDIO_OPENAI_URL,
+  mlxVisionUrl: LM_STUDIO_OPENAI_URL,
   mlxTimeout: 120,
   enhanceWithGemini: false,
   concurrentFiles: 2,
-  geminiMaxConcurrency: 6,
+  geminiMaxConcurrency: 3,
   saveNormalized: true,
 });
 const PROFILE_ORDER = ["quality", "fast", "turbo"];
@@ -117,6 +162,7 @@ const state = {
   tokensReceived: 0,
   tokenUsageBySource: new Map(),
   geminiKeySaved: false,
+  lmStudioTokenSaved: false,
   enhanceWithGeminiPreference: DEFAULT_SETTINGS.enhanceWithGemini,
   dependencyReady: false,
   dependencySetupRunning: false,
@@ -125,6 +171,11 @@ const state = {
   fileOrder: [],
   skippedFiles: new Set(),
   autoSkipReasons: new Map(),
+  localModels: [],
+  localModelsByBaseUrl: {},
+  localModelErrorsByBaseUrl: {},
+  localModelsLoading: false,
+  localModelsLoadedFromCache: false,
 };
 
 const elements = {
@@ -149,7 +200,6 @@ const elements = {
   confirmDialog: document.querySelector("#confirmDialog"),
   confirmCheckbox: document.querySelector("#confirmCheckbox"),
   confirmContinue: document.querySelector("#confirmContinue"),
-  normalizationWarning: document.querySelector("#normalizationWarning"),
   folderTitle: document.querySelector("#folderTitle"),
   folderSub: document.querySelector("#folderSub"),
   folderError: document.querySelector("#folderError"),
@@ -199,9 +249,13 @@ const elements = {
   geminiApiKey: document.querySelector("#geminiApiKey"),
   saveGeminiKeyButton: document.querySelector("#saveGeminiKeyButton"),
   geminiKeyStatus: document.querySelector("#geminiKeyStatus"),
+  lmStudioToken: document.querySelector("#lmStudioToken"),
+  saveLmStudioTokenButton: document.querySelector("#saveLmStudioTokenButton"),
+  lmStudioTokenStatus: document.querySelector("#lmStudioTokenStatus"),
   concurrentFiles: document.querySelector("#concurrentFiles"),
   geminiMaxConcurrency: document.querySelector("#geminiMaxConcurrency"),
-  saveNormalized: document.querySelector("#saveNormalized"),
+  refreshLocalModelsButton: document.querySelector("#refreshLocalModelsButton"),
+  localModelStatus: document.querySelector("#localModelStatus"),
   restoreDefaultsButton: document.querySelector("#restoreDefaultsButton"),
   speedSegments: [...document.querySelectorAll(".segment")],
 };
@@ -209,9 +263,11 @@ const elements = {
 window.__TAURI__?.event?.listen?.("processor-event", (event) => handleProcessorEvent(event.payload));
 window.__TAURI__?.event?.listen?.("dependency-event", (event) => handleDependencyEvent(event.payload));
 loadPersistedSettings();
+loadLocalModelChoicesAtLaunch();
 refreshDependencyStatus();
 refreshTranscriptionProfileStatus();
 refreshGeminiKeyStatus();
+refreshLmStudioTokenStatus();
 cleanupTempFilesAtLaunch();
 setupDragAndDrop();
 startSystemMetrics();
@@ -249,8 +305,10 @@ elements.setupRecheckButton.addEventListener("click", refreshDependencyStatus);
 elements.cancelRunButton.addEventListener("click", cancelBatch);
 elements.openOutputButton.addEventListener("click", openOutput);
 elements.settingsButton.addEventListener("click", () => showDialog(elements.settingsDialog));
+elements.refreshLocalModelsButton.addEventListener("click", () => refreshLocalModels({ force: true }));
 elements.restoreDefaultsButton.addEventListener("click", restoreDefaultSettings);
 elements.saveGeminiKeyButton.addEventListener("click", () => saveGeminiKey());
+elements.saveLmStudioTokenButton.addEventListener("click", () => saveLmStudioToken());
 elements.activeVideos.addEventListener("click", (event) => {
   const button = event.target.closest("[data-video-action]");
   if (!button) return;
@@ -278,14 +336,12 @@ elements.mlxTimeout.addEventListener("input", () => {
   elements.transcriptionProfile,
   elements.slideSensitivity,
   elements.enhanceWithGemini,
-  elements.aiModel,
-  elements.aiOverviewProvider,
-  elements.aiTranscriptProvider,
-  elements.aiSlidesProvider,
-  elements.aiResourcesProvider,
-  elements.saveNormalized,
+  elements.aiOverviewModel,
+  elements.aiSlidesModel,
+  elements.aiResourcesModel,
 ].forEach((element) => {
   element.addEventListener("change", () => {
+    syncAiRouteProvidersFromModelChoices();
     if (element === elements.enhanceWithGemini && state.folderMode !== "processed") {
       state.enhanceWithGeminiPreference = elements.enhanceWithGemini.checked;
     }
@@ -299,15 +355,14 @@ elements.mlxTimeout.addEventListener("input", () => {
 });
 
 [
-  elements.aiOverviewModel,
-  elements.aiTranscriptModel,
-  elements.aiSlidesModel,
-  elements.aiResourcesModel,
   elements.mlxTextUrl,
   elements.mlxVisionUrl,
 ].forEach((element) => {
   element.addEventListener("input", () => {
     saveCurrentSettings();
+    if (element === elements.mlxTextUrl || element === elements.mlxVisionUrl) {
+      markLocalModelsStale();
+    }
   });
 });
 
@@ -416,12 +471,23 @@ async function startBatch() {
     if (!confirmed) return;
   }
 
-  if (needsGemini() && elements.geminiApiKey.value.trim()) {
+  if (!ensureRequiredModelSelections()) return;
+
+  if (selectedLocalRoutes().length && elements.lmStudioToken.value.trim()) {
+    const saved = await saveLmStudioToken({ quiet: true });
+    if (!saved) return;
+  }
+
+  const skipAiReason = await aiSkipReasonForUnavailableModels();
+  const willRunAiEnhancement = needsAiEnhancement() && !skipAiReason;
+
+  if (willRunAiEnhancement && needsGemini() && elements.geminiApiKey.value.trim()) {
     const saved = await saveGeminiKey({ quiet: true });
     if (!saved) return;
   }
   await refreshGeminiKeyStatus();
-  const finalConcurrentFiles = validateSettings();
+  await refreshLmStudioTokenStatus();
+  const finalConcurrentFiles = validateSettings({ skipAiReason });
   if (!finalConcurrentFiles) return;
   const finalGeminiConcurrency = validGeminiConcurrency(elements.geminiMaxConcurrency.value);
 
@@ -438,24 +504,25 @@ async function startBatch() {
     recordingSpeed: state.recordingSpeed,
     confirmNormalization: requiresNormalizationConfirmation(),
     concurrentFiles: finalConcurrentFiles,
-    saveNormalizedVideo: elements.saveNormalized.checked,
+    saveNormalizedVideo: true,
     audioQuality: elements.audioQuality.value,
     audioEnhancement: elements.audioEnhancement.value,
     transcriptionProfile: elements.transcriptionProfile.value,
     slideSensitivity: elements.slideSensitivity.value,
     aiProvider: needsAiEnhancement() ? "gemini" : "none",
-    aiModel: elements.aiModel.value,
+    aiModel: selectedGeminiModel(),
     aiOverviewProvider: elements.aiOverviewProvider.value,
-    aiOverviewModel: elements.aiOverviewModel.value.trim(),
+    aiOverviewModel: routeModelValue("overview"),
     aiTranscriptProvider: elements.aiTranscriptProvider.value,
-    aiTranscriptModel: elements.aiTranscriptModel.value.trim(),
+    aiTranscriptModel: routeModelValue("transcript"),
     aiSlidesProvider: elements.aiSlidesProvider.value,
-    aiSlidesModel: elements.aiSlidesModel.value.trim(),
+    aiSlidesModel: routeModelValue("slides"),
     aiResourcesProvider: elements.aiResourcesProvider.value,
-    aiResourcesModel: elements.aiResourcesModel.value.trim(),
+    aiResourcesModel: routeModelValue("resources"),
     mlxTextUrl: elements.mlxTextUrl.value.trim(),
     mlxVisionUrl: elements.mlxVisionUrl.value.trim(),
     mlxTimeout: validMlxTimeout(elements.mlxTimeout.value),
+    skipAiReason,
     geminiMaxConcurrency: finalGeminiConcurrency,
     minDuration: 60,
     skippedFiles: manualSkippedFiles(),
@@ -736,7 +803,6 @@ function render() {
   }
   renderVideoDashboard();
   renderAiControls();
-  renderNormalizationWarning();
 }
 
 function setRunning(running) {
@@ -794,13 +860,13 @@ function resetResults() {
 
 function plannedStepNames(fileKind = "video") {
   if (state.folderMode === "processed") {
-    return ["Enrich", "Render"];
+    return [...plannedAiStepNames(fileKind), "Render"];
   }
 
   if (fileKind === "transcript") {
     const steps = ["Import"];
     if (needsAiEnhancement()) {
-      steps.push("Enrich");
+      steps.push(...plannedAiStepNames(fileKind));
     }
     steps.push("Render");
     return steps;
@@ -815,9 +881,18 @@ function plannedStepNames(fileKind = "video") {
     steps.push("Slides");
   }
   if (needsAiEnhancement()) {
-    steps.push("Enrich");
+    steps.push(...plannedAiStepNames(fileKind));
   }
   steps.push("Render");
+  return steps;
+}
+
+function plannedAiStepNames(fileKind = "video") {
+  const steps = ["AIOverview", "AITranscript"];
+  if (fileKind === "video" || fileKind === "processed") {
+    steps.push("AISlides");
+  }
+  steps.push("AIResources");
   return steps;
 }
 
@@ -835,6 +910,21 @@ function buildInitialSteps(fileStatus = "queued", fileKind = "video") {
 function stepRunningDetail(step) {
   const label = STEP_LABELS[step] || step || "Working";
   return `${label} started`;
+}
+
+function aiStepKeyForProgress(step) {
+  const normalized = String(step || "").toLowerCase();
+  if (normalized.includes("overview")) return "AIOverview";
+  if (normalized.includes("transcript")) return "AITranscript";
+  if (normalized.includes("slide")) return "AISlides";
+  if (normalized.includes("resource")) return "AIResources";
+  return null;
+}
+
+function aiProgressDetail(event, aiStep, countText) {
+  const label = aiStep ? STEP_LABELS[aiStep] : "AI notes";
+  const model = String(event.model || "").trim();
+  return `${label}${model ? ` · ${model}` : ""}${countText}`;
 }
 
 function markStepStarted(file, step) {
@@ -942,6 +1032,85 @@ function markFileFinished(file, status, failureStep) {
   return {};
 }
 
+function markAiStepStarted(file, step) {
+  const now = Date.now();
+  const steps = ensureStepStates(file, step);
+  const activeIndex = steps.findIndex((item) => item.key === step);
+  return {
+    steps: steps.map((item, index) => {
+      if (item.key === step) {
+        return {
+          ...item,
+          status: "active",
+          startedAt: item.startedAt || now,
+          elapsedSeconds: null,
+        };
+      }
+      if (index < activeIndex && isAiDetailStep(item.key) && ["waiting", "active"].includes(item.status)) {
+        return {
+          ...item,
+          status: "done",
+          elapsedSeconds: item.elapsedSeconds,
+        };
+      }
+      return item;
+    }),
+    currentStep: step,
+    currentStepStartedAt: now,
+    lastEventAt: now,
+  };
+}
+
+function markAiStepsFinished(file, elapsedSeconds = null) {
+  const steps = ensureStepStates(file);
+  const now = Date.now();
+  return {
+    steps: steps.map((item) =>
+      isAiDetailStep(item.key) && item.status !== "skipped" && item.status !== "stopped"
+        ? {
+            ...item,
+            status: "done",
+            elapsedSeconds: item.elapsedSeconds,
+            startedAt: item.startedAt || null,
+          }
+        : item,
+    ),
+    currentStep: null,
+    currentStepStartedAt: null,
+    lastEventAt: now,
+  };
+}
+
+function markAiStepsSkipped(file) {
+  const steps = ensureStepStates(file);
+  const now = Date.now();
+  return {
+    steps: steps.map((item) =>
+      isAiDetailStep(item.key) && item.status !== "done"
+        ? {
+            ...item,
+            status: "skipped",
+            startedAt: item.startedAt || null,
+          }
+        : item,
+    ),
+    currentStep: null,
+    currentStepStartedAt: null,
+    lastEventAt: now,
+  };
+}
+
+function progressFromSteps(steps, fallback = 0) {
+  const visibleSteps = Array.isArray(steps) ? steps : [];
+  if (!visibleSteps.length) return clampPercent(fallback);
+  const units = visibleSteps.reduce((sum, step) => {
+    if (step.status === "done" || step.status === "skipped") return sum + 1;
+    if (step.status === "active") return sum + 0.5;
+    return sum;
+  }, 0);
+  return clampPercent(Math.round((units / visibleSteps.length) * 100));
+}
+
 function ensureStepStates(file, step = null) {
   const existing = Array.isArray(file?.steps) && file.steps.length > 0
     ? file.steps
@@ -966,6 +1135,14 @@ function ensureStepStates(file, step = null) {
 function stepOrderIndex(step) {
   const index = STEP_ORDER.indexOf(step);
   return index === -1 ? STEP_ORDER.length : index;
+}
+
+function hasDetailedAiSteps(file) {
+  return ensureStepStates(file).some((step) => isAiDetailStep(step.key));
+}
+
+function isAiDetailStep(step) {
+  return AI_STEP_ORDER.includes(step);
 }
 
 function renderStepStrip(file) {
@@ -1015,7 +1192,7 @@ function renderFileTokenStats(file, source) {
     received: Number(file?.tokensReceived || 0),
   };
   const hasUsage = Number(usage.sent) > 0 || Number(usage.received) > 0;
-  const shouldShow = hasUsage || needsGemini() || file?.currentStep === "Enrich";
+  const shouldShow = hasUsage || needsGemini() || file?.currentStep === "Enrich" || isAiDetailStep(file?.currentStep);
   if (!shouldShow) return "";
   const sent = hasUsage ? formatTokenCount(usage.sent) : "--";
   const received = hasUsage ? formatTokenCount(usage.received) : "--";
@@ -1073,7 +1250,7 @@ function confirmNormalization() {
 }
 
 function validateSettings(options = {}) {
-  const { showDialogOnError = true } = options;
+  const { showDialogOnError = true, skipAiReason = "" } = options;
   const value = Number.parseInt(elements.concurrentFiles.value, 10);
   const valid = Number.isInteger(value) && value >= 1 && value <= 3;
   elements.concurrentFiles.classList.toggle("invalid", !valid);
@@ -1093,7 +1270,7 @@ function validateSettings(options = {}) {
       showDialog(elements.settingsDialog);
     }
     elements.geminiMaxConcurrency.focus();
-    elements.runMeta.textContent = "Gemini concurrency must be between 1 and 12.";
+    elements.runMeta.textContent = "AI concurrency must be between 1 and 12.";
     return null;
   }
   const mlxTimeout = Number.parseInt(elements.mlxTimeout.value, 10);
@@ -1116,7 +1293,7 @@ function validateSettings(options = {}) {
     elements.transcriptionProfile.focus();
     return null;
   }
-  if (needsGemini() && !state.geminiKeySaved && !elements.geminiApiKey.value.trim()) {
+  if (!skipAiReason && needsGemini() && !state.geminiKeySaved && !elements.geminiApiKey.value.trim()) {
     if (showDialogOnError) {
       showDialog(elements.settingsDialog);
     }
@@ -1163,16 +1340,42 @@ function handleProcessorEvent(event) {
     if (["skipped", "stopping", "stopped"].includes(state.files.get(event.source)?.status)) {
       return;
     }
+    if (event.step === "Enrich" && hasDetailedAiSteps(state.files.get(event.source))) {
+      const current = state.files.get(event.source);
+      updateFile(event.source, {
+        status: "running",
+        stage: "Preparing AI",
+        detail: "Waiting for AI overview",
+        progress: progressFromSteps(current?.steps || [], STEP_START_PROGRESS.AIOverview),
+        startedAt: current?.startedAt || Date.now(),
+      });
+      return;
+    }
+    const stepPatch = markStepStarted(state.files.get(event.source), event.step);
     updateFile(event.source, {
       status: "running",
       stage: STEP_LABELS[event.step] || event.step,
       detail: stepRunningDetail(event.step),
-      progress: STEP_START_PROGRESS[event.step] || 12,
+      progress: progressFromSteps(stepPatch.steps, STEP_START_PROGRESS[event.step] || 12),
       startedAt: state.files.get(event.source)?.startedAt || Date.now(),
-      ...markStepStarted(state.files.get(event.source), event.step),
+      ...stepPatch,
     });
   } else if (event.kind === "step_finished") {
     if (["skipped", "stopping", "stopped"].includes(state.files.get(event.source)?.status)) {
+      return;
+    }
+    if (event.step === "Enrich" && hasDetailedAiSteps(state.files.get(event.source))) {
+      const current = state.files.get(event.source);
+      const hasAiProgress = ensureStepStates(current).some((step) => isAiDetailStep(step.key) && step.status === "done");
+      const aiPatch = hasAiProgress
+        ? markAiStepsFinished(current, Number(event.elapsed_seconds || 0))
+        : markAiStepsSkipped(current);
+      updateFile(event.source, {
+        stage: hasAiProgress ? "AI complete" : "AI skipped",
+        detail: hasAiProgress ? `${Number(event.elapsed_seconds || 0).toFixed(1)}s` : "AI enhancement skipped",
+        progress: progressFromSteps(aiPatch.steps, hasAiProgress ? STEP_DONE_PROGRESS.AIResources : STEP_START_PROGRESS.AIOverview),
+        ...aiPatch,
+      });
       return;
     }
     const stepPatch = markStepFinished(state.files.get(event.source), event.step, Number(event.elapsed_seconds || 0));
@@ -1180,35 +1383,58 @@ function handleProcessorEvent(event) {
     updateFile(event.source, {
       stage: activeStep ? STEP_LABELS[activeStep.key] || activeStep.key : `${STEP_LABELS[event.step] || event.step} complete`,
       detail: activeStep ? stepRunningDetail(activeStep.key) : `${Number(event.elapsed_seconds || 0).toFixed(1)}s`,
-      progress: activeStep
-        ? Math.max(STEP_START_PROGRESS[activeStep.key] || 12, STEP_DONE_PROGRESS[event.step] || 20)
-        : STEP_DONE_PROGRESS[event.step] || 20,
+      progress: progressFromSteps(stepPatch.steps, STEP_DONE_PROGRESS[event.step] || 20),
       ...stepPatch,
     });
   } else if (event.kind === "enrichment_started") {
-    updateFile(event.source, {
-      detail: "Waiting for AI notes",
-      ...markStepStarted(state.files.get(event.source), "Enrich"),
-    });
+    const current = state.files.get(event.source);
+    if (hasDetailedAiSteps(current)) {
+      updateFile(event.source, {
+        status: "running",
+        stage: "Preparing AI",
+        detail: "Waiting for AI overview",
+        progress: progressFromSteps(current?.steps || [], STEP_START_PROGRESS.AIOverview),
+      });
+    } else {
+      const enrichPatch = markStepStarted(current, "Enrich");
+      updateFile(event.source, {
+        detail: "Waiting for AI notes",
+        progress: progressFromSteps(enrichPatch.steps, STEP_START_PROGRESS.Enrich),
+        ...enrichPatch,
+      });
+    }
   } else if (event.kind === "enrichment_progress") {
     applyTokenUsage(event);
     const completed = Number(event.completed || 0);
     const total = Number(event.total || 0);
     const countText = total > 0 ? ` (${completed}/${total})` : "";
     const current = state.files.get(event.source);
-    const activePatch = current?.currentStep === "Enrich" ? {} : markStepStarted(current, "Enrich");
+    const aiStep = aiStepKeyForProgress(event.step);
+    const activePatch = aiStep
+      ? markAiStepStarted(current, aiStep)
+      : current?.currentStep === "Enrich"
+        ? {}
+        : markStepStarted(current, "Enrich");
+    const progressSteps = activePatch.steps || current?.steps || [];
     updateFile(event.source, {
       status: "running",
-      stage: STEP_LABELS.Enrich,
-      detail: `AI notes: ${event.step || "working"}${countText}`,
-      progress: Math.max(STEP_START_PROGRESS.Enrich, Math.min(STEP_DONE_PROGRESS.Enrich, 88 + completed)),
+      stage: aiStep ? STEP_LABELS[aiStep] : STEP_LABELS.Enrich,
+      detail: aiProgressDetail(event, aiStep, countText),
+      progress: aiStep
+        ? progressFromSteps(progressSteps, STEP_START_PROGRESS[aiStep])
+        : Math.max(STEP_START_PROGRESS.Enrich, Math.min(STEP_DONE_PROGRESS.Enrich, 88 + completed)),
       ...activePatch,
     });
   } else if (event.kind === "enrichment_finished") {
     applyTokenUsage(event);
+    const current = state.files.get(event.source);
+    const aiPatch = hasDetailedAiSteps(current)
+      ? markAiStepsFinished(current, Number(event.elapsed_seconds || 0))
+      : markStepFinished(current, "Enrich", Number(event.elapsed_seconds || 0));
     updateFile(event.source, {
       detail: event.title ? `AI notes finished: ${event.title}` : "AI notes finished",
-      ...markStepFinished(state.files.get(event.source), "Enrich", Number(event.elapsed_seconds || 0)),
+      progress: progressFromSteps(aiPatch.steps, STEP_DONE_PROGRESS.Enrich),
+      ...aiPatch,
     });
   } else if (event.kind === "file_finished") {
     state.finishedFileReports += 1;
@@ -1673,6 +1899,7 @@ function needsGemini() {
 }
 
 function usesGeminiRoutes() {
+  syncAiRouteProvidersFromModelChoices();
   return aiRouteProviders().some((provider) => provider === "gemini");
 }
 
@@ -1683,6 +1910,342 @@ function aiRouteProviders() {
     elements.aiSlidesProvider.value,
     elements.aiResourcesProvider.value,
   ];
+}
+
+function aiRouteControls() {
+  return [
+    { step: "overview", label: "Text Model", providerInput: elements.aiOverviewProvider, modelInput: elements.aiOverviewModel },
+    { step: "transcript", label: "Text Model", providerInput: elements.aiTranscriptProvider, modelInput: elements.aiTranscriptModel },
+    { step: "slides", label: "Vision Model", providerInput: elements.aiSlidesProvider, modelInput: elements.aiSlidesModel },
+    { step: "resources", label: "Resource Model", providerInput: elements.aiResourcesProvider, modelInput: elements.aiResourcesModel },
+  ];
+}
+
+function selectedLocalRoutes() {
+  syncAiRouteProvidersFromModelChoices();
+  if (!needsAiEnhancement()) return [];
+  return aiRouteControls().filter((route) => isLocalOpenAiProvider(route.providerInput.value));
+}
+
+function isLocalOpenAiProvider(provider) {
+  return provider === "mlx-text" || provider === "mlx-vision";
+}
+
+function syncAiRouteProvidersFromModelChoices() {
+  elements.aiOverviewProvider.value = "mlx-text";
+  elements.aiTranscriptProvider.value = "mlx-text";
+  elements.aiTranscriptModel.value = routeModelValue("overview");
+  elements.aiSlidesProvider.value = "mlx-vision";
+  elements.aiResourcesProvider.value = isGeminiResourceValue(elements.aiResourcesModel.value) ? "gemini" : "mlx-text";
+  elements.aiModel.value = selectedGeminiModel();
+}
+
+function routeModelValue(step) {
+  const route = aiRouteControls().find((candidate) => candidate.step === step);
+  if (!route) return "";
+  if (step === "resources" && isGeminiResourceValue(route.modelInput.value)) return "";
+  return String(route.modelInput.value || "").trim();
+}
+
+function storedRouteModelValue(step) {
+  const route = aiRouteControls().find((candidate) => candidate.step === step);
+  return route ? String(route.modelInput.value || "").trim() : "";
+}
+
+function geminiResourceValue(model) {
+  return `${GEMINI_RESOURCE_PREFIX}${model || DEFAULT_SETTINGS.aiModel}`;
+}
+
+function isGeminiResourceValue(value) {
+  const raw = String(value || "").trim();
+  return raw === GEMINI_RESOURCES_MODEL_VALUE || raw.startsWith(GEMINI_RESOURCE_PREFIX);
+}
+
+function geminiModelFromResourceValue(value) {
+  const raw = String(value || "").trim();
+  if (raw === GEMINI_RESOURCES_MODEL_VALUE) return DEFAULT_SETTINGS.aiModel;
+  if (raw.startsWith(GEMINI_RESOURCE_PREFIX)) {
+    return raw.slice(GEMINI_RESOURCE_PREFIX.length) || DEFAULT_SETTINGS.aiModel;
+  }
+  return "";
+}
+
+function selectedGeminiModel() {
+  return geminiModelFromResourceValue(elements.aiResourcesModel.value) || elements.aiModel.value || DEFAULT_SETTINGS.aiModel;
+}
+
+function resourceModelChoiceFromSettings(settings) {
+  const raw = String(settings.aiResourcesModel || "").trim();
+  if (raw === GEMINI_RESOURCES_MODEL_VALUE) return geminiResourceValue(settings.aiModel || DEFAULT_SETTINGS.aiModel);
+  if (raw.startsWith(GEMINI_RESOURCE_PREFIX)) return raw;
+  if (settings.aiResourcesProvider === "gemini") return geminiResourceValue(settings.aiModel || DEFAULT_SETTINGS.aiModel);
+  return raw;
+}
+
+function ensureRequiredModelSelections() {
+  const missingSelections = missingRequiredModelSelections();
+  if (!missingSelections.length) return true;
+
+  showDialog(elements.settingsDialog);
+  const firstMissingRoute = aiRouteControls().find((route) => missingSelections.includes(route.label));
+  firstMissingRoute?.modelInput.focus();
+  elements.runMeta.textContent = `Choose ${missingSelections.join(", ")} before starting AI enhancement.`;
+  return false;
+}
+
+function missingRequiredModelSelections() {
+  if (!needsAiEnhancement()) return [];
+  syncAiRouteProvidersFromModelChoices();
+  return uniqueStrings(aiRouteControls()
+    .filter((route) => {
+      const value = storedRouteModelValue(route.step);
+      return route.step === "resources" ? !value : !routeModelValue(route.step);
+    })
+    .map((route) => route.label));
+}
+
+async function aiSkipReasonForUnavailableModels() {
+  if (!needsAiEnhancement()) return "";
+  syncAiRouteProvidersFromModelChoices();
+
+  // The Python pipeline now probes LM Studio once before staged AI starts and
+  // skips only the unavailable role. Keep this refresh for user feedback/cache,
+  // but do not turn one missing model into a whole-run AI skip here.
+  await refreshLocalModels({ quiet: true, force: true });
+  return "";
+}
+
+async function refreshLocalModels(options = {}) {
+  const { quiet = false, force = false } = options;
+  if (state.localModelsLoading) return state.localModels;
+  if (!force && state.localModelsLoadedFromCache) return state.localModels;
+  if (elements.lmStudioToken.value.trim()) {
+    const saved = await saveLmStudioToken({ quiet: true });
+    if (!saved) return state.localModels;
+  }
+  await refreshLmStudioTokenStatus();
+
+  const baseUrls = localModelBaseUrls({ includeAll: true });
+  state.localModelsLoading = true;
+  renderAiControls();
+  setLocalModelStatus("Checking models...");
+
+  try {
+    const results = await Promise.all(baseUrls.map(async (baseUrl) => {
+      try {
+        const models = uniqueStrings(await fetchLocalModels([baseUrl])).sort((left, right) => left.localeCompare(right));
+        return { baseUrl, models, error: "" };
+      } catch (error) {
+        return { baseUrl, models: [], error: String(error || "Unavailable") };
+      }
+    }));
+    const modelsByBaseUrl = {};
+    const errorsByBaseUrl = {};
+    results.forEach((result) => {
+      modelsByBaseUrl[result.baseUrl] = result.models;
+      if (result.error) {
+        errorsByBaseUrl[result.baseUrl] = result.error;
+      }
+    });
+    state.localModelsByBaseUrl = modelsByBaseUrl;
+    state.localModelErrorsByBaseUrl = errorsByBaseUrl;
+    state.localModels = uniqueStrings(results.flatMap((result) => result.models))
+      .sort((left, right) => left.localeCompare(right));
+    state.localModelsLoadedFromCache = false;
+    cacheLocalModels();
+    renderLocalModelOptions();
+    setLocalModelStatus(localModelStatusSummary());
+    if (!state.localModels.length && !quiet) {
+      const errors = Object.values(errorsByBaseUrl);
+      elements.runMeta.textContent = errors.length
+        ? errors.join("; ")
+        : "LM Studio is reachable, but no models are loaded.";
+    }
+    return state.localModels;
+  } catch (error) {
+    state.localModels = [];
+    state.localModelsByBaseUrl = {};
+    state.localModelErrorsByBaseUrl = {};
+    state.localModelsLoadedFromCache = false;
+    renderLocalModelOptions();
+    setLocalModelStatus("LM Studio unavailable");
+    if (!quiet) {
+      const message = String(error || "");
+      elements.runMeta.textContent = message.includes("API token")
+        ? message
+        : `Could not reach LM Studio at ${baseUrls.join(" and ")}.`;
+    }
+    return [];
+  } finally {
+    state.localModelsLoading = false;
+    renderAiControls();
+  }
+}
+
+function localModelBaseUrls(options = {}) {
+  const { includeAll = false } = options;
+  const urls = [];
+  const routes = includeAll ? [] : selectedLocalRoutes();
+  if (includeAll || routes.length === 0 || routes.some((route) => route.providerInput.value === "mlx-text")) {
+    urls.push(normalizeOpenAiBaseUrl(elements.mlxTextUrl.value));
+  }
+  if (includeAll || routes.some((route) => route.providerInput.value === "mlx-vision")) {
+    urls.push(normalizeOpenAiBaseUrl(elements.mlxVisionUrl.value));
+  }
+  return uniqueStrings(urls);
+}
+
+async function fetchLocalModels(baseUrls) {
+  const result = await invoke("lm_studio_models", { baseUrls });
+  return uniqueStrings(result?.models || []);
+}
+
+function renderLocalModelOptions() {
+  renderModelSelect(elements.aiOverviewModel, routeModelValue("overview"), {
+    includeGemini: false,
+    models: modelsForRoute("overview"),
+  });
+  elements.aiTranscriptModel.value = routeModelValue("overview");
+  renderModelSelect(elements.aiSlidesModel, routeModelValue("slides"), {
+    includeGemini: false,
+    models: modelsForRoute("slides"),
+  });
+  renderModelSelect(elements.aiResourcesModel, storedRouteModelValue("resources"), {
+    includeGemini: true,
+    models: modelsForRoute("resources"),
+  });
+  syncAiRouteProvidersFromModelChoices();
+}
+
+function renderModelSelect(select, selectedValue, options = {}) {
+  const { includeGemini = false, models = state.localModels } = options;
+  const modelOptions = uniqueStrings(models).sort((left, right) => left.localeCompare(right));
+  const selected = String(selectedValue || "").trim();
+  select.innerHTML = "";
+
+  const placeholder = includeGemini ? "Choose Gemini or LM Studio model" : "Choose LM Studio model";
+  select.appendChild(new Option(placeholder, ""));
+  if (includeGemini) {
+    GEMINI_MODELS.forEach((model) => {
+      select.appendChild(new Option(model.label, geminiResourceValue(model.value)));
+    });
+  }
+  modelOptions.forEach((model) => {
+    select.appendChild(new Option(model, model));
+  });
+
+  if (selected && !isGeminiResourceValue(selected) && !modelOptions.includes(selected)) {
+    select.appendChild(new Option(`${selected} (unavailable)`, selected));
+  }
+  if (selected) {
+    select.value = selected;
+  } else {
+    select.value = "";
+  }
+}
+
+function markLocalModelsStale() {
+  state.localModels = [];
+  state.localModelsByBaseUrl = {};
+  state.localModelErrorsByBaseUrl = {};
+  state.localModelsLoadedFromCache = false;
+  renderLocalModelOptions();
+  setLocalModelStatus("Models not checked");
+}
+
+function loadLocalModelChoicesAtLaunch() {
+  if (loadCachedLocalModels()) {
+    renderLocalModelOptions();
+    setLocalModelStatus(localModelStatusSummary({ cached: true }));
+    saveCurrentSettings();
+    return;
+  }
+  refreshLocalModels({ quiet: true, force: true }).then(() => saveCurrentSettings());
+}
+
+function loadCachedLocalModels() {
+  try {
+    const cached = JSON.parse(window.localStorage.getItem(LOCAL_MODELS_STORAGE_KEY) || "{}");
+    const cachedUrls = Array.isArray(cached.baseUrls) ? cached.baseUrls : [];
+    if (JSON.stringify(cachedUrls) !== JSON.stringify(localModelBaseUrls({ includeAll: true }))) return false;
+    if (!cached.modelsByBaseUrl || typeof cached.modelsByBaseUrl !== "object") return false;
+    state.localModelsByBaseUrl = Object.fromEntries(
+      Object.entries(cached.modelsByBaseUrl).map(([baseUrl, models]) => [
+        normalizeOpenAiBaseUrl(baseUrl),
+        uniqueStrings(Array.isArray(models) ? models : []),
+      ])
+    );
+    state.localModelErrorsByBaseUrl = {};
+    state.localModels = uniqueStrings(Object.values(state.localModelsByBaseUrl).flat())
+      .sort((left, right) => left.localeCompare(right));
+    state.localModelsLoadedFromCache = true;
+    return state.localModels.length > 0;
+  } catch {
+    return false;
+  }
+}
+
+function cacheLocalModels() {
+  try {
+    window.localStorage.setItem(
+      LOCAL_MODELS_STORAGE_KEY,
+      JSON.stringify({
+        baseUrls: localModelBaseUrls({ includeAll: true }),
+        modelsByBaseUrl: state.localModelsByBaseUrl,
+        updatedAt: new Date().toISOString(),
+      })
+    );
+  } catch {
+    // Model cache only improves startup; live refresh still works without it.
+  }
+}
+
+function setLocalModelStatus(message) {
+  elements.localModelStatus.textContent = message;
+}
+
+function modelsForRoute(step) {
+  if (step === "slides") return modelsForBaseUrl(elements.mlxVisionUrl.value);
+  return modelsForBaseUrl(elements.mlxTextUrl.value);
+}
+
+function modelsForBaseUrl(baseUrl) {
+  return state.localModelsByBaseUrl[normalizeOpenAiBaseUrl(baseUrl)] || [];
+}
+
+function localModelStatusSummary(options = {}) {
+  const { cached = false } = options;
+  const textUrl = normalizeOpenAiBaseUrl(elements.mlxTextUrl.value);
+  const visionUrl = normalizeOpenAiBaseUrl(elements.mlxVisionUrl.value);
+  const prefix = cached ? "Cached: " : "";
+  if (textUrl === visionUrl) {
+    return `${prefix}Shared server ${serverModelStatus(textUrl)}`;
+  }
+  return `${prefix}Text/Resource ${serverModelStatus(textUrl)} · Vision ${serverModelStatus(visionUrl)}`;
+}
+
+function serverModelStatus(baseUrl) {
+  const models = modelsForBaseUrl(baseUrl);
+  if (state.localModelErrorsByBaseUrl[normalizeOpenAiBaseUrl(baseUrl)]) return "unavailable";
+  return `${models.length} model${models.length === 1 ? "" : "s"}`;
+}
+
+function normalizeOpenAiBaseUrl(value) {
+  const raw = String(value || LM_STUDIO_OPENAI_URL).trim() || LM_STUDIO_OPENAI_URL;
+  try {
+    const url = new URL(raw);
+    const path = url.pathname.replace(/\/+$/, "");
+    url.pathname = path && path !== "/" ? path : "/v1";
+    url.search = "";
+    url.hash = "";
+    return url.toString().replace(/\/+$/, "");
+  } catch {
+    return raw.replace(/\/+$/, "");
+  }
+}
+
+function uniqueStrings(values) {
+  return [...new Set(values.map((value) => String(value || "").trim()).filter(Boolean))];
 }
 
 function requiresNormalizationConfirmation() {
@@ -1731,26 +2294,36 @@ function applySettings(settings) {
   setSelectValue(elements.transcriptionProfile, settings.transcriptionProfile, DEFAULT_SETTINGS.transcriptionProfile);
   setSelectValue(elements.slideSensitivity, settings.slideSensitivity, DEFAULT_SETTINGS.slideSensitivity);
   setSelectValue(elements.aiModel, settings.aiModel, DEFAULT_SETTINGS.aiModel);
-  setSelectValue(elements.aiOverviewProvider, settings.aiOverviewProvider, DEFAULT_SETTINGS.aiOverviewProvider);
-  elements.aiOverviewModel.value = settings.aiOverviewModel || DEFAULT_SETTINGS.aiOverviewModel;
-  setSelectValue(elements.aiTranscriptProvider, settings.aiTranscriptProvider, DEFAULT_SETTINGS.aiTranscriptProvider);
-  elements.aiTranscriptModel.value = settings.aiTranscriptModel || DEFAULT_SETTINGS.aiTranscriptModel;
-  setSelectValue(elements.aiSlidesProvider, settings.aiSlidesProvider, DEFAULT_SETTINGS.aiSlidesProvider);
-  elements.aiSlidesModel.value = settings.aiSlidesModel || DEFAULT_SETTINGS.aiSlidesModel;
-  setSelectValue(elements.aiResourcesProvider, settings.aiResourcesProvider, DEFAULT_SETTINGS.aiResourcesProvider);
-  elements.aiResourcesModel.value = settings.aiResourcesModel || DEFAULT_SETTINGS.aiResourcesModel;
   elements.mlxTextUrl.value = settings.mlxTextUrl || DEFAULT_SETTINGS.mlxTextUrl;
   elements.mlxVisionUrl.value = settings.mlxVisionUrl || DEFAULT_SETTINGS.mlxVisionUrl;
   elements.mlxTimeout.value = String(validMlxTimeout(settings.mlxTimeout));
+  const resourceChoice = resourceModelChoiceFromSettings(settings);
+  elements.aiOverviewProvider.value = "mlx-text";
+  elements.aiTranscriptProvider.value = "mlx-text";
+  elements.aiSlidesProvider.value = "mlx-vision";
+  elements.aiResourcesProvider.value = isGeminiResourceValue(resourceChoice) ? "gemini" : "mlx-text";
+  renderLocalModelOptions();
+  renderModelSelect(elements.aiOverviewModel, settings.aiOverviewModel || DEFAULT_SETTINGS.aiOverviewModel, {
+    includeGemini: false,
+    models: modelsForRoute("overview"),
+  });
+  elements.aiTranscriptModel.value = routeModelValue("overview");
+  renderModelSelect(elements.aiSlidesModel, settings.aiSlidesModel || DEFAULT_SETTINGS.aiSlidesModel, {
+    includeGemini: false,
+    models: modelsForRoute("slides"),
+  });
+  renderModelSelect(elements.aiResourcesModel, resourceChoice || DEFAULT_SETTINGS.aiResourcesModel, {
+    includeGemini: true,
+    models: modelsForRoute("resources"),
+  });
+  syncAiRouteProvidersFromModelChoices();
   state.enhanceWithGeminiPreference = Boolean(settings.enhanceWithGemini);
   elements.enhanceWithGemini.checked = state.enhanceWithGeminiPreference;
   elements.concurrentFiles.value = String(validConcurrentFiles(settings.concurrentFiles));
   elements.geminiMaxConcurrency.value = String(validGeminiConcurrency(settings.geminiMaxConcurrency));
-  elements.saveNormalized.checked = Boolean(settings.saveNormalized);
   syncSpeedSegments();
   renderTranscriptionProfileOptions();
   renderAiControls();
-  renderNormalizationWarning();
 }
 
 function migratePersistedSettings(settings) {
@@ -1758,6 +2331,32 @@ function migratePersistedSettings(settings) {
   if (!migrated.transcriptionProfile) {
     migrated.transcriptionProfile = legacyProfileFromSettings(migrated);
   }
+  if (LEGACY_LOCAL_OPENAI_URLS.has(normalizeOpenAiBaseUrl(migrated.mlxTextUrl))) {
+    migrated.mlxTextUrl = DEFAULT_SETTINGS.mlxTextUrl;
+  }
+  if (LEGACY_LOCAL_OPENAI_URLS.has(normalizeOpenAiBaseUrl(migrated.mlxVisionUrl))) {
+    migrated.mlxVisionUrl = DEFAULT_SETTINGS.mlxVisionUrl;
+  }
+  if (migrated.modelSelectionVersion !== MODEL_SELECTION_VERSION) {
+    migrated.aiOverviewModel = "";
+    migrated.aiTranscriptModel = "";
+    migrated.aiSlidesModel = "";
+    migrated.aiResourcesModel = "";
+    migrated.aiResourcesProvider = DEFAULT_SETTINGS.aiResourcesProvider;
+  }
+  if (migrated.uiSettingsVersion !== UI_SETTINGS_VERSION) {
+    migrated.geminiMaxConcurrency = DEFAULT_SETTINGS.geminiMaxConcurrency;
+    migrated.saveNormalized = true;
+    if (migrated.aiResourcesProvider === "gemini" || migrated.aiResourcesModel === GEMINI_RESOURCES_MODEL_VALUE) {
+      migrated.aiResourcesModel = geminiResourceValue(migrated.aiModel || DEFAULT_SETTINGS.aiModel);
+      migrated.aiResourcesProvider = "gemini";
+    }
+  }
+  ["aiOverviewModel", "aiTranscriptModel", "aiSlidesModel", "aiResourcesModel"].forEach((key) => {
+    if (LEGACY_LOCAL_MODEL_IDS.has(String(migrated[key] || "").trim())) {
+      migrated[key] = "";
+    }
+  });
   Object.entries(LEGACY_DEFAULT_MIGRATIONS).forEach(([key, [legacyValue, nextValue]]) => {
     if (migrated[key] === legacyValue) {
       migrated[key] = nextValue;
@@ -1773,6 +2372,7 @@ function legacyProfileFromSettings(settings) {
 }
 
 function saveCurrentSettings() {
+  syncAiRouteProvidersFromModelChoices();
   const concurrentFiles = Number.parseInt(elements.concurrentFiles.value, 10);
   if (!Number.isInteger(concurrentFiles) || concurrentFiles < 1 || concurrentFiles > 3) return;
   const geminiMaxConcurrency = Number.parseInt(elements.geminiMaxConcurrency.value, 10);
@@ -1781,27 +2381,29 @@ function saveCurrentSettings() {
   if (!Number.isInteger(mlxTimeout) || mlxTimeout < 10 || mlxTimeout > 600) return;
 
   const settings = {
+    uiSettingsVersion: UI_SETTINGS_VERSION,
+    modelSelectionVersion: MODEL_SELECTION_VERSION,
     recordingSpeed: state.recordingSpeed,
     audioQuality: elements.audioQuality.value,
     audioEnhancement: elements.audioEnhancement.value,
     transcriptionProfile: elements.transcriptionProfile.value,
     slideSensitivity: elements.slideSensitivity.value,
     enhanceWithGemini: state.folderMode === "processed" ? state.enhanceWithGeminiPreference : elements.enhanceWithGemini.checked,
-    aiModel: elements.aiModel.value,
+    aiModel: selectedGeminiModel(),
     aiOverviewProvider: elements.aiOverviewProvider.value,
-    aiOverviewModel: elements.aiOverviewModel.value.trim(),
+    aiOverviewModel: routeModelValue("overview"),
     aiTranscriptProvider: elements.aiTranscriptProvider.value,
-    aiTranscriptModel: elements.aiTranscriptModel.value.trim(),
+    aiTranscriptModel: routeModelValue("transcript"),
     aiSlidesProvider: elements.aiSlidesProvider.value,
-    aiSlidesModel: elements.aiSlidesModel.value.trim(),
+    aiSlidesModel: routeModelValue("slides"),
     aiResourcesProvider: elements.aiResourcesProvider.value,
-    aiResourcesModel: elements.aiResourcesModel.value.trim(),
+    aiResourcesModel: storedRouteModelValue("resources"),
     mlxTextUrl: elements.mlxTextUrl.value.trim(),
     mlxVisionUrl: elements.mlxVisionUrl.value.trim(),
     mlxTimeout,
     concurrentFiles,
     geminiMaxConcurrency,
-    saveNormalized: elements.saveNormalized.checked,
+    saveNormalized: true,
   };
 
   try {
@@ -1838,6 +2440,33 @@ async function saveGeminiKey(options = {}) {
   }
 }
 
+async function saveLmStudioToken(options = {}) {
+  const { quiet = false } = options;
+  const token = elements.lmStudioToken.value.trim();
+  if (!token) {
+    if (!quiet) {
+      elements.lmStudioTokenStatus.textContent = "Paste a token first";
+    }
+    return false;
+  }
+
+  elements.saveLmStudioTokenButton.disabled = true;
+  try {
+    await invoke("save_api_key", { provider: "lm-studio", apiKey: token });
+    elements.lmStudioToken.value = "";
+    state.lmStudioTokenSaved = true;
+    elements.lmStudioTokenStatus.textContent = "Token saved";
+    return true;
+  } catch (error) {
+    state.lmStudioTokenSaved = false;
+    elements.lmStudioTokenStatus.textContent = `Could not save token: ${error}`;
+    return false;
+  } finally {
+    elements.saveLmStudioTokenButton.disabled = false;
+    renderAiControls();
+  }
+}
+
 async function refreshGeminiKeyStatus() {
   try {
     const result = await invoke("has_api_key", { provider: "gemini" });
@@ -1850,11 +2479,24 @@ async function refreshGeminiKeyStatus() {
   renderAiControls();
 }
 
+async function refreshLmStudioTokenStatus() {
+  try {
+    const result = await invoke("has_api_key", { provider: "lm-studio" });
+    state.lmStudioTokenSaved = Boolean(result?.saved);
+    elements.lmStudioTokenStatus.textContent = state.lmStudioTokenSaved ? "Token saved" : "No token saved";
+  } catch {
+    state.lmStudioTokenSaved = false;
+    elements.lmStudioTokenStatus.textContent = "Token status unavailable";
+  }
+  renderAiControls();
+}
+
 function renderAiControls() {
   const geminiSelected = needsGemini();
-  elements.aiModel.disabled = !geminiSelected;
   elements.geminiApiKey.disabled = !geminiSelected;
   elements.saveGeminiKeyButton.disabled = !geminiSelected;
+  elements.lmStudioToken.disabled = state.running;
+  elements.saveLmStudioTokenButton.disabled = state.running;
   [
     elements.aiOverviewProvider,
     elements.aiOverviewModel,
@@ -1867,9 +2509,12 @@ function renderAiControls() {
     elements.mlxTextUrl,
     elements.mlxVisionUrl,
     elements.mlxTimeout,
+    elements.refreshLocalModelsButton,
   ].forEach((element) => {
-    element.disabled = state.running;
+    const waitsForLocalModels = element === elements.refreshLocalModelsButton;
+    element.disabled = state.running || (waitsForLocalModels && state.localModelsLoading);
   });
+  elements.refreshLocalModelsButton.textContent = state.localModelsLoading ? "Checking..." : "Force Refresh Models";
 }
 
 function renderTranscriptionProfileOptions() {
@@ -1965,10 +2610,6 @@ function validMlxTimeout(value) {
   return Number.isInteger(parsed) && parsed >= 10 && parsed <= 600 ? parsed : DEFAULT_SETTINGS.mlxTimeout;
 }
 
-function renderNormalizationWarning() {
-  elements.normalizationWarning.classList.toggle("hidden", !requiresNormalizationConfirmation());
-}
-
 function setupDragAndDrop() {
   const webview = window.__TAURI__?.webview?.getCurrentWebview?.();
   webview
@@ -2036,8 +2677,8 @@ function selectedAiRouteLabel() {
   const providers = aiRouteProviders();
   if (providers.every((provider) => provider === "gemini")) return "Gemini";
   if (providers.every((provider) => provider === "off")) return "AI off";
-  if (!providers.includes("gemini")) return "Local AI";
-  return "Gemini + Local";
+  if (!providers.includes("gemini")) return "LM Studio";
+  return "Gemini + LM Studio";
 }
 
 function startElapsedTimer() {

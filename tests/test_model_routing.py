@@ -4,8 +4,14 @@ import unittest
 from unittest import mock
 from pathlib import Path
 
-from lecture_processor.ai.enrichment import enrich_lecture_artifact
-from lecture_processor.ai.model_routing import routed_analyze_lecture, uses_experimental_routing
+from lecture_processor.ai.enrichment import enrich_lecture_artifact, enrich_lecture_artifacts_staged
+from lecture_processor.ai.model_routing import (
+    RouteAvailability,
+    probe_lm_studio_model_availability,
+    routed_analyze_lecture,
+    routed_analyze_lectures_staged,
+    uses_experimental_routing,
+)
 from lecture_processor.ai.providers.base import AnalyzeLectureRequest, AnalyzeLectureResponse
 from lecture_processor.config import AIModelProvider, AIProviderName, BatchConfig
 
@@ -99,6 +105,365 @@ class ModelRoutingTests(unittest.TestCase):
         self.assertEqual(response.title, "MLX title")
         self.assertEqual(response.formatted_transcript, "Gemini transcript")
 
+    def test_probe_resolves_defaults_and_marks_missing_role(self):
+        config = BatchConfig(
+            input_dir=Path("."),
+            output_dir=Path("."),
+            ai_provider=AIProviderName.GEMINI,
+            ai_overview_provider=AIModelProvider.MLX_TEXT,
+            ai_transcript_provider=AIModelProvider.MLX_TEXT,
+            ai_slides_provider=AIModelProvider.MLX_VISION,
+            ai_slides_model="missing-vision",
+            ai_resources_provider=AIModelProvider.MLX_TEXT,
+            ai_resources_model="text-model",
+        )
+
+        def fake_models(provider, _config):
+            if provider is AIModelProvider.MLX_VISION:
+                return ["vision-model"]
+            return ["text-model"]
+
+        with mock.patch("lecture_processor.ai.model_routing._list_models_for_provider", side_effect=fake_models):
+            availability = probe_lm_studio_model_availability(config)
+
+        self.assertEqual("text-model", availability.model_for_step("overview", config))
+        self.assertEqual("text-model", availability.model_for_step("resources", config))
+        self.assertIn("vision", availability.skipped_roles)
+        self.assertIn("missing-vision", availability.skipped_roles["vision"])
+
+    def test_staged_routing_groups_all_files_by_role(self):
+        calls = []
+        jobs = [
+            ("a", _request("a")),
+            ("b", _request("b")),
+        ]
+        config = BatchConfig(
+            input_dir=Path("."),
+            output_dir=Path("."),
+            ai_provider=AIProviderName.GEMINI,
+            ai_overview_provider=AIModelProvider.MLX_TEXT,
+            ai_overview_model="text-model",
+            ai_transcript_provider=AIModelProvider.MLX_TEXT,
+            ai_transcript_model="text-model",
+            ai_slides_provider=AIModelProvider.MLX_VISION,
+            ai_slides_model="vision-model",
+            ai_resources_provider=AIModelProvider.MLX_TEXT,
+            ai_resources_model="resource-model",
+        )
+
+        with mock.patch(
+            "lecture_processor.ai.model_routing.MLXTextProvider",
+            side_effect=lambda **kwargs: RecordingTextProvider(calls, **kwargs),
+        ), mock.patch(
+            "lecture_processor.ai.model_routing.MLXVisionProvider",
+            side_effect=lambda **kwargs: RecordingVisionProvider(calls, **kwargs),
+        ):
+            responses = routed_analyze_lectures_staged(
+                jobs,
+                config,
+                availability=RouteAvailability(
+                    resolved_step_models={
+                        "overview": "text-model",
+                        "transcript": "text-model",
+                        "slides": "vision-model",
+                        "resources": "resource-model",
+                    }
+                ),
+            )
+
+        self.assertEqual(["a", "b"], sorted(responses))
+        self.assertEqual(
+            [
+                ("text-model", "overview", "a"),
+                ("text-model", "overview", "b"),
+                ("text-model", "transcript", "a"),
+                ("text-model", "transcript", "b"),
+                ("vision-model", "slides", "a"),
+                ("vision-model", "slides", "b"),
+                ("resource-model", "resources", "a"),
+                ("resource-model", "resources", "b"),
+            ],
+            calls,
+        )
+
+    def test_staged_routing_reuses_text_model_for_resources(self):
+        calls = []
+        jobs = [
+            ("a", _request("a")),
+            ("b", _request("b")),
+        ]
+        config = BatchConfig(
+            input_dir=Path("."),
+            output_dir=Path("."),
+            ai_provider=AIProviderName.GEMINI,
+            ai_overview_provider=AIModelProvider.MLX_TEXT,
+            ai_overview_model="shared-text",
+            ai_transcript_provider=AIModelProvider.MLX_TEXT,
+            ai_transcript_model="shared-text",
+            ai_slides_provider=AIModelProvider.MLX_VISION,
+            ai_slides_model="vision-model",
+            ai_resources_provider=AIModelProvider.MLX_TEXT,
+            ai_resources_model="shared-text",
+        )
+
+        with mock.patch(
+            "lecture_processor.ai.model_routing.MLXTextProvider",
+            side_effect=lambda **kwargs: RecordingTextProvider(calls, **kwargs),
+        ), mock.patch(
+            "lecture_processor.ai.model_routing.MLXVisionProvider",
+            side_effect=lambda **kwargs: RecordingVisionProvider(calls, **kwargs),
+        ):
+            routed_analyze_lectures_staged(
+                jobs,
+                config,
+                availability=RouteAvailability(
+                    resolved_step_models={
+                        "overview": "shared-text",
+                        "transcript": "shared-text",
+                        "slides": "vision-model",
+                        "resources": "shared-text",
+                    }
+                ),
+            )
+
+        self.assertEqual(
+            [
+                ("shared-text", "overview", "a"),
+                ("shared-text", "overview", "b"),
+                ("shared-text", "transcript", "a"),
+                ("shared-text", "transcript", "b"),
+                ("shared-text", "resources", "a"),
+                ("shared-text", "resources", "b"),
+                ("vision-model", "slides", "a"),
+                ("vision-model", "slides", "b"),
+            ],
+            calls,
+        )
+
+    def test_staged_routing_offloads_between_different_local_models(self):
+        calls = []
+        offloads = []
+        config = BatchConfig(
+            input_dir=Path("."),
+            output_dir=Path("."),
+            ai_provider=AIProviderName.GEMINI,
+            ai_overview_provider=AIModelProvider.MLX_TEXT,
+            ai_overview_model="text-model",
+            ai_transcript_provider=AIModelProvider.MLX_TEXT,
+            ai_transcript_model="text-model",
+            ai_slides_provider=AIModelProvider.MLX_VISION,
+            ai_slides_model="vision-model",
+            ai_resources_provider=AIModelProvider.MLX_TEXT,
+            ai_resources_model="resource-model",
+        )
+        availability = RouteAvailability(
+            resolved_step_models={
+                "overview": "text-model",
+                "transcript": "text-model",
+                "slides": "vision-model",
+                "resources": "resource-model",
+            }
+        )
+
+        with mock.patch(
+            "lecture_processor.ai.model_routing.MLXTextProvider",
+            side_effect=lambda **kwargs: RecordingTextProvider(calls, **kwargs),
+        ), mock.patch(
+            "lecture_processor.ai.model_routing.MLXVisionProvider",
+            side_effect=lambda **kwargs: RecordingVisionProvider(calls, **kwargs),
+        ), mock.patch(
+            "lecture_processor.ai.model_routing._OpenAICompatibleClient",
+            side_effect=lambda *args: RecordingUnloadClient(offloads, *args),
+        ):
+            routed_analyze_lectures_staged(
+                [("a", _request("a"))],
+                config,
+                availability=availability,
+            )
+
+        self.assertEqual(["text-model", "vision-model"], [item[1] for item in offloads])
+
+    def test_staged_routing_offloads_before_switching_to_new_model(self):
+        offloads = []
+        config = BatchConfig(
+            input_dir=Path("."),
+            output_dir=Path("."),
+            ai_provider=AIProviderName.GEMINI,
+            ai_overview_provider=AIModelProvider.MLX_TEXT,
+            ai_overview_model="shared-text",
+            ai_transcript_provider=AIModelProvider.MLX_TEXT,
+            ai_transcript_model="shared-text",
+            ai_slides_provider=AIModelProvider.MLX_VISION,
+            ai_slides_model="vision-model",
+            ai_resources_provider=AIModelProvider.MLX_TEXT,
+            ai_resources_model="shared-text",
+        )
+        availability = RouteAvailability(
+            resolved_step_models={
+                "overview": "shared-text",
+                "transcript": "shared-text",
+                "slides": "vision-model",
+                "resources": "shared-text",
+            }
+        )
+
+        with mock.patch(
+            "lecture_processor.ai.model_routing.MLXTextProvider",
+            side_effect=lambda **kwargs: RecordingTextProvider([], **kwargs),
+        ), mock.patch(
+            "lecture_processor.ai.model_routing.MLXVisionProvider",
+            side_effect=lambda **kwargs: RecordingVisionProvider([], **kwargs),
+        ), mock.patch(
+            "lecture_processor.ai.model_routing._OpenAICompatibleClient",
+            side_effect=lambda *args: RecordingUnloadClient(offloads, *args),
+        ):
+            routed_analyze_lectures_staged(
+                [("a", _request("a"))],
+                config,
+                availability=availability,
+            )
+
+        self.assertEqual(["shared-text"], [model for _, model, _ in offloads])
+
+    def test_single_lecture_routing_offloads_before_switching_to_new_model(self):
+        offloads = []
+        config = BatchConfig(
+            input_dir=Path("."),
+            output_dir=Path("."),
+            ai_provider=AIProviderName.GEMINI,
+            ai_overview_provider=AIModelProvider.MLX_TEXT,
+            ai_overview_model="shared-text",
+            ai_transcript_provider=AIModelProvider.MLX_TEXT,
+            ai_transcript_model="shared-text",
+            ai_slides_provider=AIModelProvider.MLX_VISION,
+            ai_slides_model="vision-model",
+            ai_resources_provider=AIModelProvider.MLX_TEXT,
+            ai_resources_model="shared-text",
+        )
+        availability = RouteAvailability(
+            resolved_step_models={
+                "overview": "shared-text",
+                "transcript": "shared-text",
+                "slides": "vision-model",
+                "resources": "shared-text",
+            }
+        )
+
+        with mock.patch(
+            "lecture_processor.ai.model_routing.MLXTextProvider",
+            side_effect=lambda **kwargs: RecordingTextProvider([], **kwargs),
+        ), mock.patch(
+            "lecture_processor.ai.model_routing.MLXVisionProvider",
+            side_effect=lambda **kwargs: RecordingVisionProvider([], **kwargs),
+        ), mock.patch(
+            "lecture_processor.ai.model_routing._OpenAICompatibleClient",
+            side_effect=lambda *args: RecordingUnloadClient(offloads, *args),
+        ):
+            routed_analyze_lecture(
+                _request("a"),
+                config,
+                availability=availability,
+            )
+
+        self.assertEqual(["shared-text"], [model for _, model, _ in offloads])
+
+    def test_single_lecture_routing_offloads_between_different_local_models(self):
+        calls = []
+        offloads = []
+        config = BatchConfig(
+            input_dir=Path("."),
+            output_dir=Path("."),
+            ai_provider=AIProviderName.GEMINI,
+            ai_overview_provider=AIModelProvider.MLX_TEXT,
+            ai_overview_model="text-model",
+            ai_transcript_provider=AIModelProvider.MLX_TEXT,
+            ai_transcript_model="text-model",
+            ai_slides_provider=AIModelProvider.MLX_VISION,
+            ai_slides_model="vision-model",
+            ai_resources_provider=AIModelProvider.MLX_TEXT,
+            ai_resources_model="resource-model",
+        )
+        availability = RouteAvailability(
+            resolved_step_models={
+                "overview": "text-model",
+                "transcript": "text-model",
+                "slides": "vision-model",
+                "resources": "resource-model",
+            }
+        )
+
+        with mock.patch(
+            "lecture_processor.ai.model_routing.MLXTextProvider",
+            side_effect=lambda **kwargs: RecordingTextProvider(calls, **kwargs),
+        ), mock.patch(
+            "lecture_processor.ai.model_routing.MLXVisionProvider",
+            side_effect=lambda **kwargs: RecordingVisionProvider(calls, **kwargs),
+        ), mock.patch(
+            "lecture_processor.ai.model_routing._OpenAICompatibleClient",
+            side_effect=lambda *args: RecordingUnloadClient(offloads, *args),
+        ):
+            routed_analyze_lecture(
+                _request("a"),
+                config,
+                availability=availability,
+            )
+
+        self.assertEqual(["text-model", "vision-model"], [item[1] for item in offloads])
+
+    def test_staged_routing_skips_unavailable_role_without_calling_provider(self):
+        config = BatchConfig(
+            input_dir=Path("."),
+            output_dir=Path("."),
+            ai_provider=AIProviderName.GEMINI,
+            ai_overview_provider=AIModelProvider.LOCAL_STUB,
+            ai_transcript_provider=AIModelProvider.LOCAL_STUB,
+            ai_slides_provider=AIModelProvider.MLX_VISION,
+            ai_slides_model="missing-vision",
+            ai_resources_provider=AIModelProvider.LOCAL_STUB,
+        )
+
+        with mock.patch("lecture_processor.ai.model_routing.MLXVisionProvider") as provider:
+            response = routed_analyze_lectures_staged(
+                [("a", _request("a"))],
+                config,
+                availability=RouteAvailability(
+                    skipped_roles={"vision": "LM Studio vision model unavailable: missing-vision"}
+                ),
+            )["a"]
+
+        provider.assert_not_called()
+        self.assertIn("missing-vision", " ".join(response.warnings))
+        self.assertEqual(1, len(response.slide_analysis))
+
+    def test_staged_enrichment_writes_upfront_model_warning_to_artifact(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            lecture_dir = Path(tmp)
+            lecture_json = lecture_dir / "lecture.json"
+            lecture_json.write_text(json.dumps(_artifact()), encoding="utf-8")
+            config = BatchConfig(
+                input_dir=lecture_dir,
+                output_dir=lecture_dir,
+                ai_provider=AIProviderName.GEMINI,
+                ai_overview_provider=AIModelProvider.LOCAL_STUB,
+                ai_transcript_provider=AIModelProvider.LOCAL_STUB,
+                ai_slides_provider=AIModelProvider.MLX_VISION,
+                ai_slides_model="missing-vision",
+                ai_resources_provider=AIModelProvider.LOCAL_STUB,
+            )
+            availability = RouteAvailability(
+                skipped_roles={"vision": "LM Studio vision model unavailable: missing-vision"}
+            )
+
+            with mock.patch(
+                "lecture_processor.ai.enrichment.probe_lm_studio_model_availability",
+                return_value=availability,
+            ):
+                artifacts = enrich_lecture_artifacts_staged([lecture_json], config)
+
+            artifact = artifacts[lecture_json]
+            self.assertIn("missing-vision", " ".join(artifact["processing"]["warnings"]))
+            self.assertIn("missing-vision", " ".join(artifact["enrichment"]["warnings"]))
+
 
 class FakeGeminiProvider:
     def __init__(self):
@@ -146,6 +511,87 @@ class FakeMLXTextProvider:
             "input_tokens": 10,
             "output_tokens": 5,
         }
+
+
+class RecordingTextProvider:
+    def __init__(self, calls, *, model, **_kwargs):
+        self.calls = calls
+        self.model = model
+
+    def analyze_overview(self, request):
+        self.calls.append((self.model, "overview", request.lecture_id))
+        return {
+            "title": f"{request.lecture_id} title",
+            "executive_summary": f"{request.lecture_id} summary",
+            "outline": [{"id": 1, "heading": "Intro", "slide_ids": [1]}],
+            "warnings": [],
+            "input_tokens": 1,
+            "output_tokens": 1,
+        }
+
+    def analyze_transcript(self, request):
+        self.calls.append((self.model, "transcript", request.lecture_id))
+        return {
+            "formatted_transcript": request.transcript_text,
+            "warnings": [],
+            "input_tokens": 1,
+            "output_tokens": 1,
+        }
+
+    def analyze_resources(self, request, *, overview=None):
+        self.calls.append((self.model, "resources", request.lecture_id))
+        return {
+            "resources": [],
+            "warnings": [],
+            "input_tokens": 1,
+            "output_tokens": 1,
+        }
+
+
+class RecordingVisionProvider:
+    def __init__(self, calls, *, model, **_kwargs):
+        self.calls = calls
+        self.model = model
+
+    def analyze_slides(self, request):
+        self.calls.append((self.model, "slides", request.lecture_id))
+        return {
+            "slide_analysis": [
+                {
+                    "slide_id": 1,
+                    "descriptive_filename": "slide.png",
+                    "caption": "A slide.",
+                    "summary": "Slide summary.",
+                    "tags": ["slide"],
+                    "instructor_commentary": "Notes.",
+                }
+            ],
+            "warnings": [],
+            "input_tokens": 1,
+            "output_tokens": 1,
+        }
+
+
+class RecordingUnloadClient:
+    def __init__(self, offloads, base_url, model, timeout_seconds):
+        self.offloads = offloads
+        self.base_url = base_url
+        self.model = model
+        self.timeout_seconds = timeout_seconds
+
+    def unload_model(self, model, context):
+        self.offloads.append((self.base_url, model, context))
+        return True
+
+
+def _request(lecture_id="lecture"):
+    return AnalyzeLectureRequest(
+        lecture_id=lecture_id,
+        transcript_text="hello lecture",
+        segments=[{"id": 1, "text": "hello lecture"}],
+        slides=[{"id": 1, "linked_segment_ids": [1]}],
+        duration_minutes=2.0,
+    )
 
 
 def _artifact():

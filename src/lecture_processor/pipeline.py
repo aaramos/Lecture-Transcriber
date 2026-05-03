@@ -10,7 +10,8 @@ from pathlib import Path
 from typing import Callable, Dict, Iterator, List, Optional
 
 from .artifacts import LECTURE_ARTIFACT_NAME, load_json, utc_now_iso, write_batch_artifact, write_lecture_artifact
-from .ai.enrichment import enrich_lecture_artifact
+from .ai.enrichment import enrich_lecture_artifact, enrich_lecture_artifacts_staged
+from .ai.model_routing import uses_experimental_routing
 from .config import AudioEnhancementMode, BatchConfig, RecordingSpeed, TranscriptionEngine
 from .control import ProcessingControl, default_control_file
 from .errors import LectureProcessorError
@@ -64,6 +65,7 @@ class BatchProcessor:
         )
         self.progress_callback = progress_callback
         self.control = ProcessingControl(config.control_file or default_control_file(config.output_dir))
+        self._defer_ai_enrichment = False
 
     def run(self) -> BatchSummary:
         self.config.validate()
@@ -100,12 +102,24 @@ class BatchProcessor:
                 else:
                     process_files.append(path)
 
+            defer_ai_enrichment = self._should_defer_ai_enrichment()
+            self._defer_ai_enrichment = defer_ai_enrichment
+            processed_results: List[FileResult] = []
             with ThreadPoolExecutor(max_workers=self.config.concurrent_files) as executor:
                 futures = [executor.submit(self._process_file, path, output_dirs[path]) for path in process_files]
                 for future in as_completed(futures):
                     result = future.result()
                     results.append(result)
-                    self._emit_file_finished(result, results, len(files))
+                    processed_results.append(result)
+                    if not defer_ai_enrichment:
+                        self._emit_file_finished(result, results, len(files))
+
+            if defer_ai_enrichment:
+                results = self._run_deferred_ai_enrichment(results)
+                updated_by_output_dir = {result.output_dir: result for result in results}
+                for result in processed_results:
+                    self._emit_file_finished(updated_by_output_dir.get(result.output_dir, result), results, len(files))
+            self._defer_ai_enrichment = False
 
             results.sort(key=lambda item: item.source.name.lower())
             summary = BatchSummary(
@@ -363,26 +377,29 @@ class BatchProcessor:
                 transcriber_metadata=getattr(self.transcriber, "metadata", {}),
                 stage_timings=stage_timings,
             )
-            if self.config.ai_provider.value != "none":
-                artifact = self._time_step(
-                    "Enrich",
-                    source,
-                    log_lines,
-                    step_state,
-                    stage_timings,
-                    lambda: enrich_lecture_artifact(
-                        lecture_json_path,
-                        self.config,
-                        progress_callback=self.progress_callback,
-                    ),
-                )
-                enrichment = artifact.get("enrichment") or {}
-                enriched = bool(enrichment)
-                title = enrichment.get("title")
-                short_summary = enrichment.get("executive_summary")
-                log_lines[-1] = f"{log_lines[-1]} ({self.config.ai_provider.value})"
+            if self.config.ai_provider.value != "none" and not self._defer_ai_enrichment:
+                if self.config.skip_ai_enrichment_reason.strip():
+                    self._skip_ai_enrichment(source, log_lines, step_state, stage_timings)
+                else:
+                    artifact = self._time_step(
+                        "Enrich",
+                        source,
+                        log_lines,
+                        step_state,
+                        stage_timings,
+                        lambda: enrich_lecture_artifact(
+                            lecture_json_path,
+                            self.config,
+                            progress_callback=self.progress_callback,
+                        ),
+                    )
+                    enrichment = artifact.get("enrichment") or {}
+                    enriched = bool(enrichment)
+                    title = enrichment.get("title")
+                    short_summary = enrichment.get("executive_summary")
+                    log_lines[-1] = f"{log_lines[-1]} ({self.config.ai_provider.value})"
 
-            if self.config.render_html:
+            if self.config.render_html and not self._defer_ai_enrichment:
                 html_path = self._time_step(
                     "Render",
                     source,
@@ -559,26 +576,29 @@ class BatchProcessor:
                 },
                 stage_timings=stage_timings,
             )
-            if self.config.ai_provider.value != "none":
-                artifact = self._time_step(
-                    "Enrich",
-                    source,
-                    log_lines,
-                    step_state,
-                    stage_timings,
-                    lambda: enrich_lecture_artifact(
-                        lecture_json_path,
-                        self.config,
-                        progress_callback=self.progress_callback,
-                    ),
-                )
-                enrichment = artifact.get("enrichment") or {}
-                enriched = bool(enrichment)
-                title = enrichment.get("title")
-                short_summary = enrichment.get("executive_summary")
-                log_lines[-1] = f"{log_lines[-1]} ({self.config.ai_provider.value})"
+            if self.config.ai_provider.value != "none" and not self._defer_ai_enrichment:
+                if self.config.skip_ai_enrichment_reason.strip():
+                    self._skip_ai_enrichment(source, log_lines, step_state, stage_timings)
+                else:
+                    artifact = self._time_step(
+                        "Enrich",
+                        source,
+                        log_lines,
+                        step_state,
+                        stage_timings,
+                        lambda: enrich_lecture_artifact(
+                            lecture_json_path,
+                            self.config,
+                            progress_callback=self.progress_callback,
+                        ),
+                    )
+                    enrichment = artifact.get("enrichment") or {}
+                    enriched = bool(enrichment)
+                    title = enrichment.get("title")
+                    short_summary = enrichment.get("executive_summary")
+                    log_lines[-1] = f"{log_lines[-1]} ({self.config.ai_provider.value})"
 
-            if self.config.render_html:
+            if self.config.render_html and not self._defer_ai_enrichment:
                 html_path = self._time_step(
                     "Render",
                     source,
@@ -752,6 +772,127 @@ class BatchProcessor:
         self._emit("step_finished", source=source.name, step=name, elapsed_seconds=round(elapsed, 1))
         return result
 
+    def _skip_ai_enrichment(self, source: Path, log_lines: List[str], step_state, stage_timings) -> None:
+        reason = self.config.skip_ai_enrichment_reason.strip()
+        step_state["current"] = "Enrich"
+        self._emit("step_started", source=source.name, step="Enrich")
+        stage_timings["Enrich"] = 0.0
+        log_lines.append(f"Enrich     SKIP ERROR: AI enrichment skipped. {reason}")
+        self._emit("step_finished", source=source.name, step="Enrich", elapsed_seconds=0.0)
+
+    def _should_defer_ai_enrichment(self) -> bool:
+        return self.config.ai_provider.value != "none"
+
+    def _run_deferred_ai_enrichment(self, results: List[FileResult]) -> List[FileResult]:
+        eligible = [
+            result
+            for result in results
+            if result.status is FileStatus.COMPLETED and result.lecture_json_path and not result.enriched
+        ]
+        if not eligible:
+            return results
+
+        updated: Dict[Path, FileResult] = {}
+        skip_reason = self.config.skip_ai_enrichment_reason.strip()
+        if skip_reason:
+            for result in eligible:
+                self._append_processing_log_lines(
+                    result.output_dir,
+                    [f"Enrich     SKIP ERROR: AI enrichment skipped. {skip_reason}"],
+                )
+                html_path = self._render_deferred_html(result)
+                artifact = load_json(result.lecture_json_path)
+                updated[result.output_dir] = _file_result_from_artifact(
+                    source=result.source,
+                    output_dir=result.output_dir,
+                    artifact=artifact,
+                    status=FileStatus.COMPLETED,
+                    message=f"AI enrichment skipped. {skip_reason}",
+                    html_path=html_path,
+                    rendered=bool(html_path),
+                    elapsed_seconds=result.elapsed_seconds,
+                )
+            return _replace_results(results, updated)
+
+        for result in eligible:
+            self._emit("step_started", source=result.source.name, step="Enrich")
+
+        step_started = time.monotonic()
+        try:
+            artifacts = enrich_lecture_artifacts_staged(
+                [result.lecture_json_path for result in eligible if result.lecture_json_path],
+                self.config,
+                progress_callback=self.progress_callback,
+            )
+        except Exception as exc:
+            elapsed = time.monotonic() - step_started
+            message = str(exc)
+            for result in eligible:
+                self._append_processing_log_lines(
+                    result.output_dir,
+                    [
+                        f"Enrich     ERROR: {message}",
+                        "AI enrichment failed after non-AI processing completed. Partial output preserved for review.",
+                    ],
+                )
+                self._emit("step_finished", source=result.source.name, step="Enrich", elapsed_seconds=round(elapsed, 1))
+                artifact = load_json(result.lecture_json_path)
+                updated[result.output_dir] = _file_result_from_artifact(
+                    source=result.source,
+                    output_dir=result.output_dir,
+                    artifact=artifact,
+                    status=FileStatus.FAILED,
+                    message=message,
+                    failure_step="Enrich",
+                    elapsed_seconds=result.elapsed_seconds + elapsed,
+                )
+            return _replace_results(results, updated)
+
+        elapsed = time.monotonic() - step_started
+        for result in eligible:
+            artifact = artifacts.get(result.lecture_json_path) if result.lecture_json_path else None
+            if artifact is None and result.lecture_json_path:
+                artifact = load_json(result.lecture_json_path)
+            self._append_processing_log_lines(
+                result.output_dir,
+                [f"Enrich     OK  {elapsed:.1f}s (staged AI)"],
+            )
+            self._emit("step_finished", source=result.source.name, step="Enrich", elapsed_seconds=round(elapsed, 1))
+            html_path = self._render_deferred_html(result)
+            updated[result.output_dir] = _file_result_from_artifact(
+                source=result.source,
+                output_dir=result.output_dir,
+                artifact=artifact,
+                status=FileStatus.COMPLETED,
+                message="Complete",
+                html_path=html_path,
+                rendered=bool(html_path),
+                elapsed_seconds=result.elapsed_seconds + elapsed,
+            )
+
+        return _replace_results(results, updated)
+
+    def _render_deferred_html(self, result: FileResult) -> Optional[Path]:
+        if not self.config.render_html or not result.lecture_json_path:
+            return None
+        self._emit("step_started", source=result.source.name, step="Render")
+        started = time.monotonic()
+        html_path = render_lecture_page(result.lecture_json_path)
+        elapsed = time.monotonic() - started
+        self._append_processing_log_lines(result.output_dir, [f"Render     OK  {elapsed:.1f}s"])
+        self._emit("step_finished", source=result.source.name, step="Render", elapsed_seconds=round(elapsed, 1))
+        return html_path
+
+    def _append_processing_log_lines(self, output_dir: Path, lines: List[str]) -> None:
+        log_path = output_dir / "processing_log.txt"
+        existing = ""
+        if log_path.exists():
+            existing = log_path.read_text(encoding="utf-8").rstrip()
+        text = "\n".join(line for line in lines if line)
+        if not text:
+            return
+        write_text_atomic(log_path, f"{existing}\n{text}\n" if existing else f"{text}\n")
+
     def _time_steps_parallel(
         self,
         source: Path,
@@ -873,6 +1014,10 @@ def _result_effective_duration_seconds(result: FileResult) -> float:
     return result.normalized_duration_seconds or result.duration_seconds
 
 
+def _replace_results(results: List[FileResult], updates: Dict[Path, FileResult]) -> List[FileResult]:
+    return [updates.get(result.output_dir, result) for result in results]
+
+
 def discover_lecture_artifacts(folder: Path) -> List[Path]:
     if not folder.exists() or not folder.is_dir():
         return []
@@ -917,10 +1062,17 @@ def enrich_processed_batch(
         results: List[FileResult] = []
         skip_files = set(config.skip_files)
         _emit(progress_callback, "batch_started", attempted=len(artifacts), output_dir=str(config.output_dir))
-        for lecture_json_path in artifacts:
-            result = _enrich_processed_lecture(lecture_json_path, config, skip_files, progress_callback)
-            results.append(result)
-            _emit_file_finished(progress_callback, result, results, len(artifacts))
+        if _should_stage_processed_ai(config):
+            results = _enrich_processed_lectures_staged(artifacts, config, skip_files, progress_callback)
+            emitted_results: List[FileResult] = []
+            for result in results:
+                emitted_results.append(result)
+                _emit_file_finished(progress_callback, result, emitted_results, len(artifacts))
+        else:
+            for lecture_json_path in artifacts:
+                result = _enrich_processed_lecture(lecture_json_path, config, skip_files, progress_callback)
+                results.append(result)
+                _emit_file_finished(progress_callback, result, results, len(artifacts))
 
         results.sort(key=lambda item: item.source.name.lower())
         summary = BatchSummary(
@@ -951,6 +1103,178 @@ def enrich_processed_batch(
             stopped=summary.stopped,
         )
         return summary
+
+
+def _should_stage_processed_ai(config: BatchConfig) -> bool:
+    return uses_experimental_routing(config) and not config.ai_uses_gemini
+
+
+def _enrich_processed_lectures_staged(
+    lecture_json_paths: List[Path],
+    config: BatchConfig,
+    skip_files: set,
+    progress_callback: Optional[Callable[[Dict], None]],
+) -> List[FileResult]:
+    results: List[FileResult] = []
+    eligible: List[Dict] = []
+    for lecture_json_path in lecture_json_paths:
+        started = time.monotonic()
+        output_dir = lecture_json_path.parent
+        artifact = load_json(lecture_json_path)
+        source = _source_path_from_artifact(artifact, output_dir)
+        if source.name in skip_files or output_dir.name in skip_files:
+            results.append(
+                _file_result_from_artifact(
+                    source=source,
+                    output_dir=output_dir,
+                    artifact=artifact,
+                    status=FileStatus.SKIPPED,
+                    message="Skipped by user",
+                    elapsed_seconds=time.monotonic() - started,
+                )
+            )
+            continue
+        if not _artifact_can_be_enriched(artifact):
+            results.append(
+                _file_result_from_artifact(
+                    source=source,
+                    output_dir=output_dir,
+                    artifact=artifact,
+                    status=FileStatus.SKIPPED,
+                    message="Not completed",
+                    elapsed_seconds=time.monotonic() - started,
+                )
+            )
+            continue
+        if artifact.get("enrichment"):
+            results.append(
+                _file_result_from_artifact(
+                    source=source,
+                    output_dir=output_dir,
+                    artifact=artifact,
+                    status=FileStatus.SKIPPED,
+                    message=ALREADY_ENHANCED_MESSAGE,
+                    elapsed_seconds=time.monotonic() - started,
+                )
+            )
+            continue
+        _emit(progress_callback, "file_started", source=source.name)
+        _emit(progress_callback, "step_started", source=source.name, step="Enrich")
+        eligible.append(
+            {
+                "path": lecture_json_path,
+                "source": source,
+                "output_dir": output_dir,
+                "artifact": artifact,
+                "started": started,
+            }
+        )
+
+    if not eligible:
+        return results
+
+    step_started = time.monotonic()
+    skip_reason = config.skip_ai_enrichment_reason.strip()
+    if skip_reason:
+        elapsed = time.monotonic() - step_started
+        for item in eligible:
+            artifact = item["artifact"]
+            _emit(
+                progress_callback,
+                "step_finished",
+                source=item["source"].name,
+                step="Enrich",
+                elapsed_seconds=round(elapsed, 1),
+            )
+            html_path = _render_processed_html(item["source"], item["path"], config, progress_callback)
+            results.append(
+                _file_result_from_artifact(
+                    source=item["source"],
+                    output_dir=item["output_dir"],
+                    artifact=artifact,
+                    status=FileStatus.COMPLETED,
+                    message=f"AI enrichment skipped. {skip_reason}",
+                    html_path=html_path,
+                    rendered=bool(html_path),
+                    elapsed_seconds=time.monotonic() - item["started"],
+                )
+            )
+        return results
+
+    try:
+        artifacts = enrich_lecture_artifacts_staged(
+            [item["path"] for item in eligible],
+            config,
+            progress_callback=progress_callback,
+        )
+    except Exception as exc:
+        elapsed = time.monotonic() - step_started
+        for item in eligible:
+            _emit(
+                progress_callback,
+                "step_finished",
+                source=item["source"].name,
+                step="Enrich",
+                elapsed_seconds=round(elapsed, 1),
+            )
+            results.append(
+                _file_result_from_artifact(
+                    source=item["source"],
+                    output_dir=item["output_dir"],
+                    artifact=item["artifact"],
+                    status=FileStatus.FAILED,
+                    message=str(exc),
+                    failure_step="Enrich",
+                    elapsed_seconds=time.monotonic() - item["started"],
+                )
+            )
+        return results
+
+    elapsed = time.monotonic() - step_started
+    for item in eligible:
+        artifact = artifacts.get(item["path"]) or load_json(item["path"])
+        _emit(
+            progress_callback,
+            "step_finished",
+            source=item["source"].name,
+            step="Enrich",
+            elapsed_seconds=round(elapsed, 1),
+        )
+        html_path = _render_processed_html(item["source"], item["path"], config, progress_callback)
+        results.append(
+            _file_result_from_artifact(
+                source=item["source"],
+                output_dir=item["output_dir"],
+                artifact=artifact,
+                status=FileStatus.COMPLETED,
+                message="Enhanced",
+                html_path=html_path,
+                rendered=bool(html_path),
+                elapsed_seconds=time.monotonic() - item["started"],
+            )
+        )
+    return results
+
+
+def _render_processed_html(
+    source: Path,
+    lecture_json_path: Path,
+    config: BatchConfig,
+    progress_callback: Optional[Callable[[Dict], None]],
+) -> Optional[Path]:
+    if not config.render_html:
+        return None
+    _emit(progress_callback, "step_started", source=source.name, step="Render")
+    started = time.monotonic()
+    html_path = render_lecture_page(lecture_json_path)
+    _emit(
+        progress_callback,
+        "step_finished",
+        source=source.name,
+        step="Render",
+        elapsed_seconds=round(time.monotonic() - started, 1),
+    )
+    return html_path
 
 
 def _enrich_processed_lecture(
@@ -995,7 +1319,13 @@ def _enrich_processed_lecture(
     try:
         _emit(progress_callback, "step_started", source=source.name, step="Enrich")
         step_started = time.monotonic()
-        enriched_artifact = enrich_lecture_artifact(lecture_json_path, config, progress_callback=progress_callback)
+        skip_reason = config.skip_ai_enrichment_reason.strip()
+        if skip_reason:
+            enriched_artifact = artifact
+            message = f"AI enrichment skipped. {skip_reason}"
+        else:
+            enriched_artifact = enrich_lecture_artifact(lecture_json_path, config, progress_callback=progress_callback)
+            message = "Enhanced"
         _emit(
             progress_callback,
             "step_finished",
@@ -1022,7 +1352,7 @@ def _enrich_processed_lecture(
             output_dir=output_dir,
             artifact=enriched_artifact,
             status=FileStatus.COMPLETED,
-            message="Enhanced",
+            message=message,
             html_path=html_path,
             rendered=rendered,
             elapsed_seconds=time.monotonic() - started,

@@ -14,6 +14,7 @@ from lecture_processor.ai.providers.gemini import (
     _generate_content_config,
     _generate_content_with_retry,
     _json_from_response_text,
+    _resources_prompt,
     _response_schema,
     _slide_batch_response_schema,
     _slide_batches,
@@ -369,6 +370,7 @@ class GeminiProviderTests(unittest.TestCase):
             slides_dir.mkdir()
             image_path = slides_dir / "slide_0001_00-00-00.png"
             Image.new("RGB", (1600, 900), color=(255, 255, 255)).save(image_path)
+            original_size = image_path.stat().st_size
             request = AnalyzeLectureRequest(
                 lecture_id="lecture",
                 transcript_text="hello",
@@ -387,7 +389,24 @@ class GeminiProviderTests(unittest.TestCase):
             contents = _contents_for_request(request, "prompt", FakeTypes)
 
             self.assertEqual("image/webp", contents[0].parts[2]["mime_type"])
-            self.assertTrue((slides_dir / ".cache" / "slide_0001_00-00-00.webp").exists())
+            self.assertTrue((slides_dir / ".ai-cache" / "slide_0001_00-00-00.webp").exists())
+            with Image.open(image_path) as source_image:
+                self.assertEqual((1600, 900), source_image.size)
+            self.assertEqual(original_size, image_path.stat().st_size)
+
+    def test_resources_prompt_includes_transcript_context(self):
+        request = AnalyzeLectureRequest(
+            lecture_id="lecture",
+            transcript_text="Opening about AI strategy. " * 80,
+            segments=[],
+            slides=[],
+            duration_minutes=1.0,
+        )
+
+        prompt = _resources_prompt(request, {"title": "AI Strategy", "executive_summary": "A short summary."})
+
+        self.assertIn("Transcript context:", prompt)
+        self.assertIn("Opening about AI strategy", prompt)
 
     def test_slide_prefilter_skips_blank_and_keeps_last_duplicate(self):
         try:

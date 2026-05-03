@@ -31,6 +31,7 @@ DEFAULT_MAX_CONCURRENCY = 6
 MAX_RETRY_ATTEMPTS = 4
 SLIDE_IMAGE_MAX_EDGE = 1024
 SLIDE_IMAGE_WEBP_QUALITY = 80
+SLIDE_AI_CACHE_DIR = ".ai-cache"
 SLIDE_ENTROPY_MIN_BITS = 1.0
 SLIDE_PHASH_DISTANCE_THRESHOLD = 5
 SLIDE_PHASH_SIZE = 8
@@ -699,6 +700,8 @@ def _mime_type_for_image(path: Path) -> Optional[str]:
 
 
 def _slide_image_bytes(path: Path) -> Tuple[bytes, Optional[str]]:
+    # Keep the extracted PNG/JPEG untouched for the rendered study page, but
+    # submit a smaller WebP copy to vision models to cut upload size and image tokens.
     cached = _cached_webp_path(path)
     if cached and cached.exists():
         try:
@@ -743,7 +746,7 @@ def _slide_image_bytes(path: Path) -> Tuple[bytes, Optional[str]]:
 
 def _cached_webp_path(path: Path) -> Optional[Path]:
     try:
-        return path.parent / ".cache" / f"{path.stem}.webp"
+        return path.parent / SLIDE_AI_CACHE_DIR / f"{path.stem}.webp"
     except Exception:
         return None
 
@@ -1032,11 +1035,15 @@ Expected JSON keys:
 - warnings
 
 Rules:
-- Fix obvious grammar errors, typos, misspellings, capitalization, punctuation, and spacing.
-- Add paragraph breaks where helpful.
+- Fix obvious grammar errors, typos, misspellings, capitalization, punctuation, repeated words, and spacing.
+- Add paragraph breaks every 2-5 sentences or whenever the topic shifts.
+- Use blank lines between paragraphs so the transcript is not one large blob.
+- Keep the instructor's voice and the original order of ideas.
+- Preserve names, technical terms, examples, and substantive details.
 - Do not summarize.
 - Do not add new ideas.
-- Do not remove substantive details.
+- Do not remove meaningful content.
+- Do not add headings unless the speaker clearly introduces a new section.
 - Preserve the instructor's meaning.
 
 Lecture id: {request.lecture_id}
@@ -1111,6 +1118,8 @@ Only include URLs confirmed by grounding. Do not invent or guess URLs.
 Lecture id: {request.lecture_id}
 Lecture title: {overview.get("title") or request.lecture_id}
 Lecture summary: {overview.get("executive_summary") or _fallback_summary(request.transcript_text)}
+Transcript context:
+{_resource_transcript_context(request.transcript_text)}
 """.strip()
 
 
@@ -1136,6 +1145,8 @@ Prefer peer-reviewed papers, WEF/McKinsey/industry reports, or reputable educati
 Lecture id: {request.lecture_id}
 Lecture title: {overview.get("title") or request.lecture_id}
 Lecture summary: {overview.get("executive_summary") or _fallback_summary(request.transcript_text)}
+Transcript context:
+{_resource_transcript_context(request.transcript_text)}
 
 Previous resource payload:
 {json.dumps(previous_payload, sort_keys=True)}
@@ -1245,6 +1256,33 @@ def _fallback_summary(text: str) -> str:
     if len(clean) <= 700:
         return clean
     return clean[:697].rsplit(" ", 1)[0] + "..."
+
+
+def _resource_transcript_context(text: str, max_chars: int = 5000) -> str:
+    clean = " ".join(str(text or "").split())
+    if not clean:
+        return "No transcript context is available."
+    if len(clean) <= max_chars:
+        return clean
+
+    head_chars = max_chars // 3
+    middle_chars = max_chars // 3
+    tail_chars = max_chars - head_chars - middle_chars
+    midpoint = max(0, (len(clean) - middle_chars) // 2)
+    return "\n".join(
+        [
+            f"Opening: {_trim_to_word(clean[:head_chars])}",
+            f"Middle: {_trim_to_word(clean[midpoint:midpoint + middle_chars])}",
+            f"Closing: {_trim_to_word(clean[-tail_chars:])}",
+        ]
+    )
+
+
+def _trim_to_word(text: str) -> str:
+    clean = str(text or "").strip()
+    if " " not in clean:
+        return clean
+    return clean.rsplit(" ", 1)[0].strip()
 
 
 def _fallback_outline(slides: List[Dict]) -> List[Dict]:

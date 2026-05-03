@@ -7,6 +7,26 @@ from typing import Optional, Tuple
 from .errors import LectureProcessorError
 from .profiles import DEFAULT_PROFILE_ID, normalize_profile_id
 
+DEFAULT_LM_STUDIO_BASE_URL = "http://192.168.86.101:1234/v1"
+
+
+def default_local_text_base_url() -> str:
+    return (
+        os.environ.get("MLX_TEXT_SERVER_URL")
+        or os.environ.get("LM_STUDIO_BASE_URL")
+        or os.environ.get("OLLAMA_BASE_URL")
+        or DEFAULT_LM_STUDIO_BASE_URL
+    )
+
+
+def default_local_vision_base_url() -> str:
+    return (
+        os.environ.get("MLX_VISION_SERVER_URL")
+        or os.environ.get("LM_STUDIO_BASE_URL")
+        or os.environ.get("OLLAMA_BASE_URL")
+        or DEFAULT_LM_STUDIO_BASE_URL
+    )
+
 
 class RecordingSpeed(str, Enum):
     NORMAL = "1x"
@@ -104,13 +124,10 @@ class BatchConfig:
     ai_slides_model: str = ""
     ai_resources_provider: AIModelProvider = AIModelProvider.GEMINI
     ai_resources_model: str = ""
-    mlx_text_base_url: str = field(
-        default_factory=lambda: os.environ.get("MLX_TEXT_SERVER_URL", "http://localhost:8001/v1")
-    )
-    mlx_vision_base_url: str = field(
-        default_factory=lambda: os.environ.get("MLX_VISION_SERVER_URL", "http://localhost:8000/v1")
-    )
+    mlx_text_base_url: str = field(default_factory=default_local_text_base_url)
+    mlx_vision_base_url: str = field(default_factory=default_local_vision_base_url)
     mlx_request_timeout_seconds: int = 120
+    skip_ai_enrichment_reason: str = ""
     gemini_max_concurrency: int = 6
     render_html: bool = True
     skip_files: Tuple[str, ...] = ()

@@ -1,12 +1,18 @@
 import os
 import time
 from pathlib import Path
-from typing import Callable, Dict, Optional
+from typing import Callable, Dict, List, Optional
 
 from lecture_processor.artifacts import load_json, save_json, utc_now_iso
 from lecture_processor.config import AIProviderName, BatchConfig
 
-from .model_routing import routed_analyze_lecture, uses_experimental_routing
+from .model_routing import (
+    RouteAvailability,
+    probe_lm_studio_model_availability,
+    routed_analyze_lecture,
+    routed_analyze_lectures_staged,
+    uses_experimental_routing,
+)
 from .providers.registry import build_provider, provider_info
 from .providers.base import AnalyzeLectureRequest, AnalyzeLectureResponse
 
@@ -27,6 +33,10 @@ def enrich_lecture_artifact(
     started = time.monotonic()
     started_at = utc_now_iso()
     routing_enabled = uses_experimental_routing(config)
+    availability = _probe_availability(config) if routing_enabled else RouteAvailability()
+    if availability.warnings:
+        _append_processing_warnings(lecture_json_path, availability.warnings)
+        artifact = load_json(lecture_json_path)
     info = provider_info("gemini" if config.ai_provider is AIProviderName.GEMINI else config.ai_provider.value)
     provider = _build_provider_for_config(config, info)
     request = _request_from_artifact(artifact, lecture_json_path.parent)
@@ -42,6 +52,7 @@ def enrich_lecture_artifact(
                 source=artifact["source"]["filename"],
                 **payload,
             ),
+            availability=availability,
         )
     else:
         chunked_analyzer = getattr(provider, "analyze_lecture_chunked", None) if provider else None
@@ -85,6 +96,86 @@ def enrich_lecture_artifact(
     return artifact
 
 
+def enrich_lecture_artifacts_staged(
+    lecture_json_paths: List[Path],
+    config: BatchConfig,
+    *,
+    progress_callback: Optional[Callable[[Dict], None]] = None,
+) -> Dict[Path, Dict]:
+    if config.ai_provider is AIProviderName.NONE:
+        return {path: load_json(path) for path in lecture_json_paths}
+
+    if not lecture_json_paths:
+        return {}
+
+    routing_enabled = uses_experimental_routing(config)
+    if not routing_enabled or config.ai_uses_gemini:
+        return {
+            path: enrich_lecture_artifact(path, config, progress_callback=progress_callback)
+            for path in lecture_json_paths
+        }
+
+    availability = _probe_availability(config)
+    artifacts = {path: load_json(path) for path in lecture_json_paths}
+    if availability.warnings:
+        for path in lecture_json_paths:
+            _append_processing_warnings(path, availability.warnings)
+        artifacts = {path: load_json(path) for path in lecture_json_paths}
+    started_at_by_path = {path: utc_now_iso() for path in lecture_json_paths}
+    started_monotonic_by_path = {path: time.monotonic() for path in lecture_json_paths}
+    jobs = []
+    key_to_path = {}
+    key_to_source = {}
+
+    for path, artifact in artifacts.items():
+        source_name = artifact["source"]["filename"]
+        _emit(progress_callback, "enrichment_started", source=source_name)
+        key = str(path)
+        key_to_path[key] = path
+        key_to_source[key] = source_name
+        jobs.append((key, _request_from_artifact(artifact, path.parent)))
+
+    def emit_staged_progress(payload: Dict) -> None:
+        key = str(payload.get("lecture_id") or "")
+        source = key_to_source.get(key, "")
+        clean_payload = {name: value for name, value in payload.items() if name != "lecture_id"}
+        _emit(progress_callback, "enrichment_progress", source=source, **clean_payload)
+
+    responses = routed_analyze_lectures_staged(
+        jobs,
+        config,
+        progress_callback=emit_staged_progress,
+        availability=availability,
+    )
+    enriched_artifacts: Dict[Path, Dict] = {}
+    for key, response in responses.items():
+        path = key_to_path[key]
+        artifact = artifacts[path]
+        finished_at = utc_now_iso()
+        enrichment = _enrichment_payload(
+            response,
+            provider="experimental-routing",
+            model=config.ai_model,
+            model_routing=config.ai_model_routing,
+            started_at=started_at_by_path[path],
+            finished_at=finished_at,
+            elapsed_seconds=time.monotonic() - started_monotonic_by_path[path],
+        )
+        artifact["enrichment"] = enrichment
+        save_json(path, artifact)
+        enriched_artifacts[path] = artifact
+        _emit(
+            progress_callback,
+            "enrichment_finished",
+            source=artifact["source"]["filename"],
+            title=enrichment["title"],
+            elapsed_seconds=round(enrichment["elapsed_seconds"], 1),
+            input_tokens=enrichment["input_token_estimate"],
+            output_tokens=enrichment["output_token_estimate"],
+        )
+    return enriched_artifacts
+
+
 def _build_provider_for_config(config: BatchConfig, info):
     if config.ai_uses_gemini:
         return build_provider(
@@ -96,6 +187,12 @@ def _build_provider_for_config(config: BatchConfig, info):
     if config.ai_provider is AIProviderName.MOCK:
         return build_provider("mock", model=config.ai_model or info.default_model)
     return None
+
+
+def _probe_availability(config: BatchConfig) -> RouteAvailability:
+    if not config.ai_uses_mlx:
+        return RouteAvailability()
+    return probe_lm_studio_model_availability(config)
 
 
 def _request_from_artifact(artifact: Dict, lecture_dir: Path) -> AnalyzeLectureRequest:
@@ -141,6 +238,22 @@ def _enrichment_payload(
     if model_routing:
         payload["model_routing"] = model_routing
     return payload
+
+
+def _append_processing_warnings(lecture_json_path: Path, warnings: List[str]) -> None:
+    if not warnings:
+        return
+    artifact = load_json(lecture_json_path)
+    processing = artifact.setdefault("processing", {})
+    existing = list(processing.get("warnings") or [])
+    seen = {str(item) for item in existing}
+    for warning in warnings:
+        text = str(warning or "").strip()
+        if text and text not in seen:
+            existing.append(text)
+            seen.add(text)
+    processing["warnings"] = existing
+    save_json(lecture_json_path, artifact)
 
 
 def _api_key_for(provider: AIProviderName) -> str:
