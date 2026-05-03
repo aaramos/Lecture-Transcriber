@@ -116,8 +116,6 @@ struct ProcessRequest {
     ai_resources_provider: String,
     #[serde(default)]
     ai_resources_model: String,
-    #[serde(default = "default_gemini_max_concurrency")]
-    gemini_max_concurrency: u8,
     #[serde(default = "default_mlx_text_url")]
     mlx_text_url: String,
     #[serde(default = "default_mlx_vision_url")]
@@ -244,12 +242,8 @@ fn default_whisper_model() -> String {
     "medium.en".to_string()
 }
 
-fn default_gemini_max_concurrency() -> u8 {
-    6
-}
-
 fn default_ai_route_provider() -> String {
-    "gemini".to_string()
+    "mlx-text".to_string()
 }
 
 fn default_mlx_text_url() -> String {
@@ -1084,9 +1078,6 @@ fn run_process_batch(
     if request.concurrent_files == 0 || request.concurrent_files > 3 {
         return Err("Concurrent files must be between 1 and 3.".to_string());
     }
-    if request.gemini_max_concurrency == 0 || request.gemini_max_concurrency > 12 {
-        return Err("Gemini concurrency must be between 1 and 12.".to_string());
-    }
     for provider in [
         &request.ai_overview_provider,
         &request.ai_transcript_provider,
@@ -1095,10 +1086,10 @@ fn run_process_batch(
     ] {
         if !matches!(
             provider.as_str(),
-            "gemini" | "mlx-text" | "mlx-vision" | "local-stub" | "off"
+            "mlx-text" | "mlx-vision" | "local-stub" | "off"
         ) {
             return Err(
-                "Model route providers must be Gemini, LM Studio, Local Stub, or Off.".to_string(),
+                "Model route providers must be LM Studio, Local Stub, or Off.".to_string(),
             );
         }
     }
@@ -1114,24 +1105,6 @@ fn run_process_batch(
     if !enhance_mode && request.output_dir.trim().is_empty() {
         return Err("Choose an output folder before starting.".to_string());
     }
-    let uses_gemini_route = request.ai_provider == "gemini"
-        && request.skip_ai_reason.trim().is_empty()
-        && [
-            &request.ai_overview_provider,
-            &request.ai_transcript_provider,
-            &request.ai_slides_provider,
-            &request.ai_resources_provider,
-        ]
-        .iter()
-        .any(|provider| provider.as_str() == "gemini");
-    let ai_api_key = if uses_gemini_route {
-        Some(
-            read_api_key("gemini")?
-                .ok_or_else(|| "Gemini needs an API key saved in Settings.".to_string())?,
-        )
-    } else {
-        None
-    };
     let lm_studio_api_token = read_lm_studio_api_token()?;
     if active_process
         .lock()
@@ -1176,8 +1149,6 @@ fn run_process_batch(
             request.ai_resources_model.clone(),
             "--concurrent".to_string(),
             request.concurrent_files.to_string(),
-            "--gemini-max-concurrency".to_string(),
-            request.gemini_max_concurrency.to_string(),
             "--mlx-text-url".to_string(),
             request.mlx_text_url.clone(),
             "--mlx-vision-url".to_string(),
@@ -1236,8 +1207,6 @@ fn run_process_batch(
             request.ai_resources_provider.clone(),
             "--ai-resources-model".to_string(),
             request.ai_resources_model.clone(),
-            "--gemini-max-concurrency".to_string(),
-            request.gemini_max_concurrency.to_string(),
             "--mlx-text-url".to_string(),
             request.mlx_text_url.clone(),
             "--mlx-vision-url".to_string(),
@@ -1310,9 +1279,6 @@ fn run_process_batch(
     }
     if env::var_os("PYWHISPERCPP_USE_GPU").is_none() {
         command.env("PYWHISPERCPP_USE_GPU", "0");
-    }
-    if let Some(api_key) = ai_api_key {
-        command.env("GEMINI_API_KEY", api_key);
     }
     if let Some(token) = lm_studio_api_token {
         command.env("LM_STUDIO_API_KEY", &token);
@@ -1507,7 +1473,6 @@ fn platform_open_command(path: &str) -> Command {
 
 fn keychain_account(provider: &str) -> Result<String, String> {
     match provider {
-        "gemini" => Ok("gemini_api_key".to_string()),
         "lm-studio" | "lmstudio" | "lm_studio" => Ok("lm_studio_api_token".to_string()),
         _ => Err(format!("Unsupported API key provider: {provider}")),
     }

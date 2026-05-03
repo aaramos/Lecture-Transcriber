@@ -2,7 +2,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 
-from lecture_processor.config import AIModelProvider, BatchConfig
+from lecture_processor.config import AIModelProvider, AIProviderName, BatchConfig
 
 from .providers.base import AnalyzeLectureRequest, AnalyzeLectureResponse
 from .providers.local_stub import (
@@ -63,6 +63,10 @@ class _LocalModelRef:
 
 
 def uses_experimental_routing(config: BatchConfig) -> bool:
+    if config.ai_provider in (AIProviderName.NONE, AIProviderName.MOCK):
+        return False
+    if config.ai_provider is AIProviderName.LM_STUDIO:
+        return True
     return any(config.ai_step_provider(step) is not AIModelProvider.GEMINI for step in AI_ROUTE_STEPS)
 
 

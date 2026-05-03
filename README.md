@@ -15,7 +15,7 @@ The implementation has two layers: a Python processing core and a Tauri desktop 
 - Writes per-file output folders, transcripts, SRT files, slides, and processing logs.
 - Writes structured `lecture.json` and `batch.json` artifacts for study-page rendering.
 - Generates offline HTML study pages for each lecture and a batch index page.
-- Optionally enriches study pages with mock AI output or Gemini-generated titles, summaries, outlines, and slide notes.
+- Optionally enriches study pages with mock AI output or LM Studio-generated titles, summaries, outlines, slide notes, and resources.
 - Continues the batch if one file fails.
 - Prints a final attempted/completed/failed/skipped summary.
 - Provides a desktop UI for selecting or dropping folders, speed, output location, and processing settings.
@@ -151,16 +151,20 @@ lecture-processor process /path/to/lectures \
   --ai-provider mock
 ```
 
-To use Gemini enrichment from the CLI, install the AI optional dependency and provide a Gemini API key:
+To use LM Studio enrichment from the CLI, start the LM Studio local server and pick the same models you use in the desktop app:
 
 ```bash
-python3 -m pip install -e ".[ai]"
-GEMINI_API_KEY=... lecture-processor process /path/to/lectures \
-  --ai-provider gemini \
-  --ai-model gemini-2.5-flash-lite
+lecture-processor process /path/to/lectures \
+  --ai-provider lm-studio \
+  --ai-overview-model your-text-model \
+  --ai-transcript-model your-text-model \
+  --ai-slides-model your-vision-model \
+  --ai-resources-model your-resource-model \
+  --mlx-text-url http://192.168.86.101:1234/v1 \
+  --mlx-vision-url http://192.168.86.101:1234/v1
 ```
 
-The desktop app stores the Gemini key in macOS Keychain from Settings and passes it only to the processor process.
+The desktop app uses one LM Studio server URL for text, vision, and resources. If your LM Studio server requires a token, Settings stores it in macOS Keychain and passes it only to the processor process.
 
 `--audio-quality high` uses FFmpeg's `rubberband` filter when the installed FFmpeg build includes it. The bundled local FFmpeg does not, so the processor automatically falls back to `atempo` instead of failing the batch.
 

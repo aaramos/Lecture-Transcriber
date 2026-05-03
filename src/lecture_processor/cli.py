@@ -1,5 +1,4 @@
 import argparse
-import importlib.util
 import json
 import os
 import platform
@@ -26,7 +25,6 @@ from .config import (
 )
 from .ai.enrichment import enrich_lecture_artifact
 from .errors import LectureProcessorError
-from .gemini_export import export_gemini_test_package
 from .html_renderer import render_lecture_page
 from .media import ensure_media_tools, resolve_media_tool
 from .models import BatchSummary, FileStatus
@@ -39,6 +37,21 @@ from .transcription import build_transcriber
 from .writers import write_text_atomic
 
 EVENT_PREFIX = "__LECTURE_PROCESSOR_EVENT__ "
+AI_PROVIDER_CHOICES = [
+    AIProviderName.NONE.value,
+    AIProviderName.MOCK.value,
+    AIProviderName.LM_STUDIO.value,
+]
+ENRICH_AI_PROVIDER_CHOICES = [
+    AIProviderName.MOCK.value,
+    AIProviderName.LM_STUDIO.value,
+]
+AI_ROUTE_PROVIDER_CHOICES = [
+    AIModelProvider.MLX_TEXT.value,
+    AIModelProvider.MLX_VISION.value,
+    AIModelProvider.LOCAL_STUB.value,
+    AIModelProvider.OFF.value,
+]
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -77,17 +90,16 @@ def build_parser() -> argparse.ArgumentParser:
     process.add_argument("--require-whisper-cpp-coreml", action="store_true")
     process.add_argument("--apple-silicon", action="store_true")
     process.add_argument("--ffmpeg-hwaccel", choices=[item.value for item in FfmpegHwAccel], default="auto")
-    process.add_argument("--ai-provider", choices=[item.value for item in AIProviderName], default="none")
+    process.add_argument("--ai-provider", choices=AI_PROVIDER_CHOICES, default="none")
     process.add_argument("--ai-model", default="")
-    process.add_argument("--ai-overview-provider", choices=[item.value for item in AIModelProvider], default="gemini")
+    process.add_argument("--ai-overview-provider", choices=AI_ROUTE_PROVIDER_CHOICES, default="mlx-text")
     process.add_argument("--ai-overview-model", default="")
-    process.add_argument("--ai-transcript-provider", choices=[item.value for item in AIModelProvider], default="gemini")
+    process.add_argument("--ai-transcript-provider", choices=AI_ROUTE_PROVIDER_CHOICES, default="mlx-text")
     process.add_argument("--ai-transcript-model", default="")
-    process.add_argument("--ai-slides-provider", choices=[item.value for item in AIModelProvider], default="gemini")
+    process.add_argument("--ai-slides-provider", choices=AI_ROUTE_PROVIDER_CHOICES, default="mlx-vision")
     process.add_argument("--ai-slides-model", default="")
-    process.add_argument("--ai-resources-provider", choices=[item.value for item in AIModelProvider], default="gemini")
+    process.add_argument("--ai-resources-provider", choices=AI_ROUTE_PROVIDER_CHOICES, default="mlx-text")
     process.add_argument("--ai-resources-model", default="")
-    process.add_argument("--gemini-max-concurrency", type=int, default=6)
     process.add_argument("--mlx-text-url", default="")
     process.add_argument("--mlx-vision-url", default="")
     process.add_argument("--mlx-timeout", type=int, default=120)
@@ -102,17 +114,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     enrich = subparsers.add_parser("enrich", help="Enrich an existing lecture.json artifact")
     enrich.add_argument("lecture_json", type=Path)
-    enrich.add_argument("--ai-provider", choices=["mock", "gemini"], default="mock")
+    enrich.add_argument("--ai-provider", choices=ENRICH_AI_PROVIDER_CHOICES, default="mock")
     enrich.add_argument("--ai-model", default="")
-    enrich.add_argument("--ai-overview-provider", choices=[item.value for item in AIModelProvider], default="gemini")
+    enrich.add_argument("--ai-overview-provider", choices=AI_ROUTE_PROVIDER_CHOICES, default="mlx-text")
     enrich.add_argument("--ai-overview-model", default="")
-    enrich.add_argument("--ai-transcript-provider", choices=[item.value for item in AIModelProvider], default="gemini")
+    enrich.add_argument("--ai-transcript-provider", choices=AI_ROUTE_PROVIDER_CHOICES, default="mlx-text")
     enrich.add_argument("--ai-transcript-model", default="")
-    enrich.add_argument("--ai-slides-provider", choices=[item.value for item in AIModelProvider], default="gemini")
+    enrich.add_argument("--ai-slides-provider", choices=AI_ROUTE_PROVIDER_CHOICES, default="mlx-vision")
     enrich.add_argument("--ai-slides-model", default="")
-    enrich.add_argument("--ai-resources-provider", choices=[item.value for item in AIModelProvider], default="gemini")
+    enrich.add_argument("--ai-resources-provider", choices=AI_ROUTE_PROVIDER_CHOICES, default="mlx-text")
     enrich.add_argument("--ai-resources-model", default="")
-    enrich.add_argument("--gemini-max-concurrency", type=int, default=6)
     enrich.add_argument("--mlx-text-url", default="")
     enrich.add_argument("--mlx-vision-url", default="")
     enrich.add_argument("--mlx-timeout", type=int, default=120)
@@ -121,18 +132,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     enrich_batch = subparsers.add_parser("enrich-batch", help="Enhance an existing processed batch folder")
     enrich_batch.add_argument("processed_dir", type=Path)
-    enrich_batch.add_argument("--ai-provider", choices=["mock", "gemini"], default="gemini")
+    enrich_batch.add_argument("--ai-provider", choices=ENRICH_AI_PROVIDER_CHOICES, default="lm-studio")
     enrich_batch.add_argument("--ai-model", default="")
-    enrich_batch.add_argument("--ai-overview-provider", choices=[item.value for item in AIModelProvider], default="gemini")
+    enrich_batch.add_argument("--ai-overview-provider", choices=AI_ROUTE_PROVIDER_CHOICES, default="mlx-text")
     enrich_batch.add_argument("--ai-overview-model", default="")
-    enrich_batch.add_argument("--ai-transcript-provider", choices=[item.value for item in AIModelProvider], default="gemini")
+    enrich_batch.add_argument("--ai-transcript-provider", choices=AI_ROUTE_PROVIDER_CHOICES, default="mlx-text")
     enrich_batch.add_argument("--ai-transcript-model", default="")
-    enrich_batch.add_argument("--ai-slides-provider", choices=[item.value for item in AIModelProvider], default="gemini")
+    enrich_batch.add_argument("--ai-slides-provider", choices=AI_ROUTE_PROVIDER_CHOICES, default="mlx-vision")
     enrich_batch.add_argument("--ai-slides-model", default="")
-    enrich_batch.add_argument("--ai-resources-provider", choices=[item.value for item in AIModelProvider], default="gemini")
+    enrich_batch.add_argument("--ai-resources-provider", choices=AI_ROUTE_PROVIDER_CHOICES, default="mlx-text")
     enrich_batch.add_argument("--ai-resources-model", default="")
     enrich_batch.add_argument("--concurrent", type=int, default=1)
-    enrich_batch.add_argument("--gemini-max-concurrency", type=int, default=6)
     enrich_batch.add_argument("--mlx-text-url", default="")
     enrich_batch.add_argument("--mlx-vision-url", default="")
     enrich_batch.add_argument("--mlx-timeout", type=int, default=120)
@@ -144,13 +154,6 @@ def build_parser() -> argparse.ArgumentParser:
     render = subparsers.add_parser("render", help="Render an existing lecture.json artifact")
     render.add_argument("lecture_json", type=Path)
 
-    export_gemini = subparsers.add_parser(
-        "export-gemini-test",
-        help="Create a prompt and zip package for manual Gemini testing",
-    )
-    export_gemini.add_argument("lecture", type=Path, help="Lecture folder or lecture.json")
-    export_gemini.add_argument("--output", type=Path)
-    export_gemini.add_argument("--max-slides", type=int, default=40)
     return parser
 
 
@@ -165,8 +168,6 @@ def main(argv=None) -> int:
         return _run_enrich_batch(args)
     if args.command == "render":
         return _run_render(args)
-    if args.command == "export-gemini-test":
-        return _run_export_gemini_test(args)
     parser.error("Unknown command")
     return 2
 
@@ -211,7 +212,6 @@ def _run_process(args) -> int:
         ai_slides_model=args.ai_slides_model,
         ai_resources_provider=AIModelProvider(args.ai_resources_provider),
         ai_resources_model=args.ai_resources_model,
-        gemini_max_concurrency=args.gemini_max_concurrency,
         mlx_text_base_url=args.mlx_text_url or default_local_text_base_url(),
         mlx_vision_base_url=args.mlx_vision_url or default_local_vision_base_url(),
         mlx_request_timeout_seconds=args.mlx_timeout,
@@ -223,10 +223,6 @@ def _run_process(args) -> int:
 
     try:
         config.validate()
-        if not config.skip_ai_enrichment_reason and config.ai_uses_gemini and not _gemini_api_key_available():
-            raise LectureProcessorError("Gemini enrichment requires a saved or exported GEMINI_API_KEY.")
-        if not config.skip_ai_enrichment_reason and config.ai_uses_gemini and not _gemini_dependency_available():
-            raise LectureProcessorError("Gemini support is not installed. Install with: python3 -m pip install -e '.[ai]'")
         source_files = discover_mov_files(config.input_dir)
         if not source_files:
             raise LectureProcessorError("No supported lecture files found. Try a different folder or file.")
@@ -321,19 +317,12 @@ def _run_enrich(args) -> int:
         ai_slides_model=args.ai_slides_model,
         ai_resources_provider=AIModelProvider(args.ai_resources_provider),
         ai_resources_model=args.ai_resources_model,
-        gemini_max_concurrency=args.gemini_max_concurrency,
         mlx_text_base_url=args.mlx_text_url or default_local_text_base_url(),
         mlx_vision_base_url=args.mlx_vision_url or default_local_vision_base_url(),
         mlx_request_timeout_seconds=args.mlx_timeout,
         skip_ai_enrichment_reason=args.skip_ai_reason,
     )
     config.validate()
-    if not config.skip_ai_enrichment_reason and config.ai_uses_gemini and not _gemini_api_key_available():
-        print("Error: Gemini enrichment requires GEMINI_API_KEY.", file=sys.stderr)
-        return 2
-    if not config.skip_ai_enrichment_reason and config.ai_uses_gemini and not _gemini_dependency_available():
-        print("Error: Gemini support is not installed. Install with: python3 -m pip install -e '.[ai]'", file=sys.stderr)
-        return 2
     try:
         artifact = enrich_lecture_artifact(lecture_json, config)
         if args.render_html:
@@ -365,7 +354,6 @@ def _run_enrich_batch(args) -> int:
         ai_slides_model=args.ai_slides_model,
         ai_resources_provider=AIModelProvider(args.ai_resources_provider),
         ai_resources_model=args.ai_resources_model,
-        gemini_max_concurrency=args.gemini_max_concurrency,
         mlx_text_base_url=args.mlx_text_url or default_local_text_base_url(),
         mlx_vision_base_url=args.mlx_vision_url or default_local_vision_base_url(),
         mlx_request_timeout_seconds=args.mlx_timeout,
@@ -374,12 +362,6 @@ def _run_enrich_batch(args) -> int:
         skip_files=tuple(args.skip_file or ()),
     )
     config.validate()
-    if not config.skip_ai_enrichment_reason and config.ai_uses_gemini and not _gemini_api_key_available():
-        print("Error: Gemini enrichment requires GEMINI_API_KEY.", file=sys.stderr)
-        return 2
-    if not config.skip_ai_enrichment_reason and config.ai_uses_gemini and not _gemini_dependency_available():
-        print("Error: Gemini support is not installed. Install with: python3 -m pip install -e '.[ai]'", file=sys.stderr)
-        return 2
     try:
         summary = enrich_processed_batch(config, progress_callback=event_printer)
     except LectureProcessorError as exc:
@@ -412,20 +394,6 @@ def _run_render(args) -> int:
     return 0
 
 
-def _run_export_gemini_test(args) -> int:
-    try:
-        zip_path = export_gemini_test_package(
-            args.lecture,
-            output_path=args.output,
-            max_slides=args.max_slides,
-        )
-    except Exception as exc:
-        print(f"Error: {exc}", file=sys.stderr)
-        return 1
-    print(f"Gemini test package: {zip_path}")
-    return 0
-
-
 def _build_event_printer(enabled: bool):
     if not enabled:
         return None
@@ -455,15 +423,6 @@ def _detect_apple_silicon() -> bool:
     return completed.returncode == 0 and completed.stdout.strip() == "1"
 
 
-def _gemini_api_key_available() -> bool:
-    return bool(os.environ.get("GEMINI_API_KEY") or os.environ.get("LECTURE_PROCESSOR_GEMINI_API_KEY"))
-
-
-def _gemini_dependency_available() -> bool:
-    try:
-        return importlib.util.find_spec("google.genai") is not None
-    except ModuleNotFoundError:
-        return False
 
 
 def _default_output_dir(input_dir: Path) -> Path:

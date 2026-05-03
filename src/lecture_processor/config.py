@@ -80,6 +80,7 @@ class AIProviderName(str, Enum):
     NONE = "none"
     MOCK = "mock"
     GEMINI = "gemini"
+    LM_STUDIO = "lm-studio"
 
 
 class AIModelProvider(str, Enum):
@@ -116,19 +117,19 @@ class BatchConfig:
     apple_silicon: bool = False
     ai_provider: AIProviderName = AIProviderName.NONE
     ai_model: str = ""
-    ai_overview_provider: AIModelProvider = AIModelProvider.GEMINI
+    ai_overview_provider: AIModelProvider = AIModelProvider.MLX_TEXT
     ai_overview_model: str = ""
-    ai_transcript_provider: AIModelProvider = AIModelProvider.GEMINI
+    ai_transcript_provider: AIModelProvider = AIModelProvider.MLX_TEXT
     ai_transcript_model: str = ""
-    ai_slides_provider: AIModelProvider = AIModelProvider.GEMINI
+    ai_slides_provider: AIModelProvider = AIModelProvider.MLX_VISION
     ai_slides_model: str = ""
-    ai_resources_provider: AIModelProvider = AIModelProvider.GEMINI
+    ai_resources_provider: AIModelProvider = AIModelProvider.MLX_TEXT
     ai_resources_model: str = ""
     mlx_text_base_url: str = field(default_factory=default_local_text_base_url)
     mlx_vision_base_url: str = field(default_factory=default_local_vision_base_url)
     mlx_request_timeout_seconds: int = 120
     skip_ai_enrichment_reason: str = ""
-    gemini_max_concurrency: int = 6
+    gemini_max_concurrency: int = 3
     render_html: bool = True
     skip_files: Tuple[str, ...] = ()
     control_file: Optional[Path] = None
@@ -143,7 +144,7 @@ class BatchConfig:
         if self.min_duration_seconds < 0:
             raise LectureProcessorError("--min-duration must be zero or greater")
         if self.gemini_max_concurrency < 1 or self.gemini_max_concurrency > 12:
-            raise LectureProcessorError("--gemini-max-concurrency must be between 1 and 12")
+            raise LectureProcessorError("--ai-max-concurrency must be between 1 and 12")
         if self.mlx_request_timeout_seconds < 10 or self.mlx_request_timeout_seconds > 600:
             raise LectureProcessorError("--mlx-timeout must be between 10 and 600 seconds")
         try:

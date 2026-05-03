@@ -37,7 +37,7 @@ def enrich_lecture_artifact(
     if availability.warnings:
         _append_processing_warnings(lecture_json_path, availability.warnings)
         artifact = load_json(lecture_json_path)
-    info = provider_info("gemini" if config.ai_provider is AIProviderName.GEMINI else config.ai_provider.value)
+    info = provider_info(_provider_info_name(config))
     provider = _build_provider_for_config(config, info)
     request = _request_from_artifact(artifact, lecture_json_path.parent)
     if routing_enabled:
@@ -187,6 +187,14 @@ def _build_provider_for_config(config: BatchConfig, info):
     if config.ai_provider is AIProviderName.MOCK:
         return build_provider("mock", model=config.ai_model or info.default_model)
     return None
+
+
+def _provider_info_name(config: BatchConfig) -> str:
+    if config.ai_provider is AIProviderName.GEMINI:
+        return "gemini"
+    if config.ai_provider is AIProviderName.LM_STUDIO:
+        return "mlx-text"
+    return config.ai_provider.value
 
 
 def _probe_availability(config: BatchConfig) -> RouteAvailability:

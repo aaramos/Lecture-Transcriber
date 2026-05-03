@@ -88,12 +88,8 @@ const LOCAL_MODELS_STORAGE_KEY = "lectureProcessor.lmStudioModels.v2";
 const MODEL_SELECTION_VERSION = 1;
 const UI_SETTINGS_VERSION = 1;
 const LM_STUDIO_OPENAI_URL = "http://192.168.86.101:1234/v1";
-const GEMINI_RESOURCES_MODEL_VALUE = "__gemini_resources__";
-const GEMINI_RESOURCE_PREFIX = "gemini:";
-const GEMINI_MODELS = Object.freeze([
-  { value: "gemini-2.5-flash", label: "Gemini 2.5 Flash" },
-  { value: "gemini-2.5-flash-lite", label: "Gemini 2.5 Flash-Lite" },
-]);
+const LEGACY_GEMINI_RESOURCES_MODEL_VALUE = "__gemini_resources__";
+const LEGACY_GEMINI_RESOURCE_PREFIX = "gemini:";
 const LEGACY_LOCAL_MODEL_IDS = new Set(["gemma4:26b", "llama3", "qwen3", "gemma3"]);
 const LEGACY_LOCAL_OPENAI_URLS = new Set([
   "http://localhost:11434/v1",
@@ -107,7 +103,7 @@ const DEFAULT_SETTINGS = Object.freeze({
   audioEnhancement: "none",
   transcriptionProfile: "quality",
   slideSensitivity: "medium",
-  aiModel: "gemini-2.5-flash",
+  aiModel: "",
   aiOverviewProvider: "mlx-text",
   aiOverviewModel: "",
   aiTranscriptProvider: "mlx-text",
@@ -119,9 +115,8 @@ const DEFAULT_SETTINGS = Object.freeze({
   mlxTextUrl: LM_STUDIO_OPENAI_URL,
   mlxVisionUrl: LM_STUDIO_OPENAI_URL,
   mlxTimeout: 120,
-  enhanceWithGemini: false,
+  aiEnhance: false,
   concurrentFiles: 2,
-  geminiMaxConcurrency: 3,
   saveNormalized: true,
 });
 const PROFILE_ORDER = ["quality", "fast", "turbo"];
@@ -137,7 +132,7 @@ const PROFILE_LABELS = Object.freeze({
 });
 const LEGACY_DEFAULT_MIGRATIONS = Object.freeze({
   audioQuality: ["fast", DEFAULT_SETTINGS.audioQuality],
-  aiModel: ["gemini-2.5-flash-lite", DEFAULT_SETTINGS.aiModel],
+  aiModel: ["", DEFAULT_SETTINGS.aiModel],
 });
 
 const state = {
@@ -161,9 +156,8 @@ const state = {
   tokensSent: 0,
   tokensReceived: 0,
   tokenUsageBySource: new Map(),
-  geminiKeySaved: false,
   lmStudioTokenSaved: false,
-  enhanceWithGeminiPreference: DEFAULT_SETTINGS.enhanceWithGemini,
+  aiEnhancePreference: DEFAULT_SETTINGS.aiEnhance,
   dependencyReady: false,
   dependencySetupRunning: false,
   profileStatusById: new Map(),
@@ -222,6 +216,13 @@ const elements = {
   tokensReceivedMetricStatus: document.querySelector("#tokensReceivedMetricStatus"),
   activeVideos: document.querySelector("#activeVideos"),
   activeSummary: document.querySelector("#activeSummary"),
+  aiStatus: document.querySelector("#aiStatus"),
+  aiLoadedModel: document.querySelector("#aiLoadedModel"),
+  aiPhaseTrack: document.querySelector("#aiPhaseTrack"),
+  aiServerStrip: document.querySelector("#aiServerStrip"),
+  aiServerStatus: document.querySelector("#aiServerStatus"),
+  aiServerUrl: document.querySelector("#aiServerUrl"),
+  aiServerModels: document.querySelector("#aiServerModels"),
   completedCount: document.querySelector("#completedCount"),
   processingCount: document.querySelector("#processingCount"),
   waitingCount: document.querySelector("#waitingCount"),
@@ -233,8 +234,9 @@ const elements = {
   transcriptionProfile: document.querySelector("#transcriptionProfile"),
   transcriptionProfileHelp: document.querySelector("#transcriptionProfileHelp"),
   slideSensitivity: document.querySelector("#slideSensitivity"),
-  enhanceWithGemini: document.querySelector("#enhanceWithGemini"),
+  aiEnhance: document.querySelector("#aiEnhance"),
   aiModel: document.querySelector("#aiModel"),
+  modelRoutingStatus: document.querySelector("#modelRoutingStatus"),
   aiOverviewProvider: document.querySelector("#aiOverviewProvider"),
   aiOverviewModel: document.querySelector("#aiOverviewModel"),
   aiTranscriptProvider: document.querySelector("#aiTranscriptProvider"),
@@ -246,14 +248,10 @@ const elements = {
   mlxTextUrl: document.querySelector("#mlxTextUrl"),
   mlxVisionUrl: document.querySelector("#mlxVisionUrl"),
   mlxTimeout: document.querySelector("#mlxTimeout"),
-  geminiApiKey: document.querySelector("#geminiApiKey"),
-  saveGeminiKeyButton: document.querySelector("#saveGeminiKeyButton"),
-  geminiKeyStatus: document.querySelector("#geminiKeyStatus"),
   lmStudioToken: document.querySelector("#lmStudioToken"),
   saveLmStudioTokenButton: document.querySelector("#saveLmStudioTokenButton"),
   lmStudioTokenStatus: document.querySelector("#lmStudioTokenStatus"),
   concurrentFiles: document.querySelector("#concurrentFiles"),
-  geminiMaxConcurrency: document.querySelector("#geminiMaxConcurrency"),
   refreshLocalModelsButton: document.querySelector("#refreshLocalModelsButton"),
   localModelStatus: document.querySelector("#localModelStatus"),
   restoreDefaultsButton: document.querySelector("#restoreDefaultsButton"),
@@ -266,7 +264,6 @@ loadPersistedSettings();
 loadLocalModelChoicesAtLaunch();
 refreshDependencyStatus();
 refreshTranscriptionProfileStatus();
-refreshGeminiKeyStatus();
 refreshLmStudioTokenStatus();
 cleanupTempFilesAtLaunch();
 setupDragAndDrop();
@@ -307,7 +304,6 @@ elements.openOutputButton.addEventListener("click", openOutput);
 elements.settingsButton.addEventListener("click", () => showDialog(elements.settingsDialog));
 elements.refreshLocalModelsButton.addEventListener("click", () => refreshLocalModels({ force: true }));
 elements.restoreDefaultsButton.addEventListener("click", restoreDefaultSettings);
-elements.saveGeminiKeyButton.addEventListener("click", () => saveGeminiKey());
 elements.saveLmStudioTokenButton.addEventListener("click", () => saveLmStudioToken());
 elements.activeVideos.addEventListener("click", (event) => {
   const button = event.target.closest("[data-video-action]");
@@ -321,10 +317,6 @@ elements.concurrentFiles.addEventListener("input", () => {
   validateSettings({ showDialogOnError: false });
   saveCurrentSettings();
 });
-elements.geminiMaxConcurrency.addEventListener("input", () => {
-  validateSettings({ showDialogOnError: false });
-  saveCurrentSettings();
-});
 elements.mlxTimeout.addEventListener("input", () => {
   validateSettings({ showDialogOnError: false });
   saveCurrentSettings();
@@ -335,15 +327,15 @@ elements.mlxTimeout.addEventListener("input", () => {
   elements.audioEnhancement,
   elements.transcriptionProfile,
   elements.slideSensitivity,
-  elements.enhanceWithGemini,
+  elements.aiEnhance,
   elements.aiOverviewModel,
   elements.aiSlidesModel,
   elements.aiResourcesModel,
-].forEach((element) => {
+].filter(Boolean).forEach((element) => {
   element.addEventListener("change", () => {
     syncAiRouteProvidersFromModelChoices();
-    if (element === elements.enhanceWithGemini && state.folderMode !== "processed") {
-      state.enhanceWithGeminiPreference = elements.enhanceWithGemini.checked;
+    if (element === elements.aiEnhance && state.folderMode !== "processed") {
+      state.aiEnhancePreference = elements.aiEnhance.checked;
     }
     if (element === elements.transcriptionProfile) {
       renderTranscriptionProfileHelp();
@@ -356,13 +348,11 @@ elements.mlxTimeout.addEventListener("input", () => {
 
 [
   elements.mlxTextUrl,
-  elements.mlxVisionUrl,
-].forEach((element) => {
+].filter(Boolean).forEach((element) => {
   element.addEventListener("input", () => {
+    mirrorSharedLmStudioUrl();
     saveCurrentSettings();
-    if (element === elements.mlxTextUrl || element === elements.mlxVisionUrl) {
-      markLocalModelsStale();
-    }
+    markLocalModelsStale();
   });
 });
 
@@ -479,17 +469,11 @@ async function startBatch() {
   }
 
   const skipAiReason = await aiSkipReasonForUnavailableModels();
-  const willRunAiEnhancement = needsAiEnhancement() && !skipAiReason;
 
-  if (willRunAiEnhancement && needsGemini() && elements.geminiApiKey.value.trim()) {
-    const saved = await saveGeminiKey({ quiet: true });
-    if (!saved) return;
-  }
-  await refreshGeminiKeyStatus();
   await refreshLmStudioTokenStatus();
   const finalConcurrentFiles = validateSettings({ skipAiReason });
   if (!finalConcurrentFiles) return;
-  const finalGeminiConcurrency = validGeminiConcurrency(elements.geminiMaxConcurrency.value);
+  const sharedLmStudioUrl = sharedLmStudioBaseUrl();
 
   resetResults();
   setRunning(true);
@@ -505,12 +489,12 @@ async function startBatch() {
     confirmNormalization: requiresNormalizationConfirmation(),
     concurrentFiles: finalConcurrentFiles,
     saveNormalizedVideo: true,
-    audioQuality: elements.audioQuality.value,
+    audioQuality: selectedAudioQuality(),
     audioEnhancement: elements.audioEnhancement.value,
     transcriptionProfile: elements.transcriptionProfile.value,
     slideSensitivity: elements.slideSensitivity.value,
-    aiProvider: needsAiEnhancement() ? "gemini" : "none",
-    aiModel: selectedGeminiModel(),
+    aiProvider: needsAiEnhancement() ? "lm-studio" : "none",
+    aiModel: routeModelValue("overview"),
     aiOverviewProvider: elements.aiOverviewProvider.value,
     aiOverviewModel: routeModelValue("overview"),
     aiTranscriptProvider: elements.aiTranscriptProvider.value,
@@ -519,11 +503,10 @@ async function startBatch() {
     aiSlidesModel: routeModelValue("slides"),
     aiResourcesProvider: elements.aiResourcesProvider.value,
     aiResourcesModel: routeModelValue("resources"),
-    mlxTextUrl: elements.mlxTextUrl.value.trim(),
-    mlxVisionUrl: elements.mlxVisionUrl.value.trim(),
+    mlxTextUrl: sharedLmStudioUrl,
+    mlxVisionUrl: sharedLmStudioUrl,
     mlxTimeout: validMlxTimeout(elements.mlxTimeout.value),
     skipAiReason,
-    geminiMaxConcurrency: finalGeminiConcurrency,
     minDuration: 60,
     skippedFiles: manualSkippedFiles(),
   };
@@ -790,11 +773,11 @@ function render() {
   elements.outputPath.textContent = state.outputDir || "-";
   elements.clearFolderButton.classList.toggle("hidden", !hasFolder);
   elements.startButton.disabled = state.running || !hasFolder || processableFileCount() === 0;
-  elements.startButton.textContent = state.folderMode === "processed" ? "Enhance" : "Start";
+  elements.startButton.textContent = state.folderMode === "processed" ? "Enhance Batch" : "Start Batch";
   elements.chooseOutputButton.disabled = state.running || state.folderMode === "processed";
-  elements.enhanceWithGemini.checked =
-    state.folderMode === "processed" ? true : state.enhanceWithGeminiPreference;
-  elements.enhanceWithGemini.disabled = state.running || state.folderMode === "processed";
+  elements.aiEnhance.checked =
+    state.folderMode === "processed" ? true : state.aiEnhancePreference;
+  elements.aiEnhance.disabled = state.running || state.folderMode === "processed";
   if (!state.running) {
     syncPendingFilePlans();
     elements.runMeta.textContent = hasFolder
@@ -803,6 +786,7 @@ function render() {
   }
   renderVideoDashboard();
   renderAiControls();
+  renderPrimaryAiServer();
 }
 
 function setRunning(running) {
@@ -811,7 +795,7 @@ function setRunning(running) {
   elements.chooseFolderButton.disabled = running;
   elements.clearFolderButton.disabled = running;
   elements.chooseOutputButton.disabled = running || state.folderMode === "processed";
-  elements.enhanceWithGemini.disabled = running || state.folderMode === "processed";
+  elements.aiEnhance.disabled = running || state.folderMode === "processed";
   elements.progressBar.classList.toggle("running", running);
   renderRunControls();
   renderAiControls();
@@ -1050,7 +1034,7 @@ function markAiStepStarted(file, step) {
         return {
           ...item,
           status: "done",
-          elapsedSeconds: item.elapsedSeconds,
+          elapsedSeconds: item.elapsedSeconds ?? elapsedSinceStart(item.startedAt, now),
         };
       }
       return item;
@@ -1070,7 +1054,7 @@ function markAiStepsFinished(file, elapsedSeconds = null) {
         ? {
             ...item,
             status: "done",
-            elapsedSeconds: item.elapsedSeconds,
+            elapsedSeconds: item.elapsedSeconds ?? elapsedSinceStart(item.startedAt, now) ?? elapsedSeconds,
             startedAt: item.startedAt || null,
           }
         : item,
@@ -1079,6 +1063,10 @@ function markAiStepsFinished(file, elapsedSeconds = null) {
     currentStepStartedAt: null,
     lastEventAt: now,
   };
+}
+
+function elapsedSinceStart(startedAt, now = Date.now()) {
+  return startedAt ? Math.max(0, (now - startedAt) / 1000) : null;
 }
 
 function markAiStepsSkipped(file) {
@@ -1145,21 +1133,27 @@ function isAiDetailStep(step) {
   return AI_STEP_ORDER.includes(step);
 }
 
-function renderStepStrip(file) {
+function renderStepStrip(file, source = "") {
   const steps = ensureStepStates(file);
   if (!steps.length) return "";
   const html = steps
     .map((step) => {
       const stateClass = escapeHtml(step.status || "waiting");
-      const activeTime = step.status === "active" ? activeStepDuration(file, step) : "";
-      const finishedTime = step.status === "done" && step.elapsedSeconds ? formatDuration(step.elapsedSeconds) : "";
-      const time = activeTime || finishedTime;
+      const time = stepTimeLabel(file, step);
+      const tokenRate = isAiDetailStep(step.key) ? fileTokensPerSecondLabel(file, source) : "";
+      const metric = [time, tokenRate].filter(Boolean).join(" · ");
       return `<span class="video-step ${stateClass}"><span>${escapeHtml(step.label)}</span>${
-        time ? `<span class="video-step-time">${escapeHtml(time)}</span>` : ""
+        metric ? `<span class="video-step-time">${escapeHtml(metric)}</span>` : ""
       }</span>`;
     })
     .join("");
   return `<div class="video-step-list" aria-label="File steps">${html}</div>`;
+}
+
+function stepTimeLabel(file, step) {
+  if (step.status === "active") return activeStepDuration(file, step);
+  if (Number.isFinite(Number(step.elapsedSeconds))) return formatDuration(step.elapsedSeconds);
+  return "0s";
 }
 
 function activeStepDetail(file) {
@@ -1169,9 +1163,13 @@ function activeStepDetail(file) {
 }
 
 function activeStepDuration(file, step) {
+  return formatDuration(activeStepDurationSeconds(file, step));
+}
+
+function activeStepDurationSeconds(file, step) {
   const startedAt = step.startedAt || file?.currentStepStartedAt;
-  if (!startedAt) return "0s";
-  return formatDuration((Date.now() - startedAt) / 1000);
+  if (!startedAt) return 0;
+  return (Date.now() - startedAt) / 1000;
 }
 
 function renderFileStats(file, source) {
@@ -1192,11 +1190,35 @@ function renderFileTokenStats(file, source) {
     received: Number(file?.tokensReceived || 0),
   };
   const hasUsage = Number(usage.sent) > 0 || Number(usage.received) > 0;
-  const shouldShow = hasUsage || needsGemini() || file?.currentStep === "Enrich" || isAiDetailStep(file?.currentStep);
+  const shouldShow = hasUsage || needsAiEnhancement() || file?.currentStep === "Enrich" || isAiDetailStep(file?.currentStep);
   if (!shouldShow) return "";
   const sent = hasUsage ? formatTokenCount(usage.sent) : "--";
   const received = hasUsage ? formatTokenCount(usage.received) : "--";
   return ` · Tokens in ${escapeHtml(sent)} · out ${escapeHtml(received)}`;
+}
+
+function fileTokensPerSecondLabel(file, source = "") {
+  const usage = source ? state.tokenUsageBySource.get(source) : null;
+  const tokens = Number(usage?.sent || 0) + Number(usage?.received || 0);
+  const seconds = aiElapsedSeconds(file) || fileElapsedSeconds(file);
+  if (tokens <= 0 || seconds <= 0) return globalTokensPerSecondLabel();
+  return `${(tokens / seconds).toFixed(1)} tok/s`;
+}
+
+function aiElapsedSeconds(file) {
+  return ensureStepStates(file)
+    .filter((step) => isAiDetailStep(step.key))
+    .reduce((sum, step) => {
+      if (step.status === "active") return sum + Number(activeStepDurationSeconds(file, step) || 0);
+      return sum + Number(step.elapsedSeconds || 0);
+    }, 0);
+}
+
+function globalTokensPerSecondLabel() {
+  const elapsedSeconds = state.runStartedAt ? Math.max(1, (Date.now() - state.runStartedAt) / 1000) : 0;
+  const tokens = Number(state.tokensSent || 0) + Number(state.tokensReceived || 0);
+  if (!tokens || !elapsedSeconds) return "-- tok/s";
+  return `${(tokens / elapsedSeconds).toFixed(1)} tok/s`;
 }
 
 function fileElapsedSeconds(file) {
@@ -1262,17 +1284,6 @@ function validateSettings(options = {}) {
     elements.runMeta.textContent = "Concurrent files must be between 1 and 3.";
     return null;
   }
-  const geminiValue = Number.parseInt(elements.geminiMaxConcurrency.value, 10);
-  const geminiValid = Number.isInteger(geminiValue) && geminiValue >= 1 && geminiValue <= 12;
-  elements.geminiMaxConcurrency.classList.toggle("invalid", !geminiValid);
-  if (!geminiValid) {
-    if (showDialogOnError) {
-      showDialog(elements.settingsDialog);
-    }
-    elements.geminiMaxConcurrency.focus();
-    elements.runMeta.textContent = "AI concurrency must be between 1 and 12.";
-    return null;
-  }
   const mlxTimeout = Number.parseInt(elements.mlxTimeout.value, 10);
   const mlxTimeoutValid = Number.isInteger(mlxTimeout) && mlxTimeout >= 10 && mlxTimeout <= 600;
   elements.mlxTimeout.classList.toggle("invalid", !mlxTimeoutValid);
@@ -1291,14 +1302,6 @@ function validateSettings(options = {}) {
     }
     elements.runMeta.textContent = selectedProfile.unavailableReason || "Choose an available transcription profile.";
     elements.transcriptionProfile.focus();
-    return null;
-  }
-  if (!skipAiReason && needsGemini() && !state.geminiKeySaved && !elements.geminiApiKey.value.trim()) {
-    if (showDialogOnError) {
-      showDialog(elements.settingsDialog);
-    }
-    elements.runMeta.textContent = "Gemini needs an API key saved in Keychain.";
-    elements.geminiApiKey.focus();
     return null;
   }
   return value;
@@ -1488,7 +1491,58 @@ function renderVideoDashboard() {
   const entries = dashboardEntries();
   renderCounts(entries);
   renderOverallProgress(entries);
+  renderAiPhaseStatus(entries);
   renderVideoList(entries);
+}
+
+function renderAiPhaseStatus(entries) {
+  if (!elements.aiStatus || !needsAiEnhancement()) {
+    elements.aiStatus?.classList.add("hidden");
+    return;
+  }
+
+  elements.aiStatus.classList.remove("hidden");
+  const phases = [
+    { key: "AIOverview", title: "Overview", model: routeModelValue("overview") },
+    { key: "AITranscript", title: "Transcript", model: routeModelValue("transcript") },
+    { key: "AISlides", title: "Slides", model: routeModelValue("slides") },
+    { key: "AIResources", title: "Resources", model: routeModelValue("resources") },
+  ];
+  const activePhase = phases.find((phase) => aiPhaseStatus(entries, phase.key) === "active");
+  const loadedModel = activePhase?.model || lastDoneAiModel(entries, phases) || "none";
+  elements.aiLoadedModel.textContent = `Loaded model: ${loadedModel || "none"}`;
+  elements.aiPhaseTrack.innerHTML = phases.map((phase) => {
+    const status = aiPhaseStatus(entries, phase.key);
+    const statusLabel = status === "done" ? "Done" : status === "active" ? "Active" : status === "skipped" ? "Skipped" : "Waiting";
+    const model = phase.model || "No model selected";
+    const tokenRate = globalTokensPerSecondLabel();
+    return `
+      <div class="phase ${escapeHtml(status)}">
+        <div class="phase-title">
+          <strong>${escapeHtml(phase.title)}</strong>
+          <span>${escapeHtml(statusLabel)}</span>
+        </div>
+        <div class="phase-model">${escapeHtml(model)}</div>
+        <div class="phase-metric">Avg ${escapeHtml(tokenRate)}</div>
+      </div>
+    `;
+  }).join("");
+}
+
+function aiPhaseStatus(entries, stepKey) {
+  const stepStates = entries
+    .map(([_name, file]) => ensureStepStates(file).find((step) => step.key === stepKey)?.status || "waiting");
+  if (!stepStates.length) return "waiting";
+  if (stepStates.some((status) => status === "active")) return "active";
+  if (stepStates.every((status) => status === "done")) return "done";
+  if (stepStates.every((status) => status === "skipped" || status === "stopped")) return "skipped";
+  if (stepStates.some((status) => status === "failed")) return "failed";
+  return "waiting";
+}
+
+function lastDoneAiModel(entries, phases) {
+  const donePhase = [...phases].reverse().find((phase) => aiPhaseStatus(entries, phase.key) === "done");
+  return donePhase?.model || "";
 }
 
 function primeQueuedFiles(concurrentFiles) {
@@ -1639,7 +1693,7 @@ function renderVideoList(entries) {
             </div>
             <div class="video-detail">${escapeHtml(detail)}</div>
             ${renderFileStats(file, name)}
-            ${renderStepStrip(file)}
+            ${renderStepStrip(file, name)}
           </div>
           ${
             active
@@ -1891,16 +1945,7 @@ function manualSkippedFiles() {
 }
 
 function needsAiEnhancement() {
-  return state.folderMode === "processed" || elements.enhanceWithGemini.checked;
-}
-
-function needsGemini() {
-  return needsAiEnhancement() && usesGeminiRoutes();
-}
-
-function usesGeminiRoutes() {
-  syncAiRouteProvidersFromModelChoices();
-  return aiRouteProviders().some((provider) => provider === "gemini");
+  return state.folderMode === "processed" || elements.aiEnhance.checked;
 }
 
 function aiRouteProviders() {
@@ -1936,14 +1981,13 @@ function syncAiRouteProvidersFromModelChoices() {
   elements.aiTranscriptProvider.value = "mlx-text";
   elements.aiTranscriptModel.value = routeModelValue("overview");
   elements.aiSlidesProvider.value = "mlx-vision";
-  elements.aiResourcesProvider.value = isGeminiResourceValue(elements.aiResourcesModel.value) ? "gemini" : "mlx-text";
-  elements.aiModel.value = selectedGeminiModel();
+  elements.aiResourcesProvider.value = "mlx-text";
+  elements.aiModel.value = "";
 }
 
 function routeModelValue(step) {
   const route = aiRouteControls().find((candidate) => candidate.step === step);
   if (!route) return "";
-  if (step === "resources" && isGeminiResourceValue(route.modelInput.value)) return "";
   return String(route.modelInput.value || "").trim();
 }
 
@@ -1952,33 +1996,14 @@ function storedRouteModelValue(step) {
   return route ? String(route.modelInput.value || "").trim() : "";
 }
 
-function geminiResourceValue(model) {
-  return `${GEMINI_RESOURCE_PREFIX}${model || DEFAULT_SETTINGS.aiModel}`;
-}
-
-function isGeminiResourceValue(value) {
+function isLegacyGeminiResourceValue(value) {
   const raw = String(value || "").trim();
-  return raw === GEMINI_RESOURCES_MODEL_VALUE || raw.startsWith(GEMINI_RESOURCE_PREFIX);
-}
-
-function geminiModelFromResourceValue(value) {
-  const raw = String(value || "").trim();
-  if (raw === GEMINI_RESOURCES_MODEL_VALUE) return DEFAULT_SETTINGS.aiModel;
-  if (raw.startsWith(GEMINI_RESOURCE_PREFIX)) {
-    return raw.slice(GEMINI_RESOURCE_PREFIX.length) || DEFAULT_SETTINGS.aiModel;
-  }
-  return "";
-}
-
-function selectedGeminiModel() {
-  return geminiModelFromResourceValue(elements.aiResourcesModel.value) || elements.aiModel.value || DEFAULT_SETTINGS.aiModel;
+  return raw === LEGACY_GEMINI_RESOURCES_MODEL_VALUE || raw.startsWith(LEGACY_GEMINI_RESOURCE_PREFIX);
 }
 
 function resourceModelChoiceFromSettings(settings) {
   const raw = String(settings.aiResourcesModel || "").trim();
-  if (raw === GEMINI_RESOURCES_MODEL_VALUE) return geminiResourceValue(settings.aiModel || DEFAULT_SETTINGS.aiModel);
-  if (raw.startsWith(GEMINI_RESOURCE_PREFIX)) return raw;
-  if (settings.aiResourcesProvider === "gemini") return geminiResourceValue(settings.aiModel || DEFAULT_SETTINGS.aiModel);
+  if (isLegacyGeminiResourceValue(raw) || settings.aiResourcesProvider === "gemini") return "";
   return raw;
 }
 
@@ -1998,8 +2023,7 @@ function missingRequiredModelSelections() {
   syncAiRouteProvidersFromModelChoices();
   return uniqueStrings(aiRouteControls()
     .filter((route) => {
-      const value = storedRouteModelValue(route.step);
-      return route.step === "resources" ? !value : !routeModelValue(route.step);
+      return !routeModelValue(route.step);
     })
     .map((route) => route.label));
 }
@@ -2084,15 +2108,8 @@ async function refreshLocalModels(options = {}) {
 
 function localModelBaseUrls(options = {}) {
   const { includeAll = false } = options;
-  const urls = [];
-  const routes = includeAll ? [] : selectedLocalRoutes();
-  if (includeAll || routes.length === 0 || routes.some((route) => route.providerInput.value === "mlx-text")) {
-    urls.push(normalizeOpenAiBaseUrl(elements.mlxTextUrl.value));
-  }
-  if (includeAll || routes.some((route) => route.providerInput.value === "mlx-vision")) {
-    urls.push(normalizeOpenAiBaseUrl(elements.mlxVisionUrl.value));
-  }
-  return uniqueStrings(urls);
+  if (!includeAll && !selectedLocalRoutes().length) return [];
+  return [sharedLmStudioBaseUrl()];
 }
 
 async function fetchLocalModels(baseUrls) {
@@ -2102,42 +2119,33 @@ async function fetchLocalModels(baseUrls) {
 
 function renderLocalModelOptions() {
   renderModelSelect(elements.aiOverviewModel, routeModelValue("overview"), {
-    includeGemini: false,
     models: modelsForRoute("overview"),
   });
   elements.aiTranscriptModel.value = routeModelValue("overview");
   renderModelSelect(elements.aiSlidesModel, routeModelValue("slides"), {
-    includeGemini: false,
     models: modelsForRoute("slides"),
   });
   renderModelSelect(elements.aiResourcesModel, storedRouteModelValue("resources"), {
-    includeGemini: true,
     models: modelsForRoute("resources"),
   });
   syncAiRouteProvidersFromModelChoices();
 }
 
 function renderModelSelect(select, selectedValue, options = {}) {
-  const { includeGemini = false, models = state.localModels } = options;
+  const { models = state.localModels } = options;
   const modelOptions = uniqueStrings(models).sort((left, right) => left.localeCompare(right));
   const selected = String(selectedValue || "").trim();
   select.innerHTML = "";
 
-  const placeholder = includeGemini ? "Choose Gemini or LM Studio model" : "Choose LM Studio model";
-  select.appendChild(new Option(placeholder, ""));
-  if (includeGemini) {
-    GEMINI_MODELS.forEach((model) => {
-      select.appendChild(new Option(model.label, geminiResourceValue(model.value)));
-    });
-  }
+  select.appendChild(new Option("Choose LM Studio model", ""));
   modelOptions.forEach((model) => {
     select.appendChild(new Option(model, model));
   });
 
-  if (selected && !isGeminiResourceValue(selected) && !modelOptions.includes(selected)) {
+  if (selected && !isLegacyGeminiResourceValue(selected) && !modelOptions.includes(selected)) {
     select.appendChild(new Option(`${selected} (unavailable)`, selected));
   }
-  if (selected) {
+  if (selected && !isLegacyGeminiResourceValue(selected)) {
     select.value = selected;
   } else {
     select.value = "";
@@ -2205,8 +2213,7 @@ function setLocalModelStatus(message) {
 }
 
 function modelsForRoute(step) {
-  if (step === "slides") return modelsForBaseUrl(elements.mlxVisionUrl.value);
-  return modelsForBaseUrl(elements.mlxTextUrl.value);
+  return modelsForBaseUrl(sharedLmStudioBaseUrl());
 }
 
 function modelsForBaseUrl(baseUrl) {
@@ -2215,19 +2222,25 @@ function modelsForBaseUrl(baseUrl) {
 
 function localModelStatusSummary(options = {}) {
   const { cached = false } = options;
-  const textUrl = normalizeOpenAiBaseUrl(elements.mlxTextUrl.value);
-  const visionUrl = normalizeOpenAiBaseUrl(elements.mlxVisionUrl.value);
+  const serverUrl = sharedLmStudioBaseUrl();
   const prefix = cached ? "Cached: " : "";
-  if (textUrl === visionUrl) {
-    return `${prefix}Shared server ${serverModelStatus(textUrl)}`;
-  }
-  return `${prefix}Text/Resource ${serverModelStatus(textUrl)} · Vision ${serverModelStatus(visionUrl)}`;
+  return `${prefix}${serverModelStatus(serverUrl)}`;
 }
 
 function serverModelStatus(baseUrl) {
   const models = modelsForBaseUrl(baseUrl);
   if (state.localModelErrorsByBaseUrl[normalizeOpenAiBaseUrl(baseUrl)]) return "unavailable";
   return `${models.length} model${models.length === 1 ? "" : "s"}`;
+}
+
+function sharedLmStudioBaseUrl() {
+  return normalizeOpenAiBaseUrl(elements.mlxTextUrl.value);
+}
+
+function mirrorSharedLmStudioUrl() {
+  if (elements.mlxVisionUrl) {
+    elements.mlxVisionUrl.value = sharedLmStudioBaseUrl();
+  }
 }
 
 function normalizeOpenAiBaseUrl(value) {
@@ -2295,32 +2308,28 @@ function applySettings(settings) {
   setSelectValue(elements.slideSensitivity, settings.slideSensitivity, DEFAULT_SETTINGS.slideSensitivity);
   setSelectValue(elements.aiModel, settings.aiModel, DEFAULT_SETTINGS.aiModel);
   elements.mlxTextUrl.value = settings.mlxTextUrl || DEFAULT_SETTINGS.mlxTextUrl;
-  elements.mlxVisionUrl.value = settings.mlxVisionUrl || DEFAULT_SETTINGS.mlxVisionUrl;
+  mirrorSharedLmStudioUrl();
   elements.mlxTimeout.value = String(validMlxTimeout(settings.mlxTimeout));
   const resourceChoice = resourceModelChoiceFromSettings(settings);
   elements.aiOverviewProvider.value = "mlx-text";
   elements.aiTranscriptProvider.value = "mlx-text";
   elements.aiSlidesProvider.value = "mlx-vision";
-  elements.aiResourcesProvider.value = isGeminiResourceValue(resourceChoice) ? "gemini" : "mlx-text";
+  elements.aiResourcesProvider.value = "mlx-text";
   renderLocalModelOptions();
   renderModelSelect(elements.aiOverviewModel, settings.aiOverviewModel || DEFAULT_SETTINGS.aiOverviewModel, {
-    includeGemini: false,
     models: modelsForRoute("overview"),
   });
   elements.aiTranscriptModel.value = routeModelValue("overview");
   renderModelSelect(elements.aiSlidesModel, settings.aiSlidesModel || DEFAULT_SETTINGS.aiSlidesModel, {
-    includeGemini: false,
     models: modelsForRoute("slides"),
   });
   renderModelSelect(elements.aiResourcesModel, resourceChoice || DEFAULT_SETTINGS.aiResourcesModel, {
-    includeGemini: true,
     models: modelsForRoute("resources"),
   });
   syncAiRouteProvidersFromModelChoices();
-  state.enhanceWithGeminiPreference = Boolean(settings.enhanceWithGemini);
-  elements.enhanceWithGemini.checked = state.enhanceWithGeminiPreference;
+  state.aiEnhancePreference = Boolean(settings.aiEnhance ?? settings.enhanceWithGemini);
+  elements.aiEnhance.checked = state.aiEnhancePreference;
   elements.concurrentFiles.value = String(validConcurrentFiles(settings.concurrentFiles));
-  elements.geminiMaxConcurrency.value = String(validGeminiConcurrency(settings.geminiMaxConcurrency));
   syncSpeedSegments();
   renderTranscriptionProfileOptions();
   renderAiControls();
@@ -2345,12 +2354,18 @@ function migratePersistedSettings(settings) {
     migrated.aiResourcesProvider = DEFAULT_SETTINGS.aiResourcesProvider;
   }
   if (migrated.uiSettingsVersion !== UI_SETTINGS_VERSION) {
-    migrated.geminiMaxConcurrency = DEFAULT_SETTINGS.geminiMaxConcurrency;
     migrated.saveNormalized = true;
-    if (migrated.aiResourcesProvider === "gemini" || migrated.aiResourcesModel === GEMINI_RESOURCES_MODEL_VALUE) {
-      migrated.aiResourcesModel = geminiResourceValue(migrated.aiModel || DEFAULT_SETTINGS.aiModel);
-      migrated.aiResourcesProvider = "gemini";
-    }
+    migrated.aiResourcesProvider = DEFAULT_SETTINGS.aiResourcesProvider;
+  }
+  if (migrated.aiEnhance == null) {
+    migrated.aiEnhance = Boolean(migrated.enhanceWithGemini);
+  }
+  if (migrated.aiResourcesProvider === "gemini" || isLegacyGeminiResourceValue(migrated.aiResourcesModel)) {
+    migrated.aiResourcesProvider = DEFAULT_SETTINGS.aiResourcesProvider;
+    migrated.aiResourcesModel = "";
+  }
+  if (String(migrated.aiModel || "").startsWith("gemini-")) {
+    migrated.aiModel = DEFAULT_SETTINGS.aiModel;
   }
   ["aiOverviewModel", "aiTranscriptModel", "aiSlidesModel", "aiResourcesModel"].forEach((key) => {
     if (LEGACY_LOCAL_MODEL_IDS.has(String(migrated[key] || "").trim())) {
@@ -2375,8 +2390,6 @@ function saveCurrentSettings() {
   syncAiRouteProvidersFromModelChoices();
   const concurrentFiles = Number.parseInt(elements.concurrentFiles.value, 10);
   if (!Number.isInteger(concurrentFiles) || concurrentFiles < 1 || concurrentFiles > 3) return;
-  const geminiMaxConcurrency = Number.parseInt(elements.geminiMaxConcurrency.value, 10);
-  if (!Number.isInteger(geminiMaxConcurrency) || geminiMaxConcurrency < 1 || geminiMaxConcurrency > 12) return;
   const mlxTimeout = Number.parseInt(elements.mlxTimeout.value, 10);
   if (!Number.isInteger(mlxTimeout) || mlxTimeout < 10 || mlxTimeout > 600) return;
 
@@ -2384,12 +2397,12 @@ function saveCurrentSettings() {
     uiSettingsVersion: UI_SETTINGS_VERSION,
     modelSelectionVersion: MODEL_SELECTION_VERSION,
     recordingSpeed: state.recordingSpeed,
-    audioQuality: elements.audioQuality.value,
+    audioQuality: selectedAudioQuality(),
     audioEnhancement: elements.audioEnhancement.value,
     transcriptionProfile: elements.transcriptionProfile.value,
     slideSensitivity: elements.slideSensitivity.value,
-    enhanceWithGemini: state.folderMode === "processed" ? state.enhanceWithGeminiPreference : elements.enhanceWithGemini.checked,
-    aiModel: selectedGeminiModel(),
+    aiEnhance: state.folderMode === "processed" ? state.aiEnhancePreference : elements.aiEnhance.checked,
+    aiModel: "",
     aiOverviewProvider: elements.aiOverviewProvider.value,
     aiOverviewModel: routeModelValue("overview"),
     aiTranscriptProvider: elements.aiTranscriptProvider.value,
@@ -2398,11 +2411,10 @@ function saveCurrentSettings() {
     aiSlidesModel: routeModelValue("slides"),
     aiResourcesProvider: elements.aiResourcesProvider.value,
     aiResourcesModel: storedRouteModelValue("resources"),
-    mlxTextUrl: elements.mlxTextUrl.value.trim(),
-    mlxVisionUrl: elements.mlxVisionUrl.value.trim(),
+    mlxTextUrl: sharedLmStudioBaseUrl(),
+    mlxVisionUrl: sharedLmStudioBaseUrl(),
     mlxTimeout,
     concurrentFiles,
-    geminiMaxConcurrency,
     saveNormalized: true,
   };
 
@@ -2410,33 +2422,6 @@ function saveCurrentSettings() {
     window.localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(settings));
   } catch {
     // Settings persistence is helpful, not required for processing.
-  }
-}
-
-async function saveGeminiKey(options = {}) {
-  const { quiet = false } = options;
-  const key = elements.geminiApiKey.value.trim();
-  if (!key) {
-    if (!quiet) {
-      elements.geminiKeyStatus.textContent = "Paste a key first";
-    }
-    return false;
-  }
-
-  elements.saveGeminiKeyButton.disabled = true;
-  try {
-    await invoke("save_api_key", { provider: "gemini", apiKey: key });
-    elements.geminiApiKey.value = "";
-    state.geminiKeySaved = true;
-    elements.geminiKeyStatus.textContent = "Key saved";
-    return true;
-  } catch (error) {
-    state.geminiKeySaved = false;
-    elements.geminiKeyStatus.textContent = `Could not save key: ${error}`;
-    return false;
-  } finally {
-    elements.saveGeminiKeyButton.disabled = false;
-    renderAiControls();
   }
 }
 
@@ -2467,18 +2452,6 @@ async function saveLmStudioToken(options = {}) {
   }
 }
 
-async function refreshGeminiKeyStatus() {
-  try {
-    const result = await invoke("has_api_key", { provider: "gemini" });
-    state.geminiKeySaved = Boolean(result?.saved);
-    elements.geminiKeyStatus.textContent = state.geminiKeySaved ? "Key saved" : "No key saved";
-  } catch {
-    state.geminiKeySaved = false;
-    elements.geminiKeyStatus.textContent = "Key status unavailable";
-  }
-  renderAiControls();
-}
-
 async function refreshLmStudioTokenStatus() {
   try {
     const result = await invoke("has_api_key", { provider: "lm-studio" });
@@ -2492,9 +2465,6 @@ async function refreshLmStudioTokenStatus() {
 }
 
 function renderAiControls() {
-  const geminiSelected = needsGemini();
-  elements.geminiApiKey.disabled = !geminiSelected;
-  elements.saveGeminiKeyButton.disabled = !geminiSelected;
   elements.lmStudioToken.disabled = state.running;
   elements.saveLmStudioTokenButton.disabled = state.running;
   [
@@ -2515,6 +2485,31 @@ function renderAiControls() {
     element.disabled = state.running || (waitsForLocalModels && state.localModelsLoading);
   });
   elements.refreshLocalModelsButton.textContent = state.localModelsLoading ? "Checking..." : "Force Refresh Models";
+  elements.modelRoutingStatus.textContent = missingRequiredModelSelections().length ? "Needs selections" : "Ready";
+  renderPrimaryAiServer();
+}
+
+function renderPrimaryAiServer() {
+  if (!elements.aiServerStrip) return;
+  const visible = needsAiEnhancement();
+  elements.aiServerStrip.classList.toggle("hidden", !visible);
+  if (!visible) return;
+
+  const serverUrl = sharedLmStudioBaseUrl();
+  const models = modelsForBaseUrl(serverUrl);
+  const hasError = Boolean(state.localModelErrorsByBaseUrl[serverUrl]);
+  elements.aiServerUrl.textContent = serverUrl;
+  elements.aiServerStatus.textContent = hasError ? "Unavailable" : models.length ? "Reachable" : "Not checked";
+  elements.aiServerStatus.className = `mini-pill ${hasError ? "bad" : models.length ? "good" : ""}`;
+  const chips = [
+    ["Text", routeModelValue("overview")],
+    ["Vision", routeModelValue("slides")],
+    ["Resources", routeModelValue("resources")],
+  ]
+    .filter(([_label, model]) => model)
+    .map(([label, model]) => `<span>${escapeHtml(label)}: ${escapeHtml(model)}</span>`)
+    .join("");
+  elements.aiServerModels.innerHTML = chips;
 }
 
 function renderTranscriptionProfileOptions() {
@@ -2591,18 +2586,22 @@ function syncSpeedSegments() {
 }
 
 function setSelectValue(select, value, fallback) {
+  if (!select) return;
+  if (!select.options) {
+    select.value = value || fallback || "";
+    return;
+  }
   const optionValues = [...select.options].map((option) => option.value);
   select.value = optionValues.includes(value) ? value : fallback;
+}
+
+function selectedAudioQuality() {
+  return elements.audioQuality?.value || DEFAULT_SETTINGS.audioQuality;
 }
 
 function validConcurrentFiles(value) {
   const parsed = Number.parseInt(value, 10);
   return Number.isInteger(parsed) && parsed >= 1 && parsed <= 3 ? parsed : DEFAULT_SETTINGS.concurrentFiles;
-}
-
-function validGeminiConcurrency(value) {
-  const parsed = Number.parseInt(value, 10);
-  return Number.isInteger(parsed) && parsed >= 1 && parsed <= 12 ? parsed : DEFAULT_SETTINGS.geminiMaxConcurrency;
 }
 
 function validMlxTimeout(value) {
@@ -2675,10 +2674,8 @@ function selectedAudioEnhancementLabel() {
 
 function selectedAiRouteLabel() {
   const providers = aiRouteProviders();
-  if (providers.every((provider) => provider === "gemini")) return "Gemini";
   if (providers.every((provider) => provider === "off")) return "AI off";
-  if (!providers.includes("gemini")) return "LM Studio";
-  return "Gemini + LM Studio";
+  return "LM Studio";
 }
 
 function startElapsedTimer() {

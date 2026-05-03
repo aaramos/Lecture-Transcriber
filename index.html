@@ -86,14 +86,22 @@
         </div>
 
         <label class="enhance-toggle">
-          <input id="enhanceWithGemini" type="checkbox" />
+          <input id="aiEnhance" type="checkbox" />
           <span>
             <strong>AI Enhance</strong>
-            <small>Add AI titles, summaries, outlines, and slide notes.</small>
           </span>
         </label>
 
-        <button id="startButton" class="primary-button" disabled>Start</button>
+        <div id="aiServerStrip" class="ai-server-strip hidden">
+          <div class="ai-server-head">
+            <label>LM Studio Server</label>
+            <span id="aiServerStatus" class="mini-pill">Not checked</span>
+          </div>
+          <div id="aiServerUrl" class="path-text">http://192.168.86.101:1234/v1</div>
+          <div id="aiServerModels" class="ai-server-models"></div>
+        </div>
+
+        <button id="startButton" class="primary-button" disabled>Start Batch</button>
       </section>
 
       <section class="activity">
@@ -116,12 +124,12 @@
           <div class="system-card">
             <label>Tokens Sent</label>
             <span id="tokensSentMetric">0</span>
-            <small id="tokensSentMetricStatus">Gemini prompt</small>
+            <small id="tokensSentMetricStatus">Waiting</small>
           </div>
           <div class="system-card">
             <label>Tokens Received</label>
             <span id="tokensReceivedMetric">0</span>
-            <small id="tokensReceivedMetricStatus">Gemini output</small>
+            <small id="tokensReceivedMetricStatus">Waiting</small>
           </div>
         </div>
 
@@ -169,6 +177,14 @@
           </div>
         </div>
 
+        <div id="aiStatus" class="ai-status hidden">
+          <div class="ai-status-head">
+            <h3>AI Processing</h3>
+            <span id="aiLoadedModel">Loaded model: none</span>
+          </div>
+          <div id="aiPhaseTrack" class="phase-track"></div>
+        </div>
+
         <div class="video-section unified-video-section">
           <div class="video-section-head">
             <h3>Files</h3>
@@ -192,20 +208,9 @@
             <button class="icon-button" value="cancel" title="Close" aria-label="Close">×</button>
           </div>
 
-          <select id="aiModel" hidden aria-hidden="true">
-            <option value="gemini-2.5-flash" selected>2.5 Flash</option>
-            <option value="gemini-2.5-flash-lite">2.5 Flash-Lite</option>
-          </select>
+          <input id="aiModel" type="hidden" value="" />
 
           <div class="field-grid">
-            <label>
-              Audio Quality
-              <select id="audioQuality">
-                <option value="high" selected>High</option>
-                <option value="fast">Fast</option>
-              </select>
-            </label>
-
             <label>
               Audio Enhancement
               <select id="audioEnhancement">
@@ -239,8 +244,8 @@
 
             <div class="wide-field model-routing">
               <div class="model-routing-head">
-                <span>Experimental Model Routing</span>
-                <small>Choose models by capability.</small>
+                <span>Model Routing</span>
+                <small id="modelRoutingStatus">Ready</small>
               </div>
               <div class="model-route-grid">
                 <input id="aiOverviewProvider" type="hidden" value="mlx-text" />
@@ -261,7 +266,6 @@
                   <select id="aiResourcesModel"></select>
                 </label>
               </div>
-              <span class="field-help">Text handles overview and transcript. Vision handles slides. Resource uses Gemini or the Text Server URL.</span>
             </div>
 
             <div class="wide-field model-routing">
@@ -273,20 +277,16 @@
                 <button id="refreshLocalModelsButton" class="secondary-button" type="button">Force Refresh Models</button>
               </div>
               <div class="model-route-grid">
-                <label>
-                  Text Server URL
+                <label class="wide-field">
+                  Server URL
                   <input id="mlxTextUrl" type="text" autocomplete="off" value="http://192.168.86.101:1234/v1" />
                 </label>
-                <label>
-                  Vision Server URL
-                  <input id="mlxVisionUrl" type="text" autocomplete="off" value="http://192.168.86.101:1234/v1" />
-                </label>
+                <input id="mlxVisionUrl" type="hidden" value="http://192.168.86.101:1234/v1" />
                 <label>
                   Timeout Seconds
                   <input id="mlxTimeout" type="number" min="10" max="600" value="120" />
                 </label>
               </div>
-              <span class="field-help">Text and Resource calls use Text Server URL. Slide analysis uses Vision Server URL. If you run one LM Studio server, set both URLs the same.</span>
             </div>
 
             <label>
@@ -295,20 +295,6 @@
               <span class="field-help">Use 2 by default. Use 3 only on stronger Macs.</span>
             </label>
 
-            <label>
-              AI Concurrency
-              <input id="geminiMaxConcurrency" type="number" min="1" max="12" value="3" />
-              <span class="field-help">Use 3 by default when local models are enabled. Lower this if runs feel heavy.</span>
-            </label>
-          </div>
-
-          <div class="key-row">
-            <label>
-              Gemini API Key
-              <input id="geminiApiKey" type="password" autocomplete="off" placeholder="Saved in macOS Keychain" />
-            </label>
-            <button id="saveGeminiKeyButton" class="secondary-button" type="button">Save Key</button>
-            <span id="geminiKeyStatus">No key saved</span>
           </div>
 
           <div class="key-row">

@@ -43,7 +43,7 @@ class BatchConfigTests(unittest.TestCase):
             with self.assertRaises(LectureProcessorError):
                 config.validate()
 
-    def test_validates_gemini_concurrency_range(self):
+    def test_validates_ai_concurrency_range(self):
         with tempfile.TemporaryDirectory() as tmp:
             folder = Path(tmp)
             config = BatchConfig(
@@ -65,17 +65,17 @@ class BatchConfigTests(unittest.TestCase):
             self.assertEqual(config.transcription_profile, QUALITY_PROFILE_ID)
             self.assertIs(config.transcription_quality, TranscriptionQuality.ACCURATE)
             self.assertEqual(config.whisper_model, "medium.en")
-            self.assertEqual(config.gemini_max_concurrency, 6)
+            self.assertEqual(config.gemini_max_concurrency, 3)
             self.assertEqual(config.mlx_text_base_url, "http://192.168.86.101:1234/v1")
             self.assertEqual(config.mlx_vision_base_url, "http://192.168.86.101:1234/v1")
             self.assertEqual(config.mlx_request_timeout_seconds, 120)
             self.assertEqual(
                 config.ai_model_routing,
                 {
-                    "overview": {"provider": "gemini", "model": "gemini-2.5-flash"},
-                    "transcript": {"provider": "gemini", "model": "gemini-2.5-flash"},
-                    "slides": {"provider": "gemini", "model": "gemini-2.5-flash"},
-                    "resources": {"provider": "gemini", "model": "gemini-2.5-flash"},
+                    "overview": {"provider": "mlx-text", "model": "default"},
+                    "transcript": {"provider": "mlx-text", "model": "default"},
+                    "slides": {"provider": "mlx-vision", "model": "default"},
+                    "resources": {"provider": "mlx-text", "model": "default"},
                 },
             )
 
@@ -86,6 +86,7 @@ class BatchConfigTests(unittest.TestCase):
                 input_dir=folder,
                 output_dir=folder / "out",
                 ai_provider=AIProviderName.GEMINI,
+                ai_overview_provider=AIModelProvider.GEMINI,
                 ai_transcript_provider=AIModelProvider.MLX_TEXT,
                 ai_resources_provider=AIModelProvider.OFF,
             )
