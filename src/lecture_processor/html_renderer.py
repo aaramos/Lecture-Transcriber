@@ -120,7 +120,7 @@ def _html_head(title: str) -> str:
     }}
     header, .hero-band, .content-band {{ border-bottom: 1px solid var(--line); padding: 34px; }}
     header {{ margin: 0; }}
-    h1 {{ margin: 0; max-width: 980px; font-size: clamp(2.4rem, 7vw, 5.4rem); line-height: 1.02; letter-spacing: 0; }}
+    h1 {{ margin: 0; max-width: none; font-size: clamp(2.4rem, 7vw, 5.4rem); line-height: 1.02; letter-spacing: 0; }}
     h2 {{ margin: 0; font-size: 1.45rem; }}
     h3, h4, p {{ margin: 0; }}
     .eyebrow {{
@@ -134,15 +134,22 @@ def _html_head(title: str) -> str:
     .summary {{ max-width: 920px; margin-top: 22px; color: #ded9ca; font-size: 1.08rem; line-height: 1.65; }}
     .hero-band {{
       display: grid;
-      grid-template-columns: minmax(0, 1fr) minmax(220px, 280px);
-      gap: 28px;
-      min-height: 380px;
-      align-items: end;
+      grid-template-columns: 1fr;
+      gap: 24px;
+      min-height: 0;
+      align-items: start;
     }}
-    .metric-strip {{ display: grid; gap: 10px; }}
-    .metric-strip div {{ border: 1px solid var(--line); border-radius: 8px; padding: 16px; background: var(--panel); }}
-    .metric-strip strong, .metric-strip span {{ display: block; }}
-    .metric-strip strong {{ font-size: 1.9rem; }}
+    .metric-strip {{ display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; max-width: 720px; }}
+    .metric-strip div {{
+      display: flex;
+      align-items: baseline;
+      gap: 10px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 12px 14px;
+      background: var(--panel);
+    }}
+    .metric-strip strong {{ font-size: 1.45rem; }}
     .metric-strip span {{ color: var(--muted); font-size: 0.76rem; font-weight: 800; text-transform: uppercase; }}
     .section-head {{ display: flex; align-items: end; justify-content: space-between; gap: 16px; margin-bottom: 18px; }}
     .flow-list {{ display: grid; gap: 12px; }}
@@ -160,7 +167,7 @@ def _html_head(title: str) -> str:
     .flow-section summary::before {{ content: "\\25B8"; color: var(--muted); font-size: 1.05rem; font-weight: 900; }}
     .flow-section[open] summary {{ border-bottom: 1px solid var(--line); }}
     .flow-section[open] summary::before {{ content: "\\25BE"; color: var(--accent); }}
-    .outline-number, .slide-id {{
+    .outline-number {{
       display: grid;
       place-items: center;
       border-radius: 999px;
@@ -217,12 +224,8 @@ def _html_head(title: str) -> str:
     }}
     .missing-slide {{ color: var(--warn); font-size: 0.75rem; font-weight: 800; text-align: center; }}
     .slide-copy {{ display: grid; gap: 12px; align-content: start; }}
-    .slide-title-row {{ display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 10px; align-items: center; }}
-    .slide-id {{ width: 38px; height: 38px; background: var(--blue-soft); color: var(--blue); }}
-    .slide-title-row h4 {{ overflow-wrap: anywhere; font-size: 1.05rem; }}
-    .slide-summary, .commentary, .caption, .resource-card p, .transcript-text {{ color: #ded9ca; font-size: 0.93rem; line-height: 1.6; }}
-    .caption {{ border: 1px solid var(--line); border-radius: 6px; padding: 10px 12px; background: rgba(255, 255, 255, 0.03); color: var(--muted); }}
-    .caption strong {{ color: var(--text); }}
+    .commentary, .caption, .resource-card p, .transcript-text {{ color: #ded9ca; font-size: 0.93rem; line-height: 1.6; }}
+    .caption {{ border: 1px solid var(--line); border-radius: 6px; padding: 10px 12px; background: rgba(255, 255, 255, 0.03); color: var(--muted); font-style: italic; }}
     .commentary {{ border-left: 3px solid var(--accent); padding-left: 12px; }}
     .tag-row {{ display: flex; flex-wrap: wrap; gap: 6px; }}
     .tag {{ border: 1px solid var(--line); border-radius: 999px; padding: 4px 8px; color: var(--muted); font-size: 0.72rem; font-weight: 800; }}
@@ -277,12 +280,14 @@ def _html_head(title: str) -> str:
     .lecture-row p {{ margin: 0; color: var(--muted); }}
     .lecture-row a {{ color: var(--accent); font-weight: 800; text-decoration: none; }}
     @media (max-width: 980px) {{
-      .hero-band {{ grid-template-columns: 1fr; min-height: auto; }}
       .metric-strip {{ grid-template-columns: repeat(3, minmax(0, 1fr)); }}
       .flow-section summary {{ grid-template-columns: auto 42px minmax(0, 1fr); }}
       .flow-count {{ grid-column: 3; }}
       .slide-row, .resource-card, .lecture-row {{ grid-template-columns: 1fr; }}
       .lecture-row img {{ width: 100%; }}
+    }}
+    @media (max-width: 640px) {{
+      .metric-strip {{ grid-template-columns: 1fr; }}
     }}
   </style>
 </head>"""
@@ -430,7 +435,7 @@ def _slide_card(slide: Dict, analysis: Dict, transcript_segments: List[Dict]) ->
     commentary = _slide_commentary(slide, analysis, transcript_segments)
     tags = [str(tag) for tag in (analysis.get("tags") or []) if _useful_tag(str(tag))]
     image_path = slide.get("relative_path")
-    caption_html = f'<figcaption class="caption"><strong>Slide idea:</strong> {_e(idea)}</figcaption>' if idea else ""
+    caption_html = f'<figcaption class="caption">{_e(idea)}</figcaption>' if idea else ""
     image_alt = title or slide.get("filename") or f"Slide {slide_id}"
     if image_path:
         image_src = "../" + str(image_path)
@@ -450,7 +455,6 @@ def _slide_card(slide: Dict, analysis: Dict, transcript_segments: List[Dict]) ->
       <article id="slide-{slide_id}" class="slide-row">
         {media}
         <div class="slide-copy">
-          <div class="slide-title-row"><span class="slide-id">{slide_id}</span><h4>{_e(title)}</h4></div>
           {commentary_html}
           {tag_row}
         </div>
