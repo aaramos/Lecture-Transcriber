@@ -12,6 +12,7 @@ class HtmlRendererTests(unittest.TestCase):
             lecture_dir = Path(tmp) / "lecture"
             slides_dir = lecture_dir / "slides"
             slides_dir.mkdir(parents=True)
+            (lecture_dir / "lecture.mp4").write_text("video", encoding="utf-8")
             (slides_dir / "slide_0001_00-00-01.png").write_text("png", encoding="utf-8")
             lecture_json = lecture_dir / "lecture.json"
             lecture_json.write_text(
@@ -19,7 +20,7 @@ class HtmlRendererTests(unittest.TestCase):
                     {
                         "lecture_id": "lecture",
                         "source": {"filename": "lecture.mov"},
-                        "media": {"duration_seconds": 120},
+                        "media": {"duration_seconds": 120, "normalized_path": "lecture.mp4"},
                         "transcript": {"text": "raw transcript", "segments": []},
                         "slides": [
                             {
@@ -40,7 +41,13 @@ class HtmlRendererTests(unittest.TestCase):
                                     "descriptive_filename": "opening.png",
                                     "caption": "A title slide is visible.",
                                     "summary": "The lecture opens.",
-                                    "tags": ["opening"],
+                                    "tags": [
+                                        "opening",
+                                        "smart-slide-extraction",
+                                        "slide-1",
+                                        "transitioning",
+                                        "split-left",
+                                    ],
                                     "instructor_commentary": "The instructor introduces the topic.",
                                 }
                             ],
@@ -62,12 +69,23 @@ class HtmlRendererTests(unittest.TestCase):
             html_path = render_lecture_page(lecture_json)
             html = html_path.read_text(encoding="utf-8")
 
-            self.assertIn("AI Study Notes", html)
+            self.assertNotIn("AI Study Notes", html)
+            self.assertNotIn("A useful summary.", html)
+            self.assertIn("<video controls", html)
+            self.assertIn("lecture.mp4", html)
             self.assertIn("class=\"flow-section\" open", html)
             self.assertIn("Visible on slide", html)
+            self.assertIn("<figcaption class=\"caption\">", html)
+            self.assertIn("data-full-image=\"../slides/slide_0001_00-00-01.png\"", html)
             self.assertIn("Lightly edited transcript.", html)
-            self.assertIn("Lecture Transcript", html)
+            self.assertNotIn("Lecture Transcript", html)
             self.assertIn("Further Learning", html)
+            self.assertNotIn(">Resources</p>", html)
+            self.assertIn("opening", html)
+            self.assertNotIn("smart-slide-extraction", html)
+            self.assertNotIn("<span class=\"tag\">slide-1</span>", html)
+            self.assertNotIn("transitioning", html)
+            self.assertNotIn("split-left", html)
             self.assertNotIn("Slides And Commentary", html)
 
     def test_outline_accepts_gemini_slide_id_strings(self):
@@ -143,6 +161,39 @@ class HtmlRendererTests(unittest.TestCase):
             self.assertIn("The speaker appears.", html)
             self.assertNotIn("Additional slides", html)
             self.assertNotIn("0 slides", html)
+
+    def test_raw_transcript_is_split_into_readable_paragraphs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            lecture_dir = Path(tmp) / "lecture"
+            lecture_dir.mkdir(parents=True)
+            long_transcript = (
+                "First sentence introduces the lecture. Second sentence adds context. "
+                "Third sentence gives an example. Fourth sentence closes the opening. "
+                "Fifth sentence starts a new idea. Sixth sentence develops that idea. "
+                "Seventh sentence adds detail. Eighth sentence concludes the thought."
+            )
+            lecture_json = lecture_dir / "lecture.json"
+            lecture_json.write_text(
+                json.dumps(
+                    {
+                        "lecture_id": "lecture",
+                        "source": {"filename": "lecture.mov"},
+                        "media": {"duration_seconds": 120},
+                        "transcript": {"text": long_transcript, "segments": []},
+                        "slides": [],
+                        "processing": {},
+                        "enrichment": None,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            html_path = render_lecture_page(lecture_json)
+            html = html_path.read_text(encoding="utf-8")
+
+            self.assertGreaterEqual(html.count("<p>"), 2)
+            self.assertIn("First sentence introduces the lecture.", html)
+            self.assertIn("Eighth sentence concludes the thought.", html)
 
 
 if __name__ == "__main__":

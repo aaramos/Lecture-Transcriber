@@ -830,8 +830,9 @@ class BatchProcessorTests(unittest.TestCase):
             self.assertIn("Hello Lecture", lecture_json["enrichment"]["title"])
             self.assertIn("formatted_transcript", lecture_json["enrichment"])
             html = (output / "lecture" / "html" / "index.html").read_text(encoding="utf-8")
-            self.assertIn("AI Study Notes", html)
-            self.assertIn("Lecture Transcript", html)
+            self.assertNotIn("AI Study Notes", html)
+            self.assertNotIn("Lecture Transcript", html)
+            self.assertIn("Lecture Flow", html)
             enrichment_finished = [event for event in events if event["kind"] == "enrichment_finished"][0]
             self.assertGreater(enrichment_finished["input_tokens"], 0)
             self.assertGreater(enrichment_finished["output_tokens"], 0)

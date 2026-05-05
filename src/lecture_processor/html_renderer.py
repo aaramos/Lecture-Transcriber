@@ -13,7 +13,7 @@ def render_lecture_page(lecture_json_path: Path) -> Path:
     output_dir = lecture_json_path.parent
     html_dir = output_dir / "html"
     html_path = html_dir / "index.html"
-    write_text_atomic(html_path, _lecture_html(artifact))
+    write_text_atomic(html_path, _lecture_html(artifact, output_dir))
     return html_path
 
 
@@ -23,10 +23,9 @@ def render_batch_index(output_dir: Path, summary: BatchSummary) -> Path:
     return html_path
 
 
-def _lecture_html(artifact: Dict) -> str:
+def _lecture_html(artifact: Dict, output_dir: Path) -> str:
     enrichment = artifact.get("enrichment") or {}
     title = enrichment.get("title") or _fallback_title(artifact)
-    summary = enrichment.get("executive_summary") or _fallback_summary(artifact)
     slide_analysis = {_analysis_slide_id(item): item for item in enrichment.get("slide_analysis", [])}
     outline = enrichment.get("outline") or []
     resources = enrichment.get("resources") or []
@@ -37,11 +36,14 @@ def _lecture_html(artifact: Dict) -> str:
         _html_head(title),
         "<body>",
         "<main>",
-        _hero_block(title, summary, slides, outline, resources),
+        _hero_block(title, slides, outline, resources),
+        _video_block(artifact, output_dir),
         _flow_block(outline, slides, slide_analysis),
         _transcript_block(transcript_text),
         _resources_block(resources),
         "</main>",
+        _image_modal(),
+        _modal_script(),
         "</body></html>",
     ]
     return "\n".join(body)
@@ -176,16 +178,42 @@ def _html_head(title: str) -> str:
       padding: 14px;
       background: rgba(255, 255, 255, 0.02);
     }}
+    .video-panel {{
+      display: grid;
+      gap: 12px;
+      max-width: 980px;
+    }}
+    .video-panel video {{
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #111;
+    }}
     .slide-media {{
       display: grid;
+      min-height: 180px;
+      gap: 10px;
+      overflow: hidden;
+      margin: 0;
+    }}
+    .slide-image-button {{
+      display: grid;
+      width: 100%;
       min-height: 180px;
       place-items: center;
       overflow: hidden;
       border: 1px solid var(--line);
       border-radius: 6px;
+      padding: 0;
       background: #111;
+      color: inherit;
+      cursor: zoom-in;
     }}
-    .slide-media img {{ width: 100%; height: 100%; object-fit: contain; }}
+    .slide-image-button img {{ width: 100%; height: 100%; object-fit: contain; }}
+    .slide-image-button:focus-visible {{
+      outline: 3px solid var(--blue);
+      outline-offset: 3px;
+    }}
     .missing-slide {{ color: var(--warn); font-size: 0.75rem; font-weight: 800; text-align: center; }}
     .slide-copy {{ display: grid; gap: 12px; align-content: start; }}
     .slide-title-row {{ display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 10px; align-items: center; }}
@@ -213,6 +241,30 @@ def _html_head(title: str) -> str:
     .resource-card p {{ margin-top: 8px; }}
     .quality {{ border: 1px solid var(--line); border-radius: 999px; padding: 4px 9px; color: var(--muted); font-size: 0.72rem; font-weight: 900; text-transform: uppercase; }}
     .quality.high {{ border-color: rgba(131, 189, 140, 0.5); background: rgba(131, 189, 140, 0.12); color: var(--good); }}
+    .image-modal {{
+      width: min(96vw, 1280px);
+      max-height: 94vh;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 14px;
+      background: var(--panel);
+      color: var(--text);
+    }}
+    .image-modal::backdrop {{ background: rgba(0, 0, 0, 0.78); }}
+    .image-modal figure {{ display: grid; gap: 12px; margin: 0; }}
+    .image-modal img {{ width: 100%; max-height: 78vh; object-fit: contain; background: #111; border-radius: 6px; }}
+    .image-modal figcaption {{ color: #ded9ca; font-size: 0.95rem; line-height: 1.55; }}
+    .modal-close {{
+      float: right;
+      margin-bottom: 10px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 6px 10px;
+      background: transparent;
+      color: var(--text);
+      font-weight: 900;
+      cursor: pointer;
+    }}
     .empty-state {{ color: var(--muted); }}
     .lecture-list {{ padding: 18px 34px 34px; }}
     .lecture-row {{ display: grid; grid-template-columns: 132px minmax(0, 1fr) auto; gap: 16px; align-items: center; border-bottom: 1px solid var(--line); padding: 16px 0; }}
@@ -235,7 +287,7 @@ def _html_head(title: str) -> str:
 </head>"""
 
 
-def _hero_block(title: str, summary: str, slides: List[Dict], outline: List[Dict], resources: List[Dict]) -> str:
+def _hero_block(title: str, slides: List[Dict], outline: List[Dict], resources: List[Dict]) -> str:
     metrics = [
         (str(len(slides)), "Slides"),
         (str(len(outline)), "Sections"),
@@ -247,11 +299,25 @@ def _hero_block(title: str, summary: str, slides: List[Dict], outline: List[Dict
     return f"""
       <section class="hero-band">
         <div>
-          <p class="eyebrow">AI Study Notes</p>
           <h1>{_e(title)}</h1>
-          <p class="summary">{_e(summary)}</p>
         </div>
         <div class="metric-strip" aria-label="Lecture metrics">{metric_html}</div>
+      </section>
+    """
+
+
+def _video_block(artifact: Dict, output_dir: Path) -> str:
+    video_src = _processed_video_src(artifact, output_dir)
+    if not video_src:
+        return ""
+    return f"""
+      <section class="content-band" aria-label="Lecture video">
+        <div class="section-head"><div><p class="eyebrow">Lecture Video</p></div></div>
+        <div class="video-panel">
+          <video controls preload="metadata">
+            <source src="{_e(video_src)}" type="{_e(_video_mime_type(video_src))}">
+          </video>
+        </div>
       </section>
     """
 
@@ -332,24 +398,31 @@ def _slide_card(slide: Dict, analysis: Dict) -> str:
     summary = analysis.get("summary") or "No slide summary is available yet."
     caption = analysis.get("caption")
     commentary = analysis.get("instructor_commentary") or ""
-    tags = analysis.get("tags") or []
+    tags = [str(tag) for tag in (analysis.get("tags") or []) if _useful_tag(str(tag))]
     image_path = slide.get("relative_path")
+    caption_html = f'<figcaption class="caption"><strong>Visible on slide:</strong> {_e(caption)}</figcaption>' if caption else ""
     if image_path:
-        media = f'<img src="{_e("../" + str(image_path))}" alt="{_e(title)}">'
+        image_src = "../" + str(image_path)
+        media = (
+            f'<figure class="slide-media">'
+            f'<button class="slide-image-button" type="button" data-full-image="{_e(image_src)}" '
+            f'data-caption="{_e(caption or summary)}" data-alt="{_e(title)}">'
+            f'<img src="{_e(image_src)}" alt="{_e(title)}">'
+            f'</button>{caption_html}</figure>'
+        )
     else:
-        media = '<span class="missing-slide">Slide image not available</span>'
-    caption_html = f'<p class="caption"><strong>Visible on slide:</strong> {_e(caption)}</p>' if caption else ""
+        media = '<div class="slide-media"><span class="missing-slide">Slide image not available</span></div>'
     commentary_html = f'<p class="commentary">{_e(commentary)}</p>' if commentary else ""
-    tags_html = "".join(f'<span class="tag">{_e(str(tag))}</span>' for tag in tags)
+    tags_html = "".join(f'<span class="tag">{_e(tag)}</span>' for tag in tags)
+    tag_row = f'<div class="tag-row">{tags_html}</div>' if tags_html else ""
     return f"""
       <article id="slide-{slide_id}" class="slide-row">
-        <div class="slide-media">{media}</div>
+        {media}
         <div class="slide-copy">
           <div class="slide-title-row"><span class="slide-id">{slide_id}</span><h4>{_e(title)}</h4></div>
           <p class="slide-summary">{_e(summary)}</p>
-          {caption_html}
           {commentary_html}
-          <div class="tag-row">{tags_html}</div>
+          {tag_row}
         </div>
       </article>
     """
@@ -408,8 +481,8 @@ def _resources_block(resources: List[Dict]) -> str:
         for item in resources
     )
     return f"""
-      <section class="content-band">
-        <div class="section-head"><div><p class="eyebrow">Resources</p><h2>Further Learning</h2></div></div>
+      <section class="content-band" aria-label="Further Learning">
+        <div class="section-head"><div><p class="eyebrow">Further Learning</p></div></div>
         <div class="resource-list">{items}</div>
       </section>
     """
@@ -420,8 +493,8 @@ def _transcript_block(text: str) -> str:
         return ""
     paragraphs = "".join(f"<p>{_e(paragraph)}</p>" for paragraph in _paragraphs(text))
     return f"""
-      <section class="content-band">
-        <div class="section-head"><div><p class="eyebrow">Transcript</p><h2>Lecture Transcript</h2></div></div>
+      <section class="content-band" aria-label="Transcript">
+        <div class="section-head"><div><p class="eyebrow">Transcript</p></div></div>
         <div class="transcript-text">{paragraphs}</div>
       </section>
     """
@@ -432,7 +505,123 @@ def _paragraphs(text: str) -> List[str]:
     if not normalized:
         return []
     blocks = [block.strip() for block in normalized.split("\n\n") if block.strip()]
-    return [" ".join(block.split()) for block in blocks]
+    if len(blocks) > 1:
+        return [" ".join(block.split()) for block in blocks]
+    return _sentence_paragraphs(" ".join(normalized.split()))
+
+
+def _sentence_paragraphs(text: str) -> List[str]:
+    sentences = [item.strip() for item in re.split(r"(?<=[.!?])\s+(?=[A-Z0-9\"'])", text) if item.strip()]
+    if len(sentences) <= 1:
+        return [text]
+    paragraphs = []
+    current = []
+    current_length = 0
+    for sentence in sentences:
+        sentence_length = len(sentence)
+        if current and (current_length + sentence_length > 760 or len(current) >= 5):
+            paragraphs.append(" ".join(current))
+            current = []
+            current_length = 0
+        current.append(sentence)
+        current_length += sentence_length + 1
+    if current:
+        paragraphs.append(" ".join(current))
+    return paragraphs
+
+
+def _processed_video_src(artifact: Dict, output_dir: Path) -> Optional[str]:
+    normalized_path = str((artifact.get("media") or {}).get("normalized_path") or "").strip()
+    if not normalized_path:
+        return None
+    candidate = Path(normalized_path)
+    if not candidate.is_absolute():
+        candidate = output_dir / candidate
+    if not candidate.exists():
+        return None
+    try:
+        relative = candidate.relative_to(output_dir)
+    except ValueError:
+        return candidate.as_uri()
+    return "../" + str(relative)
+
+
+def _video_mime_type(src: str) -> str:
+    extension = Path(src).suffix.lower()
+    if extension == ".webm":
+        return "video/webm"
+    if extension == ".mov":
+        return "video/quicktime"
+    return "video/mp4"
+
+
+def _useful_tag(value: str) -> bool:
+    tag = value.strip().lower()
+    if not tag:
+        return False
+    blocked = {
+        "smart-slide-extraction",
+        "transitioning",
+        "partial",
+        "full",
+        "full-screen",
+        "split-left",
+        "split-right",
+        "video-player",
+        "duplicate",
+        "not-slide",
+    }
+    if tag in blocked:
+        return False
+    if re.fullmatch(r"slide[-_\s]*\d+", tag):
+        return False
+    return True
+
+
+def _image_modal() -> str:
+    return """
+      <dialog id="image-modal" class="image-modal">
+        <button class="modal-close" type="button" value="close" aria-label="Close image">Close</button>
+        <figure>
+          <img alt="">
+          <figcaption hidden></figcaption>
+        </figure>
+      </dialog>
+    """
+
+
+def _modal_script() -> str:
+    return """
+      <script>
+        (() => {
+          const modal = document.getElementById("image-modal");
+          if (!modal) return;
+          const modalImage = modal.querySelector("img");
+          const modalCaption = modal.querySelector("figcaption");
+          const closeButton = modal.querySelector(".modal-close");
+
+          document.querySelectorAll("[data-full-image]").forEach((button) => {
+            button.addEventListener("click", () => {
+              modalImage.src = button.dataset.fullImage || "";
+              modalImage.alt = button.dataset.alt || "Slide image";
+              modalCaption.textContent = button.dataset.caption || "";
+              modalCaption.hidden = !modalCaption.textContent.trim();
+              modal.showModal();
+            });
+          });
+
+          closeButton.addEventListener("click", () => modal.close());
+          modal.addEventListener("click", (event) => {
+            if (event.target === modal) modal.close();
+          });
+          modal.addEventListener("close", () => {
+            modalImage.removeAttribute("src");
+            modalCaption.textContent = "";
+            modalCaption.hidden = true;
+          });
+        })();
+      </script>
+    """
 
 
 def _batch_row(result: FileResult, title: str, description: str, link: Optional[str], thumb: Optional[Path], output_dir: Path) -> str:
@@ -466,15 +655,6 @@ def _load_artifact_if_present(output_dir: Path) -> Optional[Dict]:
 
 def _fallback_title(artifact: Dict) -> str:
     return str(artifact.get("source", {}).get("filename") or artifact.get("lecture_id") or "Lecture")
-
-
-def _fallback_summary(artifact: Dict) -> str:
-    text = " ".join(str(artifact.get("transcript", {}).get("text") or "").split())
-    if not text:
-        return "This lecture was processed locally. No AI summary is available yet."
-    if len(text) <= 360:
-        return text
-    return text[:357].rsplit(" ", 1)[0] + "..."
 
 
 def _first_slide(output_dir: Path) -> Optional[Path]:
