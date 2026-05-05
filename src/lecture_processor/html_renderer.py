@@ -31,6 +31,7 @@ def _lecture_html(artifact: Dict, output_dir: Path) -> str:
     resources = enrichment.get("resources") or []
     slides = artifact.get("slides") or []
     transcript = artifact.get("transcript", {})
+    transcript_segments = transcript.get("segments") or []
     transcript_text = enrichment.get("formatted_transcript") or transcript.get("text") or ""
     body = [
         _html_head(title),
@@ -38,7 +39,7 @@ def _lecture_html(artifact: Dict, output_dir: Path) -> str:
         "<main>",
         _hero_block(title, slides, outline, resources),
         _video_block(artifact, output_dir),
-        _flow_block(outline, slides, slide_analysis),
+        _flow_block(outline, slides, slide_analysis, transcript_segments),
         _transcript_block(transcript_text),
         _resources_block(resources),
         "</main>",
@@ -310,9 +311,10 @@ def _video_block(artifact: Dict, output_dir: Path) -> str:
     video_src = _processed_video_src(artifact, output_dir)
     if not video_src:
         return ""
+    video_label = _video_label(artifact, video_src)
     return f"""
-      <section class="content-band" aria-label="Lecture video">
-        <div class="section-head"><div><p class="eyebrow">Lecture Video</p></div></div>
+      <section class="content-band" aria-label="{_e(video_label)}">
+        <div class="section-head"><div><p class="eyebrow">{_e(video_label)}</p></div></div>
         <div class="video-panel">
           <video controls preload="metadata">
             <source src="{_e(video_src)}" type="{_e(_video_mime_type(video_src))}">
@@ -322,35 +324,40 @@ def _video_block(artifact: Dict, output_dir: Path) -> str:
     """
 
 
-def _flow_block(outline: List[Dict], slides: List[Dict], slide_analysis: Dict[int, Dict]) -> str:
+def _flow_block(
+    outline: List[Dict],
+    slides: List[Dict],
+    slide_analysis: Dict[int, Dict],
+    transcript_segments: List[Dict],
+) -> str:
     sections = _sections_with_slides(outline, slides, slide_analysis)
     if not sections:
         return """
           <section class="content-band">
-            <div class="section-head"><div><p class="eyebrow">Outline</p><h2>Lecture Flow</h2></div></div>
+            <div class="section-head"><div><h2>Lecture Flow</h2></div></div>
             <p class="empty-state">No slides were extracted for this lecture.</p>
           </section>
         """
 
     rows = []
-    for index, section in enumerate(sections):
+    for section in sections:
         rows.append(
             f"""
-            <details id="section-{_e(section["id"])}" class="flow-section" {"open" if index == 0 else ""}>
+            <details id="section-{_e(section["id"])}" class="flow-section" open>
               <summary>
                 <span class="outline-number">{_e(section["id"])}</span>
-                <span class="flow-title">{_e(section["heading"])}</span>
+                <span class="flow-title">{_e(_section_title(section, slide_analysis))}</span>
                 <span class="flow-count">{len(section["slides"])} slides</span>
               </summary>
               <div class="flow-slides">
-                {''.join(_slide_card(slide, slide_analysis.get(_slide_id(slide), {})) for slide in section["slides"])}
+                {''.join(_slide_card(slide, slide_analysis.get(_slide_id(slide), {}), transcript_segments) for slide in section["slides"])}
               </div>
             </details>
             """
         )
     return f"""
       <section class="content-band">
-        <div class="section-head"><div><p class="eyebrow">Outline</p><h2>Lecture Flow</h2></div></div>
+        <div class="section-head"><div><h2>Lecture Flow</h2></div></div>
         <div class="flow-list">{''.join(rows)}</div>
       </section>
     """
@@ -392,22 +399,46 @@ def _sections_with_slides(outline: List[Dict], slides: List[Dict], slide_analysi
     return sections
 
 
-def _slide_card(slide: Dict, analysis: Dict) -> str:
+def _section_title(section: Dict, slide_analysis: Dict[int, Dict]) -> str:
+    section_slides = section.get("slides") or []
+    if len(section_slides) == 1:
+        slide = section_slides[0]
+        title = _known_slide_title(slide, slide_analysis.get(_slide_id(slide), {}))
+        if title:
+            return title
+    heading = str(section.get("heading") or "").strip()
+    if _generic_section_heading(heading):
+        return ""
+    return heading
+
+
+def _generic_section_heading(value: str) -> bool:
+    heading = value.strip().lower()
+    if not heading:
+        return True
+    return bool(
+        re.fullmatch(r"slide\s+\d+\s+discussion", heading)
+        or re.fullmatch(r"section\s+\d+", heading)
+        or heading in {"lecture slides", "additional slides"}
+    )
+
+
+def _slide_card(slide: Dict, analysis: Dict, transcript_segments: List[Dict]) -> str:
     slide_id = _slide_id(slide)
-    title = analysis.get("descriptive_filename") or slide.get("filename") or f"Slide {slide_id}"
-    summary = analysis.get("summary") or "No slide summary is available yet."
-    caption = analysis.get("caption")
-    commentary = analysis.get("instructor_commentary") or ""
+    title = _known_slide_title(slide, analysis)
+    idea = _slide_idea(slide, analysis)
+    commentary = _slide_commentary(slide, analysis, transcript_segments)
     tags = [str(tag) for tag in (analysis.get("tags") or []) if _useful_tag(str(tag))]
     image_path = slide.get("relative_path")
-    caption_html = f'<figcaption class="caption"><strong>Visible on slide:</strong> {_e(caption)}</figcaption>' if caption else ""
+    caption_html = f'<figcaption class="caption"><strong>Slide idea:</strong> {_e(idea)}</figcaption>' if idea else ""
+    image_alt = title or slide.get("filename") or f"Slide {slide_id}"
     if image_path:
         image_src = "../" + str(image_path)
         media = (
             f'<figure class="slide-media">'
             f'<button class="slide-image-button" type="button" data-full-image="{_e(image_src)}" '
-            f'data-caption="{_e(caption or summary)}" data-alt="{_e(title)}">'
-            f'<img src="{_e(image_src)}" alt="{_e(title)}">'
+            f'data-caption="{_e(idea)}" data-alt="{_e(image_alt)}">'
+            f'<img src="{_e(image_src)}" alt="{_e(image_alt)}">'
             f'</button>{caption_html}</figure>'
         )
     else:
@@ -420,12 +451,121 @@ def _slide_card(slide: Dict, analysis: Dict) -> str:
         {media}
         <div class="slide-copy">
           <div class="slide-title-row"><span class="slide-id">{slide_id}</span><h4>{_e(title)}</h4></div>
-          <p class="slide-summary">{_e(summary)}</p>
           {commentary_html}
           {tag_row}
         </div>
       </article>
     """
+
+
+def _known_slide_title(slide: Dict, analysis: Dict) -> str:
+    for value in (slide.get("title"), analysis.get("title")):
+        title = _clean_title(value)
+        if title:
+            return title
+    return ""
+
+
+def _clean_title(value) -> str:
+    title = " ".join(str(value or "").split())
+    if not title:
+        return ""
+    if re.search(r"\.(png|jpe?g|webp|gif)$", title, re.IGNORECASE):
+        return ""
+    if re.fullmatch(r"slide[-_\s]*\d+.*", title, re.IGNORECASE):
+        return ""
+    return title
+
+
+def _slide_idea(slide: Dict, analysis: Dict) -> str:
+    title = _known_slide_title(slide, analysis)
+    for key in ("summary", "caption"):
+        candidate = _content_summary(analysis.get(key), title)
+        if candidate and not _looks_visual_description(candidate):
+            return _trim_text(candidate, 420)
+    return title
+
+
+def _content_summary(value, title: str) -> str:
+    text = _clean_commentary(value)
+    if not text:
+        return ""
+    text = _strip_leading_title(text, title)
+    text = re.sub(
+        r'^the frame shows a presentation slide titled "[^"]+"\s+with\s+',
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(
+        r'^the slide shows a presentation slide titled "[^"]+"\s+with\s+',
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(r'^a presentation slide titled "[^"]+"\s+with\s+', "", text, flags=re.IGNORECASE)
+    text = re.sub(r"^the frame (shows|features|contains)\s+", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"^the slide (shows|features|contains)\s+", "", text, flags=re.IGNORECASE)
+    text = text.strip(" .")
+    if not text:
+        return ""
+    return text[0].upper() + text[1:] + "."
+
+
+def _strip_leading_title(text: str, title: str) -> str:
+    clean_title = _clean_title(title)
+    if clean_title and text.lower().startswith(clean_title.lower()):
+        return text[len(clean_title) :].strip(" :-")
+    return text
+
+
+def _looks_visual_description(text: str) -> bool:
+    lowered = text.lower()
+    visual_terms = [
+        "background",
+        "bottom left",
+        "diagonal",
+        "frame",
+        "logo",
+        "person",
+        "purple",
+        "right side",
+        "left side",
+        "transition effect",
+    ]
+    return sum(1 for term in visual_terms if term in lowered) >= 2
+
+
+def _slide_commentary(slide: Dict, analysis: Dict, transcript_segments: List[Dict]) -> str:
+    commentary = _clean_commentary(analysis.get("instructor_commentary"))
+    if not commentary:
+        commentary = _commentary_from_segments(slide, transcript_segments)
+    return _trim_text(commentary, 900)
+
+
+def _commentary_from_segments(slide: Dict, transcript_segments: List[Dict]) -> str:
+    linked_ids = {str(item) for item in (slide.get("linked_segment_ids") or [])}
+    if not linked_ids:
+        return ""
+    parts = [
+        str(segment.get("text") or "").strip()
+        for segment in transcript_segments
+        if str(segment.get("id")) in linked_ids and str(segment.get("text") or "").strip()
+    ]
+    return " ".join(parts)
+
+
+def _clean_commentary(value) -> str:
+    text = " ".join(str(value or "").split())
+    text = re.sub(r"\[\d+\]\s*", "", text)
+    return " ".join(text.split())
+
+
+def _trim_text(value: str, max_length: int) -> str:
+    text = " ".join(str(value or "").split())
+    if len(text) <= max_length:
+        return text
+    return text[: max_length - 3].rsplit(" ", 1)[0] + "..."
 
 
 def _slide_id(slide: Dict) -> int:
@@ -544,6 +684,17 @@ def _processed_video_src(artifact: Dict, output_dir: Path) -> Optional[str]:
     except ValueError:
         return candidate.as_uri()
     return "../" + str(relative)
+
+
+def _video_label(artifact: Dict, src: str) -> str:
+    source = artifact.get("source") or {}
+    media = artifact.get("media") or {}
+    name = source.get("filename") or media.get("normalized_path") or Path(src).name
+    return _human_name(Path(str(name)).stem)
+
+
+def _human_name(value: str) -> str:
+    return " ".join(str(value or "").replace("_", " ").split())
 
 
 def _video_mime_type(src: str) -> str:

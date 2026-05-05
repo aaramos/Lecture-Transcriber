@@ -27,6 +27,8 @@ class HtmlRendererTests(unittest.TestCase):
                                 "id": 1,
                                 "filename": "slide_0001_00-00-01.png",
                                 "relative_path": "slides/slide_0001_00-00-01.png",
+                                "title": "Opening Ideas",
+                                "linked_segment_ids": [0],
                             }
                         ],
                         "processing": {},
@@ -34,12 +36,12 @@ class HtmlRendererTests(unittest.TestCase):
                             "title": "Lecture Title",
                             "executive_summary": "A useful summary.",
                             "formatted_transcript": "Lightly edited transcript.\n\nSecond paragraph.",
-                            "outline": [{"id": 1, "heading": "Opening", "slide_ids": [1]}],
+                            "outline": [{"id": 1, "heading": "Slide 1 discussion", "slide_ids": [1]}],
                             "slide_analysis": [
                                 {
                                     "slide_id": 1,
                                     "descriptive_filename": "opening.png",
-                                    "caption": "A title slide is visible.",
+                                    "caption": "The frame features a blue background and a person on screen.",
                                     "summary": "The lecture opens.",
                                     "tags": [
                                         "opening",
@@ -48,7 +50,7 @@ class HtmlRendererTests(unittest.TestCase):
                                         "transitioning",
                                         "split-left",
                                     ],
-                                    "instructor_commentary": "The instructor introduces the topic.",
+                                    "instructor_commentary": "[0] The instructor introduces the topic.",
                                 }
                             ],
                             "resources": [
@@ -73,14 +75,23 @@ class HtmlRendererTests(unittest.TestCase):
             self.assertNotIn("A useful summary.", html)
             self.assertIn("<video controls", html)
             self.assertIn("lecture.mp4", html)
+            self.assertIn('<p class="eyebrow">lecture</p>', html)
             self.assertIn("class=\"flow-section\" open", html)
-            self.assertIn("Visible on slide", html)
+            self.assertIn("Opening Ideas", html)
+            self.assertNotIn("Slide 1 discussion", html)
+            self.assertIn("Slide idea", html)
+            self.assertNotIn("Visible on slide", html)
             self.assertIn("<figcaption class=\"caption\">", html)
             self.assertIn("data-full-image=\"../slides/slide_0001_00-00-01.png\"", html)
+            self.assertNotIn("class=\"slide-summary\"", html)
+            self.assertIn("The instructor introduces the topic.", html)
+            self.assertNotIn("[0]", html)
             self.assertIn("Lightly edited transcript.", html)
             self.assertNotIn("Lecture Transcript", html)
             self.assertIn("Further Learning", html)
             self.assertNotIn(">Resources</p>", html)
+            self.assertNotIn(">Outline</p>", html)
+            self.assertNotIn("opening.png", html)
             self.assertIn("opening", html)
             self.assertNotIn("smart-slide-extraction", html)
             self.assertNotIn("<span class=\"tag\">slide-1</span>", html)
