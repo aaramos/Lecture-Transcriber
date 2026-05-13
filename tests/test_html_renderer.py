@@ -3,7 +3,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from lecture_processor.html_renderer import render_lecture_page
+from lecture_processor.html_renderer import render_batch_index, render_lecture_page
+from lecture_processor.models import BatchSummary, FileResult, FileStatus
 
 
 class HtmlRendererTests(unittest.TestCase):
@@ -207,6 +208,60 @@ class HtmlRendererTests(unittest.TestCase):
             self.assertGreaterEqual(html.count("<p>"), 2)
             self.assertIn("First sentence introduces the lecture.", html)
             self.assertIn("Eighth sentence concludes the thought.", html)
+
+    def test_batch_index_uses_clean_title_and_hides_internal_status(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output_dir = Path(tmp) / "Video_7-1_AI_Strategy_and_the_C-Suite_Agenda_processed"
+            lecture_dir = output_dir / "Video_7-1_AI_Strategy_and_the_C-Suite_Agenda"
+            html_dir = lecture_dir / "html"
+            html_dir.mkdir(parents=True)
+            (html_dir / "index.html").write_text("<html></html>", encoding="utf-8")
+            lecture_json = lecture_dir / "lecture.json"
+            lecture_json.write_text(
+                json.dumps(
+                    {
+                        "lecture_id": "Video_7-1_AI_Strategy_and_the_C-Suite_Agenda",
+                        "source": {"filename": "Video_7-1_AI_Strategy_and_the_C-Suite_Agenda.mov"},
+                        "media": {"duration_seconds": 120},
+                        "transcript": {"text": "raw transcript", "segments": []},
+                        "slides": [],
+                        "processing": {},
+                        "enrichment": {
+                            "title": "So What Is Ai Strategy I Define It",
+                            "executive_summary": (
+                                "Local overview stub. This placeholder keeps the experimental routing path working "
+                                "until a real local overview model is configured."
+                            ),
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            summary = BatchSummary(
+                attempted=1,
+                completed=1,
+                failed=0,
+                skipped=0,
+                stopped=0,
+                results=[
+                    FileResult(
+                        source=Path("Video_7-1_AI_Strategy_and_the_C-Suite_Agenda.mov"),
+                        output_dir=lecture_dir,
+                        status=FileStatus.COMPLETED,
+                        html_path=html_dir / "index.html",
+                    )
+                ],
+            )
+
+            index_path = render_batch_index(output_dir, summary)
+            html = index_path.read_text(encoding="utf-8")
+
+            self.assertIn("<h1>Video 7-1 AI Strategy and the C-Suite Agenda</h1>", html)
+            self.assertNotIn("Batch Study Index", html)
+            self.assertNotIn("1 completed, 0 failed, 0 skipped, 0 stopped.", html)
+            self.assertNotIn("Local overview stub", html)
+            self.assertIn("Overview unavailable", html)
+            self.assertIn("So What Is Ai Strategy I Define It", html)
 
 
 if __name__ == "__main__":

@@ -7,12 +7,15 @@ except ImportError:  # pragma: no cover - non-macOS fallback
 import json
 import os
 import re
+import sys
 import tempfile
 import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -36,16 +39,68 @@ DEFAULT_LOCAL_MODEL = "default"
 DEFAULT_TEXT_BASE_URL = DEFAULT_LM_STUDIO_BASE_URL
 DEFAULT_VISION_BASE_URL = DEFAULT_LM_STUDIO_BASE_URL
 DEFAULT_TIMEOUT_SECONDS = 120
-TRANSCRIPT_CHUNK_CHARS = 6000
-OVERVIEW_TRANSCRIPT_CHARS = 16000
-# Qwen VL frequently cross-attaches details when multiple lecture frames are
-# sent together. One image per request is slower, but avoids unusable captions.
-SLIDE_BATCH_SIZE = 1
+TRANSCRIPT_CHUNK_CHARS = 20000
+OVERVIEW_TRANSCRIPT_CHARS = 100000
+DEFAULT_SLIDE_BATCH_SIZE = 4
+MAX_SLIDE_BATCH_SIZE = 8
+VISION_HQ_PROFILE = "VISION_HQ"
+SUMMARIZATION_HQ_PROFILE = "SUMMARIZATION_HQ"
+LM_STUDIO_PROFILES = {
+    VISION_HQ_PROFILE: {
+        "load": {
+            "context_length": 32768,
+            "flash_attention": True,
+            "offload_kv_cache_to_gpu": False,
+            "echo_load_config": True,
+        },
+        "inference": {
+            "temperature": 0.0,
+            "top_p": 1.0,
+            "top_k": 1,
+            "seed": 42,
+            "repeat_penalty": 1.0,
+            "max_tokens": 250,
+            "stop": ["\n\n"],
+            "stream": False,
+        },
+    },
+    SUMMARIZATION_HQ_PROFILE: {
+        "load": {
+            "context_length": 65536,
+            "flash_attention": True,
+            "echo_load_config": True,
+        },
+        "inference": {
+            "temperature": 0.3,
+            "top_p": 0.9,
+            "top_k": 40,
+            "seed": 42,
+            "repeat_penalty": 1.15,
+            "presence_penalty": 0.1,
+            "frequency_penalty": 0.15,
+            "max_tokens": 1024,
+            "stream": False,
+        },
+    },
+}
+JSON_ONLY_INSTRUCTION = (
+    "Respond immediately with only the JSON object. Do not include planning, analysis, reasoning, "
+    "or any text before or after the JSON."
+)
+DEFAULT_ROLE_MAX_TOKENS = {
+    "overview": 8192,
+    "transcript_cleanup": 8192,
+    "slide_analysis": 4096,
+    "resource_planner": 1024,
+    "resource_formatter_direct": 2048,
+    "resource_formatter_gathered": 2048,
+    "resource_gather": 4096,
+}
 BRAVE_SEARCH_ENDPOINT = "https://api.search.brave.com/res/v1/web/search"
 DIRECT_RESOURCE_MAX_QUERIES = 4
 DIRECT_RESOURCE_RESULTS_PER_QUERY = 6
 DIRECT_RESOURCE_VERIFY_LIMIT = 10
-DIRECT_RESOURCE_OUTPUT_LIMIT = 4
+DIRECT_RESOURCE_OUTPUT_LIMIT = 6
 RESOURCE_PLANNER_QUERY_LIMIT = 6
 LM_STUDIO_WEB_INTEGRATIONS = [
     {
@@ -68,11 +123,26 @@ class MLXTextProvider:
         base_url: str = DEFAULT_TEXT_BASE_URL,
         model: str = DEFAULT_LOCAL_MODEL,
         timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS,
+        role_max_tokens: Optional[Dict[str, int]] = None,
+        disable_thinking: bool = False,
     ) -> None:
         self.model = model or DEFAULT_LOCAL_MODEL
         self.base_url = base_url or DEFAULT_TEXT_BASE_URL
         self.timeout_seconds = _bounded_timeout(timeout_seconds)
-        self._client = _OpenAICompatibleClient(self.base_url, self.model, self.timeout_seconds)
+        self._role_max_tokens = {
+            **DEFAULT_ROLE_MAX_TOKENS,
+            **{key: int(value) for key, value in (role_max_tokens or {}).items()},
+        }
+        self._client = _OpenAICompatibleClient(
+            self.base_url,
+            self.model,
+            self.timeout_seconds,
+            profile_name=SUMMARIZATION_HQ_PROFILE,
+            disable_thinking=disable_thinking,
+        )
+
+    def _max_tokens(self, role: str) -> int:
+        return int(self._role_max_tokens.get(role) or DEFAULT_ROLE_MAX_TOKENS[role])
 
     @classmethod
     def info(cls) -> ProviderInfo:
@@ -93,10 +163,37 @@ class MLXTextProvider:
         )
 
     def analyze_lecture(self, request: AnalyzeLectureRequest) -> AnalyzeLectureResponse:
+        step_timings: Dict[str, Dict] = {}
+        step_token_usage: Dict[str, Dict] = {}
+        timer = _start_step_timer()
         overview = self.analyze_overview(request)
+        step_timings["overview"] = _finish_step_timer(timer)
+        step_token_usage["overview"] = _token_usage_entry_from_payload(overview)
+        timer = _start_step_timer()
         transcript = self.analyze_transcript(request)
+        step_timings["transcript_cleanup"] = _finish_step_timer(
+            timer,
+            chunk_count=int(transcript.get("chunk_count") or 0),
+        )
+        step_token_usage["transcript_cleanup"] = _token_usage_entry_from_payload(transcript)
+        timer = _start_step_timer()
         slides = local_slide_analysis(request, "mlx-text")
+        step_timings["slide_analysis"] = _finish_step_timer(timer, batch_count=0, retry_count=0)
+        step_token_usage["slide_analysis"] = _token_usage_entry_from_payload(slides)
+        timer = _start_step_timer()
         resources = self.analyze_resources(request, overview=overview)
+        nested_timings = resources.get("step_timings") if isinstance(resources, dict) else None
+        if isinstance(nested_timings, dict):
+            step_timings.update(nested_timings)
+        else:
+            step_timings["resource_formatter"] = _finish_step_timer(timer)
+        nested_token_usage = resources.get("step_token_usage") if isinstance(resources, dict) else None
+        if isinstance(nested_token_usage, dict):
+            step_token_usage.update(
+                {str(key): value for key, value in nested_token_usage.items() if isinstance(value, dict)}
+            )
+        else:
+            step_token_usage["resource_formatter"] = _token_usage_entry_from_payload(resources)
         warnings = []
         for payload in (overview, transcript, slides, resources):
             warnings.extend(payload.get("warnings") or [])
@@ -111,11 +208,14 @@ class MLXTextProvider:
             output_token_estimate=_sum_tokens("output_tokens", overview, transcript, slides, resources),
             raw_response_id="lm-studio-text",
             warnings=_dedupe_warnings(warnings),
+            step_timings=step_timings,
+            step_token_usage={key: value for key, value in step_token_usage.items() if value.get("total_tokens", 0) > 0},
         )
 
     def analyze_overview(self, request: AnalyzeLectureRequest) -> Dict:
         prompt = f"""
-Return JSON only. Create a lecture overview with these fields:
+{JSON_ONLY_INSTRUCTION}
+Create a lecture overview with these fields:
 - title: short, specific lecture title
 - executive_summary: one concise paragraph
 - outline: array of objects with id, heading, slide_ids
@@ -133,7 +233,7 @@ Slides:
         try:
             payload, usage = self._client.chat_json(
                 _messages(prompt, system="You create concise study-note overviews from lecture transcripts."),
-                max_tokens=2048,
+                max_tokens=self._max_tokens("overview"),
                 temperature=0.2,
                 context="MLX overview",
             )
@@ -154,9 +254,10 @@ Slides:
         output_tokens = 0
         for index, chunk in enumerate(chunks, start=1):
             prompt = f"""
-Return JSON only with fields:
+{JSON_ONLY_INSTRUCTION}
+Return fields:
 - formatted_transcript: polished transcript text with readable paragraph breaks
-- warnings: array of strings
+- warnings: array of strings, each noting an edit that changed wording beyond punctuation, capitalization, or spacing.
 
 Format this lecture transcript chunk for a student reading it later.
 
@@ -167,7 +268,7 @@ Rules:
 - Keep the instructor's voice and the original order of ideas.
 - Preserve names, technical terms, examples, and substantive details.
 - Do not summarize, add new ideas, or remove meaningful content.
-- Do not add headings unless the speaker clearly introduces a new section.
+- Never add headings. If the speaker introduces a section verbally, leave the title as plain text in the paragraph.
 
 Chunk {index}/{len(chunks)}:
 {chunk}
@@ -175,7 +276,7 @@ Chunk {index}/{len(chunks)}:
             try:
                 payload, usage = self._client.chat_json(
                     _messages(prompt, system="You are a careful lecture transcript copy editor. Preserve meaning."),
-                    max_tokens=6144,
+                    max_tokens=self._max_tokens("transcript_cleanup"),
                     temperature=0.1,
                     context=f"MLX transcript chunk {index}",
                 )
@@ -193,17 +294,27 @@ Chunk {index}/{len(chunks)}:
             "warnings": _dedupe_warnings(warnings),
             "input_tokens": input_tokens,
             "output_tokens": output_tokens,
+            "chunk_count": len(chunks),
         }
 
     def analyze_resources(self, request: AnalyzeLectureRequest, *, overview: Optional[Dict] = None) -> Dict:
         title = str((overview or {}).get("title") or request.lecture_id)
         summary = str((overview or {}).get("executive_summary") or "")
         outline_headings = _outline_heading_values(overview)
+        step_timings: Dict[str, Dict] = {}
+        step_token_usage: Dict[str, Dict] = {}
+        timer = _start_step_timer()
         planned_queries, planner_warnings, planner_usage = self._plan_resource_queries(
             title=title,
             summary=summary,
             outline_headings=outline_headings,
         )
+        step_timings["resource_planner"] = _finish_step_timer(
+            timer,
+            query_count=len(planned_queries),
+        )
+        step_token_usage["resource_planner"] = _token_usage_entry_from_usage(planner_usage)
+        timer = _start_step_timer()
         direct_candidates, direct_warnings = _direct_resource_candidates(
             title=title,
             summary=summary,
@@ -211,9 +322,16 @@ Chunk {index}/{len(chunks)}:
             timeout_seconds=self.timeout_seconds,
             queries=planned_queries,
         )
+        step_timings["resource_search"] = _finish_step_timer(
+            timer,
+            query_count=len(planned_queries or _resource_search_queries(title, summary, outline_headings)),
+            candidate_count=len(direct_candidates),
+        )
+        step_token_usage["resource_search"] = _token_usage_entry(0, 0)
         resource_warnings = _dedupe_warnings(planner_warnings + direct_warnings)
         if direct_candidates:
-            return self._format_direct_resource_candidates(
+            timer = _start_step_timer()
+            result = self._format_direct_resource_candidates(
                 title=title,
                 summary=summary,
                 outline_headings=outline_headings,
@@ -221,12 +339,28 @@ Chunk {index}/{len(chunks)}:
                 warnings=resource_warnings,
                 planner_usage=planner_usage,
             )
-        return self._resources_via_lm_studio_tools(
+            step_timings["resource_formatter"] = _finish_step_timer(
+                timer,
+                formatter="direct",
+                candidate_count=len(direct_candidates),
+            )
+            result["step_timings"] = step_timings
+            step_token_usage.update(result.get("step_token_usage") or {})
+            result["step_token_usage"] = step_token_usage
+            return result
+        result = self._resources_via_lm_studio_tools(
             title=title,
             summary=summary,
             outline_headings=outline_headings,
             fallback_warnings=resource_warnings,
+            queries=planned_queries,
         )
+        if result.get("step_timings"):
+            step_timings.update(result["step_timings"])
+        result["step_timings"] = step_timings
+        step_token_usage.update(result.get("step_token_usage") or {})
+        result["step_token_usage"] = step_token_usage
+        return result
 
     def _plan_resource_queries(
         self,
@@ -236,13 +370,13 @@ Chunk {index}/{len(chunks)}:
         outline_headings: List[str],
     ) -> Tuple[List[str], List[str], "_Usage"]:
         prompt = f"""
+{JSON_ONLY_INSTRUCTION}
 Create focused web search queries for finding external study resources for this lecture.
 
 Rules:
 - Return 3 to 6 web-search-ready queries.
 - Prefer queries that find official docs, university pages, peer-reviewed papers, reputable educational sources, or strong industry reports.
 - Do not include URLs.
-- Do not use web tools.
 - Keep each query concise and specific.
 
 Lecture title: {title}
@@ -255,7 +389,7 @@ Outline headings:
                 _messages(prompt, system="You plan high-quality resource searches for lecture study materials."),
                 schema_name="resource_query_plan",
                 schema=_resource_query_plan_schema(),
-                max_tokens=1024,
+                max_tokens=self._max_tokens("resource_planner"),
                 temperature=0.1,
                 context="LM Studio resource query planner",
             )
@@ -283,19 +417,21 @@ Outline headings:
         planner_usage: "_Usage",
     ) -> Dict:
         format_prompt = f"""
-Return JSON only with fields:
-- resources: array of up to 4 objects with title, url, summary, source_quality
+{JSON_ONLY_INSTRUCTION}
+Return fields:
+- resources: array of up to 6 objects with title, url, summary, source_quality
 - warnings: array of strings
 
 Rank and summarize these verified search candidates for a student.
 
 Rules:
-- Respond immediately with the JSON object. Do not include analysis or chain-of-thought.
 - Include only URLs from the candidate list.
 - Keep URLs exactly as provided.
 - Prefer official, university, peer-reviewed, or reputable educational sources.
 - Each summary should explain why the resource helps with this lecture.
-- source_quality must be "high" or "medium".
+- source_quality:
+  - "high" = official documentation, peer-reviewed papers, .edu/.gov domains, established textbooks
+  - "medium" = reputable industry blogs, journalism from major outlets, well-cited tutorials
 
 Lecture title: {title}
 Executive summary: {summary}
@@ -310,7 +446,7 @@ Verified resource candidates:
                 _messages(format_prompt, system="You rank verified lecture study resources and return compact JSON only."),
                 schema_name="lecture_resources",
                 schema=_resource_formatter_schema(),
-                max_tokens=4096,
+                max_tokens=self._max_tokens("resource_formatter_direct"),
                 temperature=0.1,
                 context="LM Studio direct resources JSON format",
             )
@@ -332,6 +468,12 @@ Verified resource candidates:
                 + (format_usage.input_tokens or _estimate_tokens(format_prompt)),
                 "output_tokens": (planner_usage.output_tokens or 0)
                 + (format_usage.output_tokens or _estimate_tokens(json.dumps(payload))),
+                "step_token_usage": {
+                    "resource_formatter": _token_usage_entry(
+                        format_usage.input_tokens or _estimate_tokens(format_prompt),
+                        format_usage.output_tokens or _estimate_tokens(json.dumps(payload)),
+                    ),
+                },
             }
         except Exception as exc:
             return {
@@ -345,6 +487,12 @@ Verified resource candidates:
                 ),
                 "input_tokens": (planner_usage.input_tokens or 0) + _estimate_tokens(format_prompt),
                 "output_tokens": _estimate_tokens(json.dumps(candidates[:DIRECT_RESOURCE_OUTPUT_LIMIT])),
+                "step_token_usage": {
+                    "resource_formatter": _token_usage_entry(
+                        _estimate_tokens(format_prompt),
+                        _estimate_tokens(json.dumps(candidates[:DIRECT_RESOURCE_OUTPUT_LIMIT])),
+                    ),
+                },
             }
 
     def _resources_via_lm_studio_tools(
@@ -354,12 +502,15 @@ Verified resource candidates:
         summary: str,
         outline_headings: List[str],
         fallback_warnings: List[str],
+        queries: Optional[List[str]] = None,
     ) -> Dict:
         outline_text = _outline_headings_text_from_values(outline_headings)
+        planner_queries = _planner_queries_text(queries or _resource_search_queries(title, summary, outline_headings))
+        step_timings: Dict[str, Dict] = {}
         gather_prompt = f"""
 Use LM Studio's web-search tools to gather candidate study resources for this lecture.
 
-Find 3-4 high-quality external resources that help a student go deeper on the lecture's main topics.
+Find 4-6 high-quality external resources that help a student go deeper on the lecture's main topics.
 
 Rules:
 - Prefer official documentation, university pages, peer-reviewed papers, reputable educational sources, or
@@ -367,8 +518,7 @@ Rules:
 - Use fetch when it helps confirm a search result.
 - Only keep URLs you verified through the web tools. Do not invent or guess URLs.
 - Return concise notes for each candidate with title, URL, why it is relevant, and source quality.
-- Use no more than 3 total tool calls and do not repeat the same search query.
-- Stop after you have useful candidates.
+- Run these searches in order: {planner_queries}. Stop early once you have 4-6 verified candidates.
 - This is a research-gathering pass. Do not return JSON yet.
 
 Lecture title: {title}
@@ -377,15 +527,21 @@ Outline headings:
 {outline_text}
 """.strip()
         try:
+            gather_timer = _start_step_timer()
             gathered_context, gather_usage, tool_calls = self._client.chat_text_with_lm_studio_tools(
                 gather_prompt,
                 system=(
                     "You are a research assistant for lecture study resources. "
                     "Search the web, verify URLs, and gather concise source notes."
                 ),
-                max_tokens=2048,
+                max_tokens=self._max_tokens("resource_gather"),
                 temperature=0.2,
                 context="LM Studio web resources gather",
+            )
+            step_timings["resource_search"] = _finish_step_timer(
+                gather_timer,
+                query_count=len(_clean_resource_queries(queries)),
+                tool_call_count=len(tool_calls),
             )
             if not tool_calls:
                 extracted = _resources_from_gathered_context(gathered_context)
@@ -397,6 +553,13 @@ Outline headings:
                         ]),
                         "input_tokens": gather_usage.input_tokens or _estimate_tokens(gather_prompt),
                         "output_tokens": gather_usage.output_tokens or _estimate_tokens(gathered_context),
+                        "step_timings": step_timings,
+                        "step_token_usage": {
+                            "resource_search": _token_usage_entry(
+                                gather_usage.input_tokens or _estimate_tokens(gather_prompt),
+                                gather_usage.output_tokens or _estimate_tokens(gathered_context),
+                            ),
+                        },
                     }
                 fallback = _empty_resources_payload(
                     fallback_warnings + [
@@ -406,11 +569,19 @@ Outline headings:
                 )
                 fallback["input_tokens"] = gather_usage.input_tokens or _estimate_tokens(gather_prompt)
                 fallback["output_tokens"] = gather_usage.output_tokens or _estimate_tokens(gathered_context)
+                fallback["step_timings"] = step_timings
+                fallback["step_token_usage"] = {
+                    "resource_search": _token_usage_entry(
+                        gather_usage.input_tokens or _estimate_tokens(gather_prompt),
+                        gather_usage.output_tokens or _estimate_tokens(gathered_context),
+                    ),
+                }
                 return fallback
 
             format_prompt = f"""
-Return JSON only with fields:
-- resources: array of up to 4 objects with title, url, summary, source_quality
+{JSON_ONLY_INSTRUCTION}
+Return fields:
+- resources: array of up to 6 objects with title, url, summary, source_quality
 - warnings: array of strings
 
 Format the gathered web research into study resources.
@@ -418,7 +589,9 @@ Format the gathered web research into study resources.
 Rules:
 - Include only resources from the gathered context.
 - Every resource must include title, url, summary, and source_quality.
-- source_quality must be "high" or "medium".
+- source_quality:
+  - "high" = official documentation, peer-reviewed papers, .edu/.gov domains, established textbooks
+  - "medium" = reputable industry blogs, journalism from major outlets, well-cited tutorials
 - Do not invent or guess URLs.
 - If the gathered context does not contain useful verified URLs, return an empty resources array and explain the problem in warnings.
 
@@ -430,12 +603,17 @@ Outline headings:
 Gathered web context:
 {_trim_text(gathered_context, 12000)}
 """.strip()
+            format_timer = _start_step_timer()
             payload, format_usage = self._client.chat_json_with_lm_studio_text(
                 format_prompt,
                 system="You format verified lecture resource notes as compact JSON only.",
-                max_tokens=2048,
+                max_tokens=self._max_tokens("resource_formatter_gathered"),
                 temperature=0.1,
                 context="LM Studio web resources JSON format",
+            )
+            step_timings["resource_formatter"] = _finish_step_timer(
+                format_timer,
+                formatter="gathered",
             )
             normalized = _normalize_resources(payload)
             normalized["input_tokens"] = (
@@ -452,14 +630,31 @@ Gathered web context:
                 format_usage.output_tokens
                 or _estimate_tokens(json.dumps(payload))
             )
+            normalized["step_token_usage"] = {
+                "resource_search": _token_usage_entry(
+                    gather_usage.input_tokens or _estimate_tokens(gather_prompt),
+                    gather_usage.output_tokens or _estimate_tokens(gathered_context),
+                ),
+                "resource_formatter": _token_usage_entry(
+                    format_usage.input_tokens or _estimate_tokens(format_prompt),
+                    format_usage.output_tokens or _estimate_tokens(json.dumps(payload)),
+                ),
+            }
             warnings = normalized.setdefault("warnings", [])
             warnings.append(
                 "Resources used LM Studio web search with "
                 f"{self.model}: {', '.join(_dedupe_warnings(tool_calls))}."
             )
             normalized["warnings"] = _dedupe_warnings(fallback_warnings + warnings)
+            normalized["step_timings"] = step_timings
             return normalized
         except Exception as exc:
+            if "resource_search" not in step_timings and "gather_timer" in locals():
+                step_timings["resource_search"] = _finish_step_timer(
+                    locals()["gather_timer"],
+                    query_count=len(_clean_resource_queries(queries)),
+                    tool_call_count=0,
+                )
             extracted = _resources_from_gathered_context(locals().get("gathered_context", ""))
             if extracted:
                 usage = locals().get("gather_usage") or _Usage()
@@ -472,8 +667,19 @@ Gathered web context:
                     "input_tokens": usage.input_tokens or _estimate_tokens(gather_prompt),
                     "output_tokens": usage.output_tokens
                     or _estimate_tokens(str(locals().get("gathered_context", ""))),
+                    "step_timings": step_timings,
+                    "step_token_usage": {
+                        "resource_search": _token_usage_entry(
+                            usage.input_tokens or _estimate_tokens(gather_prompt),
+                            usage.output_tokens
+                            or _estimate_tokens(str(locals().get("gathered_context", ""))),
+                        ),
+                    },
                 }
-            return _empty_resources_payload(fallback_warnings + [f"LM Studio resources fallback used: {exc}"])
+            fallback = _empty_resources_payload(fallback_warnings + [f"LM Studio resources fallback used: {exc}"])
+            fallback["step_timings"] = step_timings
+            fallback["step_token_usage"] = {}
+            return fallback
 
     def analyze_slides(self, request: AnalyzeLectureRequest) -> Dict:
         fallback = local_slide_analysis(request, self.model)
@@ -490,8 +696,17 @@ class MLXVisionProvider(MLXTextProvider):
         base_url: str = DEFAULT_VISION_BASE_URL,
         model: str = DEFAULT_LOCAL_MODEL,
         timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS,
+        role_max_tokens: Optional[Dict[str, int]] = None,
+        disable_thinking: bool = False,
     ) -> None:
-        super().__init__(base_url=base_url, model=model, timeout_seconds=timeout_seconds)
+        super().__init__(
+            base_url=base_url,
+            model=model,
+            timeout_seconds=timeout_seconds,
+            role_max_tokens=role_max_tokens,
+            disable_thinking=disable_thinking,
+        )
+        self._client.profile_name = VISION_HQ_PROFILE
 
     @classmethod
     def info(cls) -> ProviderInfo:
@@ -514,72 +729,172 @@ class MLXVisionProvider(MLXTextProvider):
     def analyze_slides(self, request: AnalyzeLectureRequest) -> Dict:
         if not request.slides:
             return local_slide_analysis(request, self.model)
+        metadata_payload = _slide_analysis_from_extraction_metadata(request, self.model)
+        if metadata_payload is not None:
+            return metadata_payload
+        batch_size = _configured_slide_batch_size()
         slide_analysis: List[Dict] = []
-        warnings = [f"Slide analysis used local LM Studio vision model: {self.model}"]
+        warnings = [
+            f"Slide analysis used local LM Studio vision model: {self.model}",
+            f"Slide analysis used LM Studio batch size {batch_size}.",
+        ]
         input_tokens = 0
         output_tokens = 0
-        for batch in _slide_batches(request.slides):
-            prompt = _slide_batch_prompt(request, batch)
+        batch_count = 0
+        retry_count = 0
+        for batch in _slide_batches(request.slides, batch_size):
+            batch_count += 1
+            batch_ids = _slide_ids(batch)
+            raw_items: List[Dict] = []
             try:
-                payload, usage = self._client.chat_json_with_lm_studio_images(
-                    _vision_input_items(request, batch, prompt),
-                    system="You analyze lecture slide images and return compact JSON.",
-                    max_tokens=4096,
-                    temperature=0.3,
+                batch_items, batch_warnings, batch_input, batch_output = self._request_slide_batch(
+                    request,
+                    batch,
                     context="MLX slide batch",
+                    temperature=0.3,
                 )
-                raw_items = list(payload.get("slide_analysis") or [])
+                raw_items.extend(batch_items)
+                warnings.extend(batch_warnings)
+                input_tokens += batch_input
+                output_tokens += batch_output
                 missing_ids = _missing_slide_ids(raw_items, batch)
                 if missing_ids:
+                    retry_count += 1
                     missing_slides = _slides_with_ids(batch, missing_ids)
-                    retry_prompt = _slide_batch_prompt(request, missing_slides)
+                    warnings.append(
+                        "Slide batch missed slide id(s) "
+                        f"{', '.join(map(str, missing_ids))}; retrying those slides."
+                    )
                     try:
-                        retry_payload, retry_usage = self._client.chat_json_with_lm_studio_images(
-                            _vision_input_items(request, missing_slides, retry_prompt),
-                            system="You analyze lecture slide images and return compact JSON.",
-                            max_tokens=4096,
-                            temperature=0.2,
+                        retry_items, retry_warnings, retry_input, retry_output = self._request_slide_batch(
+                            request,
+                            missing_slides,
                             context="MLX slide missing retry",
+                            temperature=0.2,
                         )
-                        raw_items.extend(list(retry_payload.get("slide_analysis") or []))
-                        warnings.extend(retry_payload.get("warnings") or [])
-                        input_tokens += retry_usage.input_tokens or _estimate_tokens(retry_prompt)
-                        output_tokens += retry_usage.output_tokens or _estimate_tokens(json.dumps(retry_payload))
+                        raw_items.extend(retry_items)
+                        warnings.extend(retry_warnings)
+                        input_tokens += retry_input
+                        output_tokens += retry_output
                     except Exception as retry_exc:
                         warnings.append(
                             f"Slide retry skipped for missing slide id(s) {', '.join(map(str, missing_ids))}: {retry_exc}"
                         )
                 still_missing = _missing_slide_ids(raw_items, batch)
+                if still_missing and len(batch) > 1:
+                    for slide in _slides_with_ids(batch, still_missing):
+                        slide_id = _slide_id(slide, fallback=1)
+                        try:
+                            retry_count += 1
+                            solo_items, solo_warnings, solo_input, solo_output = self._request_slide_batch(
+                                request,
+                                [slide],
+                                context=f"MLX slide solo retry {slide_id}",
+                                temperature=0.1,
+                            )
+                            raw_items.extend(solo_items)
+                            warnings.extend(solo_warnings)
+                            input_tokens += solo_input
+                            output_tokens += solo_output
+                        except Exception as solo_exc:
+                            warnings.append(f"Slide {slide_id} solo retry skipped: {solo_exc}")
+                    still_missing = _missing_slide_ids(raw_items, batch)
                 if still_missing:
                     warnings.append(
-                        "Slide analysis missing slide id(s) after one retry: "
+                        "Slide analysis missing slide id(s) after retries: "
                         f"{', '.join(map(str, still_missing))}. Local fallback filled those slides."
                     )
                 normalized = _normalize_slide_analysis(raw_items, request, batch)
                 slide_analysis.extend(normalized)
-                warnings.extend(payload.get("warnings") or [])
-                input_tokens += usage.input_tokens or _estimate_tokens(prompt)
-                output_tokens += usage.output_tokens or _estimate_tokens(json.dumps(payload))
             except Exception as exc:
-                fallback = local_slide_analysis(
-                    AnalyzeLectureRequest(
-                        lecture_id=request.lecture_id,
-                        transcript_text=request.transcript_text,
-                        segments=request.segments,
-                        slides=batch,
-                        duration_minutes=request.duration_minutes,
-                        lecture_dir=request.lecture_dir,
-                    ),
-                    self.model,
+                retry_count += len(batch)
+                warnings.append(
+                    f"Slide batch {', '.join(map(str, batch_ids))} failed; retrying each slide separately: {exc}"
                 )
-                slide_analysis.extend(fallback["slide_analysis"])
-                warnings.append(f"Slide batch used local fallback: {exc}")
+                raw_items, fallback_warnings, fallback_input, fallback_output = self._retry_or_fallback_slide_batch(
+                    request,
+                    batch,
+                )
+                slide_analysis.extend(_normalize_slide_analysis(raw_items, request, batch))
+                warnings.extend(fallback_warnings)
+                input_tokens += fallback_input
+                output_tokens += fallback_output
         return {
             "slide_analysis": slide_analysis or local_slide_analysis(request, self.model)["slide_analysis"],
             "warnings": _dedupe_warnings(warnings),
             "input_tokens": input_tokens,
             "output_tokens": output_tokens,
+            "batch_count": batch_count,
+            "retry_count": retry_count,
         }
+
+    def _request_slide_batch(
+        self,
+        request: AnalyzeLectureRequest,
+        batch: List[Dict],
+        *,
+        context: str,
+        temperature: float,
+    ) -> Tuple[List[Dict], List[str], int, int]:
+        prompt = _slide_batch_prompt(request, batch)
+        payload, usage = self._client.chat_json_with_lm_studio_images(
+            _vision_input_items(request, batch, prompt),
+            system="You analyze lecture slide images and return compact JSON.",
+            max_tokens=self._max_tokens("slide_analysis"),
+            temperature=temperature,
+            context=context,
+        )
+        wanted_ids = set(_slide_ids(batch))
+        raw_items = []
+        for item in (payload.get("slide_analysis") or []):
+            if not isinstance(item, dict):
+                continue
+            try:
+                slide_id = int(item.get("slide_id") or 0)
+            except (TypeError, ValueError):
+                continue
+            if slide_id in wanted_ids:
+                raw_items.append(item)
+        return (
+            raw_items,
+            list(payload.get("warnings") or []),
+            usage.input_tokens or _estimate_tokens(prompt),
+            usage.output_tokens or _estimate_tokens(json.dumps(payload)),
+        )
+
+    def _retry_or_fallback_slide_batch(
+        self,
+        request: AnalyzeLectureRequest,
+        batch: List[Dict],
+    ) -> Tuple[List[Dict], List[str], int, int]:
+        raw_items: List[Dict] = []
+        warnings: List[str] = []
+        input_tokens = 0
+        output_tokens = 0
+        for index, slide in enumerate(batch, start=1):
+            slide_id = _slide_id(slide, fallback=index)
+            try:
+                solo_items, solo_warnings, solo_input, solo_output = self._request_slide_batch(
+                    request,
+                    [slide],
+                    context=f"MLX slide solo fallback {slide_id}",
+                    temperature=0.1,
+                )
+                raw_items.extend(solo_items)
+                warnings.extend(solo_warnings)
+                input_tokens += solo_input
+                output_tokens += solo_output
+                if slide_id in _missing_slide_ids(solo_items, [slide]):
+                    warnings.append(f"Slide {slide_id} solo retry returned no usable slide row; local fallback filled it.")
+            except Exception as exc:
+                warnings.append(f"Slide {slide_id} used local fallback after solo retry failed: {exc}")
+        missing_ids = _missing_slide_ids(raw_items, batch)
+        if missing_ids:
+            warnings.append(
+                "Slide analysis local fallback filled slide id(s): "
+                f"{', '.join(map(str, missing_ids))}."
+            )
+        return raw_items, warnings, input_tokens, output_tokens
 
 
 @dataclass(frozen=True)
@@ -596,12 +911,28 @@ class _LoadedModelInstance:
 
 class _OpenAICompatibleClient:
     _loaded_instance_cache: Dict[str, Dict[str, str]] = {}
+    _model_verification_cache: Dict[Tuple[str, str], Tuple[str, float]] = {}
+    _model_verification_ttl_seconds = 30.0
     _lm_studio_lock = threading.RLock()
+    _load_config_support_cache: Dict[str, bool] = {}
+    _native_max_token_field = "max_tokens"
+    _native_max_token_field_logged = False
+    _chat_template_kwargs_warning_logged = False
 
-    def __init__(self, base_url: str, model: str, timeout_seconds: int) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        model: str,
+        timeout_seconds: int,
+        *,
+        profile_name: str = SUMMARIZATION_HQ_PROFILE,
+        disable_thinking: bool = False,
+    ) -> None:
         self.base_url = _normalize_base_url(base_url)
         self.model = model or DEFAULT_LOCAL_MODEL
         self.timeout_seconds = _bounded_timeout(timeout_seconds)
+        self.profile_name = _normalize_lm_studio_profile(profile_name)
+        self.disable_thinking = bool(disable_thinking)
         self._resolved_model: Optional[str] = None
 
     @classmethod
@@ -619,6 +950,65 @@ class _OpenAICompatibleClient:
                 if lock_handle is not None:
                     fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
                     lock_handle.close()
+
+    @classmethod
+    def clear_model_verification_cache(cls) -> None:
+        with cls._lm_studio_lock:
+            cls._model_verification_cache = {}
+
+    @classmethod
+    def _set_native_max_token_field(cls, field_name: str) -> None:
+        cls._native_max_token_field = field_name
+        cls._native_max_token_field_logged = False
+
+    @classmethod
+    def _log_native_max_token_field_once(cls) -> None:
+        if cls._native_max_token_field_logged:
+            return
+        print(
+            f"LM Studio native chat output-token field: {cls._native_max_token_field}",
+            file=sys.stderr,
+        )
+        cls._native_max_token_field_logged = True
+
+    @classmethod
+    def _warn_chat_template_kwargs_once(cls, context: str) -> None:
+        if cls._chat_template_kwargs_warning_logged:
+            return
+        print(
+            f"{context}: LM Studio rejected chat_template_kwargs; continuing with prompt-level no-think instructions.",
+            file=sys.stderr,
+        )
+        cls._chat_template_kwargs_warning_logged = True
+
+    def _add_native_max_tokens(self, body: Dict, max_tokens: int) -> None:
+        for field_name in _native_max_token_field_names():
+            body.pop(field_name, None)
+        body[self._native_max_token_field] = int(max_tokens)
+
+    def _add_chat_template_kwargs(self, body: Dict) -> None:
+        if self.disable_thinking and not _is_ollama_base_url(self.base_url):
+            body["chat_template_kwargs"] = {"enable_thinking": False}
+
+    def _add_profile_inference(
+        self,
+        body: Dict,
+        max_tokens: int,
+        temperature: float,
+        *,
+        native_tokens: bool = False,
+    ) -> None:
+        profile = LM_STUDIO_PROFILES[_normalize_lm_studio_profile(self.profile_name)]
+        inference = dict(profile["inference"])
+        inference["max_tokens"] = int(max_tokens)
+        inference["temperature"] = float(temperature)
+        body.update(inference)
+        if native_tokens and "max_tokens" in body:
+            self._add_native_max_tokens(body, int(body.pop("max_tokens")))
+
+    def _profile_load_config(self) -> Dict:
+        profile = LM_STUDIO_PROFILES[_normalize_lm_studio_profile(self.profile_name)]
+        return dict(profile["load"])
 
     def chat_json(self, messages: List[Dict], *, max_tokens: int, temperature: float, context: str) -> Tuple[Dict, _Usage]:
         text, usage = self.chat_text(
@@ -701,10 +1091,10 @@ class _OpenAICompatibleClient:
                         "schema": schema,
                     },
                 },
-                "max_tokens": int(max_tokens),
-                "temperature": float(temperature),
                 "stream": False,
             }
+            self._add_profile_inference(body, max_tokens, temperature)
+            self._add_chat_template_kwargs(body)
             return self._post_lm_studio_structured_chat(body, context=context)
 
     def chat_json_with_lm_studio_images(
@@ -735,10 +1125,10 @@ class _OpenAICompatibleClient:
                 body = {
                     "model": self._chat_model(context),
                     "input": input_text,
-                    "max_output_tokens": int(max_tokens),
-                    "temperature": float(temperature),
                     "store": False,
                 }
+                self._add_profile_inference(body, max_tokens, temperature, native_tokens=True)
+                self._add_chat_template_kwargs(body)
                 if system_prompt:
                     body["system_prompt"] = system_prompt
                 text, usage, _tool_calls = self._post_lm_studio_native_chat(body, context=context)
@@ -809,13 +1199,13 @@ class _OpenAICompatibleClient:
         with self._exclusive_lm_studio_request():
             body = {
                 "model": self._chat_model(context),
-                "system_prompt": system,
+                "system_prompt": _system_prompt_no_think(system),
                 "input": prompt,
                 "integrations": LM_STUDIO_WEB_INTEGRATIONS,
-                "max_output_tokens": int(max_tokens),
-                "temperature": float(temperature),
                 "store": False,
             }
+            self._add_profile_inference(body, max_tokens, temperature, native_tokens=True)
+            self._add_chat_template_kwargs(body)
             return self._post_lm_studio_native_chat(body, context=context, allow_tool_output_text=True)
 
     def chat_text_with_lm_studio_native(
@@ -835,12 +1225,12 @@ class _OpenAICompatibleClient:
         with self._exclusive_lm_studio_request():
             body = {
                 "model": self._chat_model(context),
-                "system_prompt": system,
+                "system_prompt": _system_prompt_no_think(system),
                 "input": prompt,
-                "max_output_tokens": int(max_tokens),
-                "temperature": float(temperature),
                 "store": False,
             }
+            self._add_profile_inference(body, max_tokens, temperature, native_tokens=True)
+            self._add_chat_template_kwargs(body)
             return self._post_lm_studio_native_chat(body, context=context)
 
     def chat_text_with_lm_studio_images(
@@ -860,14 +1250,99 @@ class _OpenAICompatibleClient:
         with self._exclusive_lm_studio_request():
             body = {
                 "model": self._chat_model(context),
-                "system_prompt": system,
+                "system_prompt": _system_prompt_no_think(system),
                 "input": input_items,
-                "max_output_tokens": int(max_tokens),
-                "temperature": float(temperature),
                 "store": False,
             }
+            self._add_profile_inference(body, max_tokens, temperature, native_tokens=True)
+            self._add_chat_template_kwargs(body)
             text, usage, _tool_calls = self._post_lm_studio_native_chat(body, context=context)
             return text, usage
+
+    def chat_text_with_openai_images(
+        self,
+        messages: List[Dict],
+        *,
+        max_tokens: int,
+        temperature: float,
+        context: str,
+    ) -> Tuple[str, _Usage]:
+        if _is_ollama_base_url(self.base_url):
+            raise ProviderRequestError(
+                f"{context} requires LM Studio's OpenAI-compatible image API. "
+                "Update the LM Studio server URL in Settings."
+            )
+        with self._exclusive_lm_studio_request():
+            self._chat_model(context)
+            model_for_request = self.model if self.model != DEFAULT_LOCAL_MODEL else (self._resolved_model or self.model)
+            body = {
+                "model": model_for_request,
+                "messages": messages,
+            }
+            self._add_profile_inference(body, max_tokens, temperature)
+            self._add_chat_template_kwargs(body)
+            request = urllib.request.Request(
+                f"{_lm_studio_openai_base_url(self.base_url)}/chat/completions",
+                data=json.dumps(body).encode("utf-8"),
+                headers=_request_headers(base_url=self.base_url, content_type="application/json"),
+                method="POST",
+            )
+            try:
+                with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
+                    raw = response.read().decode("utf-8")
+            except urllib.error.HTTPError as exc:
+                self.clear_model_verification_cache()
+                detail = exc.read().decode("utf-8", errors="replace") if exc.fp else str(exc)
+                if body.get("chat_template_kwargs") and _is_chat_template_kwargs_error(detail):
+                    self._warn_chat_template_kwargs_once(context)
+                    retry_body = dict(body)
+                    retry_body.pop("chat_template_kwargs", None)
+                    return self._post_openai_chat_completions(retry_body, context=context)
+                if "invalid_api_key" in detail or "API token is required" in detail:
+                    raise ProviderRequestError(
+                        f"{context} needs a valid LM Studio API token. "
+                        "Save the token in Settings, then refresh models and rerun."
+                    ) from exc
+                raise ProviderRequestError(f"{context} failed at {self.base_url}: HTTP {exc.code}: {detail}") from exc
+            except urllib.error.URLError as exc:
+                self.clear_model_verification_cache()
+                raise ProviderRequestError(
+                    f"{context} could not reach LM Studio at {_lm_studio_openai_base_url(self.base_url)}. "
+                    "Start the local server or update the LM Studio server URL in Settings."
+                ) from exc
+            except TimeoutError as exc:
+                self.clear_model_verification_cache()
+                raise ProviderTransientError(
+                    f"{context} timed out after {self.timeout_seconds}s at {_lm_studio_openai_base_url(self.base_url)}"
+                ) from exc
+        return _openai_chat_text_usage(raw, context=context)
+
+    def _post_openai_chat_completions(self, body: Dict, *, context: str) -> Tuple[str, _Usage]:
+        request = urllib.request.Request(
+            f"{_lm_studio_openai_base_url(self.base_url)}/chat/completions",
+            data=json.dumps(body).encode("utf-8"),
+            headers=_request_headers(base_url=self.base_url, content_type="application/json"),
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
+                raw = response.read().decode("utf-8")
+        except urllib.error.HTTPError as exc:
+            self.clear_model_verification_cache()
+            detail = exc.read().decode("utf-8", errors="replace") if exc.fp else str(exc)
+            raise ProviderRequestError(f"{context} failed at {self.base_url}: HTTP {exc.code}: {detail}") from exc
+        except urllib.error.URLError as exc:
+            self.clear_model_verification_cache()
+            raise ProviderRequestError(
+                f"{context} could not reach LM Studio at {_lm_studio_openai_base_url(self.base_url)}. "
+                "Start the local server or update the LM Studio server URL in Settings."
+            ) from exc
+        except TimeoutError as exc:
+            self.clear_model_verification_cache()
+            raise ProviderTransientError(
+                f"{context} timed out after {self.timeout_seconds}s at {_lm_studio_openai_base_url(self.base_url)}"
+            ) from exc
+        return _openai_chat_text_usage(raw, context=context)
 
     def _chat_model(self, context: str) -> str:
         if self.model and self.model != DEFAULT_LOCAL_MODEL:
@@ -920,6 +1395,11 @@ class _OpenAICompatibleClient:
         if _is_ollama_base_url(self.base_url):
             return model
 
+        if known_payload is None:
+            cached_instance_id = self._cached_verified_model_instance(model)
+            if cached_instance_id:
+                return cached_instance_id
+
         payload = known_payload or self._models_payload(f"{context} model load check")
         self._remember_loaded_instances(payload)
         if not _payload_has_loaded_instance_state(payload):
@@ -930,12 +1410,15 @@ class _OpenAICompatibleClient:
 
         already_exclusive_instance_id = _single_loaded_matching_instance_id(payload, model)
         if already_exclusive_instance_id:
+            self._remember_verified_model_instance(model, already_exclusive_instance_id)
             return already_exclusive_instance_id
 
         loaded_instance_id = self._unload_other_models(model, context, known_payload=payload)
         if not loaded_instance_id:
             loaded_instance_id = self._load_model(model, context, clear_existing=False)
-        return self._verify_single_loaded_model(model, loaded_instance_id, context)
+        verified_instance_id = self._verify_single_loaded_model(model, loaded_instance_id, context)
+        self._remember_verified_model_instance(model, verified_instance_id)
+        return verified_instance_id
 
     def unload_model(self, model: str, context: str = "LM Studio model unload") -> bool:
         if _is_ollama_base_url(self.base_url):
@@ -949,6 +1432,7 @@ class _OpenAICompatibleClient:
     def _unload_instance(self, instance_id: str, model_label: str, context: str) -> bool:
         if _is_ollama_base_url(self.base_url):
             return False
+        self.clear_model_verification_cache()
         native_base_url = _lm_studio_native_base_url(self.base_url)
         request = urllib.request.Request(
             f"{native_base_url}/models/unload",
@@ -973,6 +1457,7 @@ class _OpenAICompatibleClient:
                 f"{context} timed out after {self.timeout_seconds}s unloading LM Studio model {model_label}"
             ) from exc
         self._forget_loaded_instance(native_base_url, model_label, instance_id)
+        self.clear_model_verification_cache()
         return True
 
     def _loaded_instance_id(self, model: str, context: str) -> str:
@@ -1015,10 +1500,46 @@ class _OpenAICompatibleClient:
     ) -> str:
         if clear_existing:
             self._unload_other_models(model, context, known_payload=known_payload)
+        self.clear_model_verification_cache()
         native_base_url = _lm_studio_native_base_url(self.base_url)
+        load_config = self._profile_load_config()
+        include_config = self._load_config_support_cache.get(native_base_url, True)
+        raw, used_load_config = self._post_model_load(
+            native_base_url,
+            model,
+            context,
+            load_config=load_config,
+            include_config=include_config,
+        )
+
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise ProviderResponseError(f"{context} returned non-JSON model load response from LM Studio.") from exc
+        if used_load_config:
+            _validate_lm_studio_load_config(self.profile_name, payload, context)
+        instance_id = str(payload.get("instance_id") or model).strip() or model
+        cached = dict(self._loaded_instance_cache.get(native_base_url) or {})
+        cached[model] = instance_id
+        cached[instance_id] = instance_id
+        self._loaded_instance_cache[native_base_url] = cached
+        return instance_id
+
+    def _post_model_load(
+        self,
+        native_base_url: str,
+        model: str,
+        context: str,
+        *,
+        load_config: Dict,
+        include_config: bool,
+    ) -> Tuple[str, bool]:
+        body = {"model": model}
+        if include_config and load_config:
+            body["config"] = load_config
         request = urllib.request.Request(
             f"{native_base_url}/models/load",
-            data=json.dumps({"model": model}).encode("utf-8"),
+            data=json.dumps(body).encode("utf-8"),
             headers=_request_headers(base_url=self.base_url, content_type="application/json"),
             method="POST",
         )
@@ -1027,6 +1548,18 @@ class _OpenAICompatibleClient:
                 raw = response.read().decode("utf-8")
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace") if exc.fp else str(exc)
+            if include_config and _lm_studio_rejected_load_config(detail):
+                # Older/newer LM Studio builds differ on whether /models/load accepts
+                # a config object. Keep the run moving and apply profile settings at
+                # inference time when load-time config is not supported.
+                self._load_config_support_cache[native_base_url] = False
+                return self._post_model_load(
+                    native_base_url,
+                    model,
+                    context,
+                    load_config=load_config,
+                    include_config=False,
+                )
             raise ProviderRequestError(f"{context} could not load LM Studio model {model}: HTTP {exc.code}: {detail}") from exc
         except urllib.error.URLError as exc:
             raise ProviderRequestError(
@@ -1036,17 +1569,8 @@ class _OpenAICompatibleClient:
             raise ProviderTransientError(
                 f"{context} timed out after {self.timeout_seconds}s loading LM Studio model {model}"
             ) from exc
-
-        try:
-            payload = json.loads(raw)
-        except json.JSONDecodeError as exc:
-            raise ProviderResponseError(f"{context} returned non-JSON model load response from LM Studio.") from exc
-        instance_id = str(payload.get("instance_id") or model).strip() or model
-        cached = dict(self._loaded_instance_cache.get(native_base_url) or {})
-        cached[model] = instance_id
-        cached[instance_id] = instance_id
-        self._loaded_instance_cache[native_base_url] = cached
-        return instance_id
+        self._load_config_support_cache[native_base_url] = include_config
+        return raw, include_config
 
     def _verify_single_loaded_model(self, model: str, instance_id: str, context: str) -> str:
         payload = self._models_payload(f"{context} exclusive-model verify")
@@ -1068,6 +1592,7 @@ class _OpenAICompatibleClient:
             rows = _loaded_model_instance_rows_from_payload(payload)
 
         if len(rows) == 1 and _loaded_instance_matches_model(rows[0], model):
+            self._remember_verified_model_instance(model, rows[0].instance_id)
             return rows[0].instance_id
 
         loaded_labels = ", ".join(row.instance_id for row in rows) or "none"
@@ -1075,6 +1600,28 @@ class _OpenAICompatibleClient:
             f"{context} blocked because LM Studio does not have exactly one loaded model. "
             f"Loaded instances: {loaded_labels}. Unload extra models in LM Studio and rerun."
         )
+
+    def _cached_verified_model_instance(self, model: str) -> str:
+        key = self._model_verification_cache_key(model)
+        instance_id, verified_at = self._model_verification_cache.get(key, ("", 0.0))
+        if not instance_id:
+            return ""
+        if time.monotonic() - verified_at <= self._model_verification_ttl_seconds:
+            return instance_id
+        self._model_verification_cache.pop(key, None)
+        return ""
+
+    def _remember_verified_model_instance(self, model: str, instance_id: str) -> None:
+        normalized_instance_id = str(instance_id or "").strip()
+        if not normalized_instance_id:
+            return
+        self._model_verification_cache[self._model_verification_cache_key(model)] = (
+            normalized_instance_id,
+            time.monotonic(),
+        )
+
+    def _model_verification_cache_key(self, model: str) -> Tuple[str, str]:
+        return (_lm_studio_native_base_url(self.base_url), str(model or "").strip())
 
     def _unload_other_models(
         self,
@@ -1090,6 +1637,7 @@ class _OpenAICompatibleClient:
         self._remember_loaded_instances(payload)
         loaded_rows = _loaded_model_instance_rows_from_payload(payload)
         kept_instance_id = _preferred_loaded_instance_id(loaded_rows, keep_model)
+        unloaded_any = False
         for loaded in loaded_rows:
             matches_keep = _loaded_instance_matches_model(loaded, keep_model)
             if matches_keep and loaded.instance_id == kept_instance_id:
@@ -1111,6 +1659,7 @@ class _OpenAICompatibleClient:
                     f"{loaded.model_id or loaded.instance_id} before loading {keep_model}: {exc}"
                 ) from exc
             if unloaded:
+                unloaded_any = True
                 continue
             payload = self._models_payload(f"{context} competing-model refresh")
             self._remember_loaded_instances(payload)
@@ -1120,6 +1669,8 @@ class _OpenAICompatibleClient:
                     f"{context} could not clear competing LM Studio model "
                     f"{loaded.model_id or loaded.instance_id} before loading {keep_model}."
                 )
+        if unloaded_any:
+            time.sleep(2)
         return kept_instance_id
 
     def _post_lm_studio_native_chat(
@@ -1129,6 +1680,7 @@ class _OpenAICompatibleClient:
         context: str,
         allow_tool_output_text: bool = False,
         retry_without_reasoning: bool = True,
+        unsupported_field_retries: int = 3,
     ) -> Tuple[str, _Usage, List[str]]:
         native_base_url = _lm_studio_native_base_url(self.base_url)
         request = urllib.request.Request(
@@ -1141,6 +1693,7 @@ class _OpenAICompatibleClient:
             with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
                 raw = response.read().decode("utf-8")
         except urllib.error.HTTPError as exc:
+            self.clear_model_verification_cache()
             detail = exc.read().decode("utf-8", errors="replace") if exc.fp else str(exc)
             if retry_without_reasoning and body.get("reasoning") and _is_reasoning_setting_error(detail):
                 retry_body = dict(body)
@@ -1150,6 +1703,36 @@ class _OpenAICompatibleClient:
                     context=context,
                     allow_tool_output_text=allow_tool_output_text,
                     retry_without_reasoning=False,
+                    unsupported_field_retries=unsupported_field_retries,
+                )
+            if body.get("chat_template_kwargs") and _is_chat_template_kwargs_error(detail):
+                self._warn_chat_template_kwargs_once(context)
+                retry_body = dict(body)
+                retry_body.pop("chat_template_kwargs", None)
+                return self._post_lm_studio_native_chat(
+                    retry_body,
+                    context=context,
+                    allow_tool_output_text=allow_tool_output_text,
+                    retry_without_reasoning=retry_without_reasoning,
+                    unsupported_field_retries=unsupported_field_retries,
+                )
+            retry_body = self._native_max_tokens_retry_body(body, detail)
+            if retry_body is not None:
+                return self._post_lm_studio_native_chat(
+                    retry_body,
+                    context=context,
+                    allow_tool_output_text=allow_tool_output_text,
+                    retry_without_reasoning=retry_without_reasoning,
+                    unsupported_field_retries=unsupported_field_retries,
+                )
+            retry_body = _unsupported_fields_retry_body(body, detail)
+            if retry_body is not None and unsupported_field_retries > 0:
+                return self._post_lm_studio_native_chat(
+                    retry_body,
+                    context=context,
+                    allow_tool_output_text=allow_tool_output_text,
+                    retry_without_reasoning=retry_without_reasoning,
+                    unsupported_field_retries=unsupported_field_retries - 1,
                 )
             if "invalid_api_key" in detail or "API token is required" in detail:
                 raise ProviderRequestError(
@@ -1164,20 +1747,45 @@ class _OpenAICompatibleClient:
                 ) from exc
             raise ProviderRequestError(f"{context} failed at {native_base_url}: HTTP {exc.code}: {detail}") from exc
         except urllib.error.URLError as exc:
+            self.clear_model_verification_cache()
             raise ProviderRequestError(
                 f"{context} could not reach LM Studio at {native_base_url}. "
                 "Start the local server or update the LM Studio server URL in Settings."
             ) from exc
         except TimeoutError as exc:
+            self.clear_model_verification_cache()
             raise ProviderTransientError(f"{context} timed out after {self.timeout_seconds}s at {native_base_url}") from exc
 
         try:
             payload = json.loads(raw)
         except json.JSONDecodeError as exc:
             raise ProviderResponseError(f"{context} returned non-JSON HTTP response from LM Studio.") from exc
+        self._log_native_max_token_field_once()
         return _native_chat_text_usage(payload, context=context, allow_tool_output_text=allow_tool_output_text)
 
-    def _post_lm_studio_structured_chat(self, body: Dict, *, context: str) -> Tuple[Dict, _Usage]:
+    def _native_max_tokens_retry_body(self, body: Dict, detail: str) -> Optional[Dict]:
+        current_field = _native_max_token_field_from_body(body)
+        if not current_field or not _is_max_token_field_error(detail, current_field):
+            return None
+        next_field = _next_native_max_token_field(current_field)
+        if not next_field:
+            return None
+        max_tokens = int(body.get(current_field) or 0)
+        retry_body = dict(body)
+        for field_name in _native_max_token_field_names():
+            retry_body.pop(field_name, None)
+        retry_body[next_field] = max_tokens
+        self._set_native_max_token_field(next_field)
+        return retry_body
+
+    def _post_lm_studio_structured_chat(
+        self,
+        body: Dict,
+        *,
+        context: str,
+        retry_without_chat_template_kwargs: bool = True,
+        unsupported_field_retries: int = 3,
+    ) -> Tuple[Dict, _Usage]:
         openai_base_url = _lm_studio_openai_base_url(self.base_url)
         request = urllib.request.Request(
             f"{openai_base_url}/chat/completions",
@@ -1190,6 +1798,28 @@ class _OpenAICompatibleClient:
                 raw = response.read().decode("utf-8")
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace") if exc.fp else str(exc)
+            if (
+                retry_without_chat_template_kwargs
+                and body.get("chat_template_kwargs")
+                and _is_chat_template_kwargs_error(detail)
+            ):
+                self._warn_chat_template_kwargs_once(context)
+                retry_body = dict(body)
+                retry_body.pop("chat_template_kwargs", None)
+                return self._post_lm_studio_structured_chat(
+                    retry_body,
+                    context=context,
+                    retry_without_chat_template_kwargs=False,
+                    unsupported_field_retries=unsupported_field_retries,
+                )
+            retry_body = _unsupported_fields_retry_body(body, detail)
+            if retry_body is not None and unsupported_field_retries > 0:
+                return self._post_lm_studio_structured_chat(
+                    retry_body,
+                    context=context,
+                    retry_without_chat_template_kwargs=retry_without_chat_template_kwargs,
+                    unsupported_field_retries=unsupported_field_retries - 1,
+                )
             if "invalid_api_key" in detail or "API token is required" in detail:
                 raise ProviderRequestError(
                     f"{context} needs a valid LM Studio API token. "
@@ -1220,11 +1850,24 @@ class _OpenAICompatibleClient:
         )
 
 
+def clear_lm_studio_model_verification_cache() -> None:
+    _OpenAICompatibleClient.clear_model_verification_cache()
+
+
 def _messages(prompt: str, *, system: str) -> List[Dict]:
     return [
-        {"role": "system", "content": system},
+        {"role": "system", "content": _system_prompt_no_think(system)},
         {"role": "user", "content": prompt},
     ]
+
+
+def _system_prompt_no_think(system: str) -> str:
+    clean = str(system or "").strip()
+    if not clean:
+        return "/no_think"
+    if "/no_think" in clean:
+        return clean
+    return f"{clean} /no_think"
 
 
 def _native_prompt_from_messages(messages: List[Dict]) -> Tuple[str, str]:
@@ -1392,6 +2035,86 @@ def _is_reasoning_setting_error(detail: str) -> bool:
     )
 
 
+def _is_chat_template_kwargs_error(detail: str) -> bool:
+    lowered = str(detail or "").lower()
+    return ("chat_template_kwargs" in lowered or "enable_thinking" in lowered) and (
+        "unsupported" in lowered
+        or "not supported" in lowered
+        or "unrecognized" in lowered
+        or "unknown" in lowered
+        or "invalid" in lowered
+        or "extra" in lowered
+    )
+
+
+def _unsupported_fields_retry_body(body: Dict, detail: str) -> Optional[Dict]:
+    fields = _unsupported_request_fields(detail)
+    if not fields:
+        return None
+    retry_body = dict(body)
+    removed = False
+    for field in fields:
+        if field in retry_body:
+            retry_body.pop(field, None)
+            removed = True
+    return retry_body if removed else None
+
+
+def _unsupported_request_fields(detail: str) -> List[str]:
+    text = str(detail or "")
+    lowered = text.lower()
+    if not any(marker in lowered for marker in ("unrecognized", "unknown", "unsupported", "not supported", "extra")):
+        return []
+    if not any(marker in lowered for marker in ("key", "field", "parameter")):
+        return []
+    fields = []
+    quoted_values = re.findall(r"'([^']+)'", text) + re.findall(r"\"([A-Za-z_][A-Za-z0-9_]*)\"", text)
+    for value in quoted_values:
+        field = value.strip()
+        if field and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", field):
+            fields.append(field)
+    ignored = {"error", "message", "type", "code"}
+    return [field for field in fields if field not in ignored]
+
+
+def _native_max_token_field_names() -> Tuple[str, ...]:
+    return ("max_tokens", "max_completion_tokens", "max_output_tokens")
+
+
+def _native_max_token_field_from_body(body: Dict) -> str:
+    for field_name in _native_max_token_field_names():
+        if field_name in body:
+            return field_name
+    return ""
+
+
+def _next_native_max_token_field(field_name: str) -> str:
+    fields = _native_max_token_field_names()
+    try:
+        index = fields.index(field_name)
+    except ValueError:
+        return ""
+    next_index = index + 1
+    if next_index >= len(fields):
+        return ""
+    return fields[next_index]
+
+
+def _is_max_token_field_error(detail: str, field_name: str) -> bool:
+    lowered = str(detail or "").lower()
+    if field_name.lower() not in lowered:
+        return False
+    return (
+        "unsupported" in lowered
+        or "not supported" in lowered
+        or "unrecognized" in lowered
+        or "unknown" in lowered
+        or "invalid" in lowered
+        or "extra" in lowered
+        or "not permitted" in lowered
+    )
+
+
 def _vision_input_items(request: AnalyzeLectureRequest, slides: List[Dict], prompt: str) -> List[Dict]:
     content = [{"type": "text", "content": prompt}]
     if request.lecture_dir:
@@ -1455,6 +2178,60 @@ def _native_chat_text_usage(
         input_tokens=int(stats.get("input_tokens") or 0),
         output_tokens=int(stats.get("total_output_tokens") or 0),
     ), tool_calls
+
+
+def _openai_chat_text_usage(raw: str, *, context: str) -> Tuple[str, _Usage]:
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ProviderResponseError(f"{context} returned non-JSON HTTP response from LM Studio.") from exc
+    choices = payload.get("choices") or []
+    if not choices:
+        raise ProviderResponseError(f"{context} returned no choices from LM Studio.")
+    message = choices[0].get("message") or {}
+    text = str(message.get("content") or "").strip()
+    if not text:
+        raise ProviderResponseError(f"{context} returned an empty response from LM Studio.")
+    usage = payload.get("usage") or {}
+    return text, _Usage(
+        input_tokens=int(usage.get("prompt_tokens") or 0),
+        output_tokens=int(usage.get("completion_tokens") or 0),
+    )
+
+
+def _normalize_lm_studio_profile(profile_name: str) -> str:
+    normalized = str(profile_name or SUMMARIZATION_HQ_PROFILE).strip().upper()
+    if normalized not in LM_STUDIO_PROFILES:
+        return SUMMARIZATION_HQ_PROFILE
+    return normalized
+
+
+def _validate_lm_studio_load_config(profile_name: str, payload: Dict, context: str) -> None:
+    applied = payload.get("load_config") or payload.get("config") or {}
+    if not isinstance(applied, dict):
+        return
+    expected_context = LM_STUDIO_PROFILES[_normalize_lm_studio_profile(profile_name)]["load"].get("context_length")
+    if expected_context is None or applied.get("context_length") is None:
+        return
+    try:
+        applied_context = int(applied.get("context_length"))
+    except (TypeError, ValueError):
+        return
+    if applied_context != int(expected_context):
+        raise ProviderResponseError(
+            f"{context} loaded LM Studio with context_length={applied_context}, expected {expected_context}. "
+            "Check LM Studio JIT loading and model profile settings."
+        )
+
+
+def _lm_studio_rejected_load_config(detail: str) -> bool:
+    lowered = str(detail or "").lower()
+    return "config" in lowered and (
+        "unrecognized key" in lowered
+        or "unrecognized_keys" in lowered
+        or "unknown field" in lowered
+        or "extra inputs" in lowered
+    )
 
 
 def _structured_json_from_message(message: Dict, *, context: str) -> Dict:
@@ -1548,7 +2325,7 @@ def _normalize_resources(payload: Dict) -> Dict:
             }
         )
     return {
-        "resources": resources[:4],
+        "resources": resources[:DIRECT_RESOURCE_OUTPUT_LIMIT],
         "warnings": list(payload.get("warnings") or []),
     }
 
@@ -1954,14 +2731,14 @@ def _resources_from_gathered_context(text: str) -> List[Dict]:
         summary = _clean_resource_text(match.group("summary"))
         url = _clean_resource_url(match.group("url"))
         _append_resource(resources, seen_urls, title=title, url=url, summary=summary)
-        if len(resources) >= 4:
+        if len(resources) >= DIRECT_RESOURCE_OUTPUT_LIMIT:
             break
-    if len(resources) >= 4:
-        return resources[:4]
+    if len(resources) >= DIRECT_RESOURCE_OUTPUT_LIMIT:
+        return resources[:DIRECT_RESOURCE_OUTPUT_LIMIT]
 
     blocks = re.split(r"(?=\n\s*(?:#{2,3}\s*)?\d+[\).\s-])", f"\n{clean}")
     for block in blocks:
-        if len(resources) >= 4:
+        if len(resources) >= DIRECT_RESOURCE_OUTPUT_LIMIT:
             break
         url_match = re.search(r"https?://[^\s\\\"<>]+", block)
         if not url_match:
@@ -1973,11 +2750,11 @@ def _resources_from_gathered_context(text: str) -> List[Dict]:
         summary = _resource_summary_from_block(block)
         _append_resource(resources, seen_urls, title=title, url=url, summary=summary)
 
-    if len(resources) >= 4:
-        return resources[:4]
+    if len(resources) >= DIRECT_RESOURCE_OUTPUT_LIMIT:
+        return resources[:DIRECT_RESOURCE_OUTPUT_LIMIT]
 
     for match in re.finditer(r"https?://[^\s\\\"<>]+", clean):
-        if len(resources) >= 4:
+        if len(resources) >= DIRECT_RESOURCE_OUTPUT_LIMIT:
             break
         url = _clean_resource_url(match.group(0))
         if not url or url in seen_urls:
@@ -2145,6 +2922,33 @@ def _outline_headings_text_from_values(headings: List[str]) -> str:
     return "\n".join(f"- {heading}" for heading in cleaned) if cleaned else "- No outline headings available."
 
 
+def _planner_queries_text(queries: List[str]) -> str:
+    cleaned = _clean_resource_queries(queries)
+    if not cleaned:
+        return "no planner queries were available"
+    return "; ".join(f"{index}. {query}" for index, query in enumerate(cleaned, start=1))
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _start_step_timer() -> Dict[str, object]:
+    return {"started_at": _utc_now_iso(), "monotonic": time.monotonic()}
+
+
+def _finish_step_timer(timer: Dict[str, object], **metadata) -> Dict:
+    payload = {
+        "started_at": str(timer.get("started_at") or _utc_now_iso()),
+        "finished_at": _utc_now_iso(),
+        "elapsed_seconds": round(max(0.0, time.monotonic() - float(timer.get("monotonic") or time.monotonic())), 3),
+    }
+    for key, value in metadata.items():
+        if value is not None:
+            payload[key] = value
+    return payload
+
+
 def _transcript_chunks(text: str) -> List[str]:
     clean = str(text or "").strip()
     if not clean:
@@ -2188,28 +2992,86 @@ def _split_long_text(text: str, max_chars: int) -> List[str]:
     return chunks
 
 
-def _slide_batches(slides: List[Dict]) -> List[List[Dict]]:
-    return [slides[index : index + SLIDE_BATCH_SIZE] for index in range(0, len(slides), SLIDE_BATCH_SIZE)]
+def _configured_slide_batch_size() -> int:
+    raw = str(os.environ.get("LECTURE_SLIDE_BATCH_SIZE") or "").strip()
+    if not raw:
+        return DEFAULT_SLIDE_BATCH_SIZE
+    try:
+        value = int(raw)
+    except ValueError:
+        return DEFAULT_SLIDE_BATCH_SIZE
+    return max(1, min(value, MAX_SLIDE_BATCH_SIZE))
+
+
+def _slide_batches(slides: List[Dict], batch_size: Optional[int] = None) -> List[List[Dict]]:
+    size = max(1, int(batch_size or _configured_slide_batch_size()))
+    return [slides[index : index + size] for index in range(0, len(slides), size)]
+
+
+def _slide_batch_max_tokens(slides: List[Dict]) -> int:
+    return DEFAULT_ROLE_MAX_TOKENS["slide_analysis"]
+
+
+def _slide_analysis_from_extraction_metadata(request: AnalyzeLectureRequest, model: str) -> Optional[Dict]:
+    slides = request.slides or []
+    if not slides or not all(str(slide.get("description") or "").strip() for slide in slides):
+        return None
+    analysis = []
+    for index, slide in enumerate(slides, start=1):
+        slide_id = _slide_id(slide, fallback=index)
+        description = str(slide.get("description") or "").strip()
+        title = str(slide.get("title") or "").strip()
+        tags = ["smart-slide-extraction", f"slide-{slide_id}"]
+        for key in ("build_stage", "layout"):
+            value = str(slide.get(key) or "").strip()
+            if value:
+                tags.append(value)
+        summary = " ".join(part for part in [title, description] if part).strip() or description
+        analysis.append(
+            {
+                "slide_id": slide_id,
+                "descriptive_filename": slide.get("filename") or f"slide_{slide_id:04d}.png",
+                "caption": description,
+                "summary": _trim_text(summary, 420),
+                "tags": tags,
+                "instructor_commentary": _batch_transcript_context(request, [slide]),
+            }
+        )
+    return {
+        "slide_analysis": analysis,
+        "warnings": [
+            f"Slide analysis used smart slide extraction metadata from local LM Studio vision model: {model}",
+            "Slide analysis skipped a second raw-image pass because slide title and description were already extracted.",
+        ],
+        "input_tokens": max(1, sum(_estimate_tokens(str(slide.get("description") or "")) for slide in slides)),
+        "output_tokens": max(1, len(analysis) * 80),
+        "batch_count": 0,
+        "retry_count": 0,
+    }
 
 
 def _slide_batch_prompt(request: AnalyzeLectureRequest, slides: List[Dict]) -> str:
     return f"""
-Return JSON only with field slide_analysis.
+{JSON_ONLY_INSTRUCTION}
+Return field slide_analysis.
 Return one slide_analysis item for every slide listed.
 Each item must include: slide_id, descriptive_filename, caption, summary, tags, instructor_commentary.
 
 Analyze the attached image for each listed slide_id. For caption and summary, describe only what is visible in
 the image. Do not use transcript context to guess visual content.
+For each attached image, use only the visual content for that same slide_id. Do not mix visual details between slide_ids.
 
 If the image is a speaker-only frame, transition screen, video-player screen, or otherwise not an actual slide,
 say that directly in caption and summary. Do not borrow the topic from nearby transcript.
+Treat low-value frames as discard candidates: use tags such as "low-value", "speaker-only", "transition",
+"video-player", "duplicate", or "not-slide" when they apply, and keep their summary brief instead of inventing
+educational value.
 
-Use the transcript context only for instructor_commentary.
-
+=== VISUAL ANALYSIS INPUT (use for caption, summary, tags) ===
 Slides:
 {_slide_index_text(slides)}
 
-Transcript context for instructor_commentary only:
+=== TRANSCRIPT CONTEXT (use ONLY for instructor_commentary, never for caption/summary/tags) ===
 {_batch_transcript_context(request, slides)}
 """.strip()
 
@@ -2217,11 +3079,22 @@ Transcript context for instructor_commentary only:
 def _slide_index_text(slides: List[Dict]) -> str:
     if not slides:
         return "No slides."
-    return "\n".join(
-        f"- slide_id={int(slide.get('id') or index)} timestamp={float(slide.get('timestamp_seconds') or 0.0):.1f}s "
-        f"segments={slide.get('linked_segment_ids') or []}"
-        for index, slide in enumerate(slides, start=1)
-    )
+    lines = []
+    for index, slide in enumerate(slides, start=1):
+        metadata = []
+        for label, key in (("title", "title"), ("stage", "build_stage"), ("layout", "layout")):
+            value = str(slide.get(key) or "").strip()
+            if value:
+                metadata.append(f"{label}={value}")
+        description = str(slide.get("description") or "").strip()
+        if description:
+            metadata.append(f"description={_trim_text(description, 220)}")
+        metadata_text = f" {' | '.join(metadata)}" if metadata else ""
+        lines.append(
+            f"- slide_id={int(slide.get('id') or index)} timestamp={float(slide.get('timestamp_seconds') or 0.0):.1f}s "
+            f"segments={slide.get('linked_segment_ids') or []}{metadata_text}"
+        )
+    return "\n".join(lines)
 
 
 def _missing_slide_ids(items: List[Dict], slides: List[Dict]) -> List[int]:
@@ -2241,6 +3114,10 @@ def _slides_with_ids(slides: List[Dict], slide_ids: List[int]) -> List[Dict]:
         for index, slide in enumerate(slides, start=1)
         if _slide_id(slide, fallback=index) in wanted
     ]
+
+
+def _slide_ids(slides: List[Dict]) -> List[int]:
+    return [_slide_id(slide, fallback=index) for index, slide in enumerate(slides, start=1)]
 
 
 def _slide_id(slide: Dict, *, fallback: int) -> int:
@@ -2282,6 +3159,27 @@ def _estimate_tokens(text: str) -> int:
 
 def _sum_tokens(key: str, *payloads: Dict) -> int:
     return sum(int(payload.get(key) or 0) for payload in payloads)
+
+
+def _token_usage_entry_from_payload(payload: Dict) -> Dict[str, int]:
+    return _token_usage_entry(
+        payload.get("input_tokens") if isinstance(payload, dict) else 0,
+        payload.get("output_tokens") if isinstance(payload, dict) else 0,
+    )
+
+
+def _token_usage_entry_from_usage(usage: "_Usage") -> Dict[str, int]:
+    return _token_usage_entry(usage.input_tokens, usage.output_tokens)
+
+
+def _token_usage_entry(input_tokens, output_tokens) -> Dict[str, int]:
+    input_count = max(0, int(input_tokens or 0))
+    output_count = max(0, int(output_tokens or 0))
+    return {
+        "input_tokens": input_count,
+        "output_tokens": output_count,
+        "total_tokens": input_count + output_count,
+    }
 
 
 def _normalize_base_url(base_url: str) -> str:

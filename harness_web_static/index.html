@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Vision Harness</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <header class="app-header">
+      <div>
+        <h1>Vision Harness</h1>
+        <p>Test local LM Studio vision models against the same image set, one model and one image at a time.</p>
+      </div>
+      <div class="header-controls">
+        <div class="test-box">
+          <label for="testSelect">Vision Test</label>
+          <div class="test-row">
+            <select id="testSelect"></select>
+            <button id="newTest" class="secondary">New Test</button>
+          </div>
+          <span id="testStatus" class="token-status">Loading tests...</span>
+        </div>
+        <div class="server-box">
+        <label for="baseUrl">LM Studio URL</label>
+        <input id="baseUrl" type="url" value="http://192.168.86.22:1234" />
+        <label for="apiToken">API Token</label>
+        <div class="token-row">
+          <input id="apiToken" type="password" autocomplete="off" placeholder="Paste token" />
+          <button id="saveToken" class="secondary">Save Token</button>
+        </div>
+        <span id="tokenStatus" class="token-status">No token saved</span>
+        </div>
+      </div>
+    </header>
+
+    <section id="newTestPanel" class="modal-layer" hidden>
+      <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="newTestTitle">
+        <div class="panel-heading">
+          <div>
+            <h2 id="newTestTitle">Create Vision Test</h2>
+            <p>Reuse the current images and Codex baseline, but keep new model runs in a separate result set.</p>
+          </div>
+        </div>
+        <div class="form-grid">
+          <label for="newTestName">Name</label>
+          <input id="newTestName" type="text" value="Vision Test #2" />
+          <label for="newTestPrompt">Prompt file</label>
+          <input id="newTestPrompt" type="text" value="classify_v2" />
+        </div>
+        <div id="newTestDetail" class="muted-line"></div>
+        <div class="modal-actions">
+          <button id="cancelNewTest" class="secondary">Cancel</button>
+          <button id="createNewTest" class="primary">Create Test</button>
+        </div>
+      </div>
+    </section>
+
+    <nav class="tabs" aria-label="Harness sections">
+      <button class="tab active" data-tab="setup">Setup</button>
+      <button class="tab" data-tab="run">Run Log</button>
+      <button class="tab" data-tab="results" disabled>Results</button>
+    </nav>
+
+    <main>
+      <section id="setup" class="tab-panel active">
+        <div class="workspace-grid">
+          <section class="panel">
+            <div class="panel-heading">
+              <h2>Images</h2>
+              <span id="imageCount" class="status-pill">No folder selected</span>
+            </div>
+            <label id="dropZone" class="drop-zone" for="folderInput">
+              <input id="folderInput" type="file" webkitdirectory directory multiple accept=".jpg,.jpeg,.png,image/jpeg,image/png" />
+              <strong>Choose or drag a folder of images</strong>
+              <span>JPEG and PNG files are uploaded to this local harness session and sorted by filename.</span>
+            </label>
+            <div id="imageList" class="file-list empty">No images loaded.</div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-heading">
+              <h2>Models</h2>
+              <button id="refreshModels" class="secondary">Refresh Models</button>
+            </div>
+            <label class="check-row">
+              <input id="showAllModels" type="checkbox" />
+              <span>Show non-vision or uncertain models</span>
+            </label>
+            <div id="modelList" class="model-list empty">Refresh models after LM Studio is running.</div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-heading">
+              <h2>Profile</h2>
+              <select id="profileSelect"></select>
+            </div>
+            <div id="profileDetail" class="profile-detail"></div>
+          </section>
+
+          <section class="panel prompt-panel">
+            <div class="panel-heading">
+              <h2>Prompt</h2>
+              <div class="inline-actions">
+                <select id="promptSelect"></select>
+                <input id="promptName" class="compact-input" type="text" placeholder="Prompt name" />
+                <button id="editPrompt" class="secondary">Enable Editing</button>
+                <button id="savePrompt" class="primary" hidden>Save Prompt</button>
+                <button id="savePromptAs" class="secondary" hidden>Save As New</button>
+                <button id="deletePrompt" class="danger">Delete Prompt</button>
+              </div>
+            </div>
+            <textarea id="promptText" spellcheck="false" readonly></textarea>
+            <div id="promptHash" class="muted-line"></div>
+          </section>
+        </div>
+
+        <section class="run-bar">
+          <div>
+            <strong id="readyState">Waiting for images and models.</strong>
+            <span id="readyDetail">Select a folder, refresh models, then choose at least one vision model.</span>
+          </div>
+          <button id="startRun" class="primary large" disabled>Run Test</button>
+        </section>
+      </section>
+
+      <section id="run" class="tab-panel">
+        <section class="panel">
+          <div class="panel-heading">
+            <h2>Run Progress</h2>
+            <span id="jobState" class="status-pill">Idle</span>
+          </div>
+          <div class="progress-frame">
+            <div id="progressBar" class="progress-bar"></div>
+          </div>
+          <div class="run-meta">
+            <span id="currentModel">Model: none</span>
+            <span id="currentImage">Image: none</span>
+          </div>
+          <div id="logList" class="log-list">No run started.</div>
+        </section>
+      </section>
+
+      <section id="results" class="tab-panel">
+        <section class="panel">
+          <div class="panel-heading">
+            <h2>Results</h2>
+            <div class="inline-actions">
+              <button id="reloadResults" class="secondary">Reload Results</button>
+              <button id="clearResults" class="danger">Clear Test Results</button>
+            </div>
+          </div>
+          <div id="resultsSummary" class="summary-grid"></div>
+          <div class="table-wrap">
+            <table id="resultsTable">
+              <thead>
+                <tr>
+                  <th><button class="sort-header" data-sort="run_id">Run</button></th>
+                  <th><button class="sort-header" data-sort="run_timestamp">Started</button></th>
+                  <th><button class="sort-header" data-sort="total_time_sec">Elapsed</button></th>
+                  <th><button class="sort-header" data-sort="model">Model</button></th>
+                  <th><button class="sort-header" data-sort="prompt">Prompt</button></th>
+                  <th><button class="sort-header" data-sort="profile">Profile</button></th>
+                  <th><button class="sort-header" data-sort="total_images">Images</button></th>
+                  <th><button class="sort-header" data-sort="avg_tokens_per_sec">Avg tok/s</button></th>
+                  <th><button class="sort-header" data-sort="codex_agreement_rate">Agreement</button></th>
+                  <th><button class="sort-header" data-sort="error_count">Errors</button></th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+          <details class="report-box">
+            <summary>Markdown report preview</summary>
+            <pre id="reportPreview"></pre>
+          </details>
+        </section>
+      </section>
+    </main>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>

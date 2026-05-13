@@ -7,6 +7,8 @@ const root = dirname(dirname(fileURLToPath(import.meta.url)));
 
 const javascriptFiles = [
   "src/main.js",
+  "src/token_metrics.js",
+  "scripts/test-token-metrics.mjs",
   "scripts/build-frontend.mjs",
   "scripts/clean-tauri-target.mjs",
   "scripts/dev-server.mjs",

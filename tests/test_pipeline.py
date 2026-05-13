@@ -24,6 +24,7 @@ from lecture_processor.pipeline import (
     enrich_processed_batch,
     normalized_video_output_path,
 )
+from lecture_processor.slides import SlideExtractionResult
 
 
 class FakeInspector:
@@ -132,6 +133,19 @@ class FakeSlideExtractor:
         output_dir.mkdir(parents=True, exist_ok=True)
         (output_dir / "slide_0001_00-00-05.png").write_text("png", encoding="utf-8")
         return 1
+
+
+class FakeCountingSlideExtractor(FakeSlideExtractor):
+    def extract_with_result(self, media_path, output_dir, timestamp_scale=1.0, stop_requested=None):
+        self.scales.append(timestamp_scale)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        for index in range(1, 3):
+            (output_dir / f"slide_{index:04d}_00-00-0{index}.png").write_text("png", encoding="utf-8")
+        return SlideExtractionResult(
+            saved_count=2,
+            candidate_count=9,
+            warnings=["Smart slide extraction kept 2 unique slide(s) from 9 changed frame(s)."],
+        )
 
 
 class ParallelBarrierNormalizer:
@@ -460,6 +474,37 @@ class BatchProcessorTests(unittest.TestCase):
             srt = (output / "lecture" / "transcript.srt").read_text(encoding="utf-8")
             self.assertIn("00:00:10,000 --> 00:00:20,000", srt)
             self.assertTrue((output / "lecture" / "lecture.mp4").exists())
+
+    def test_slide_step_reports_captured_images_and_kept_slides(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "lecture.mov"
+            source.write_text("video", encoding="utf-8")
+            output = root / "out"
+            events = []
+
+            summary = BatchProcessor(
+                config=BatchConfig(input_dir=root, output_dir=output),
+                inspector=FakeInspector({"lecture.mov": 120.0}),
+                normalizer=FakeNormalizer(),
+                audio_extractor=FakeAudioExtractor(),
+                transcriber=FakeTranscriber(),
+                slide_extractor=FakeCountingSlideExtractor(),
+                progress_callback=events.append,
+            ).run()
+
+            self.assertEqual(summary.completed, 1)
+            self.assertEqual(summary.results[0].slide_count, 2)
+            slide_finished = [
+                event
+                for event in events
+                if event["kind"] == "step_finished" and event.get("step") == "Slides"
+            ][0]
+            self.assertEqual(slide_finished["captured_image_count"], 9)
+            self.assertEqual(slide_finished["slide_count"], 2)
+            log = (output / "lecture" / "processing_log.txt").read_text(encoding="utf-8")
+            self.assertIn("9 images captured; 2 slides kept", log)
+            self.assertIn("Smart slide extraction kept 2 unique slide(s) from 9 changed frame(s).", log)
 
     def test_2x_runs_normalize_and_audio_in_parallel_before_transcription(self):
         with tempfile.TemporaryDirectory() as tmp:

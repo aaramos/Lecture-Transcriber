@@ -92,6 +92,9 @@ def enrich_lecture_artifact(
         elapsed_seconds=round(enrichment["elapsed_seconds"], 1),
         input_tokens=enrichment["input_token_estimate"],
         output_tokens=enrichment["output_token_estimate"],
+        step_timings=enrichment["step_timings"],
+        step_token_usage=enrichment["step_token_usage"],
+        step_outcomes=enrichment.get("step_outcomes", {}),
     )
     return artifact
 
@@ -172,6 +175,9 @@ def enrich_lecture_artifacts_staged(
             elapsed_seconds=round(enrichment["elapsed_seconds"], 1),
             input_tokens=enrichment["input_token_estimate"],
             output_tokens=enrichment["output_token_estimate"],
+            step_timings=enrichment["step_timings"],
+            step_token_usage=enrichment["step_token_usage"],
+            step_outcomes=enrichment.get("step_outcomes", {}),
         )
     return enriched_artifacts
 
@@ -226,7 +232,7 @@ def _enrichment_payload(
     elapsed_seconds: float,
 ) -> Dict:
     payload = {
-        "schema_version": "1.0.0",
+        "schema_version": "1.1.0",
         "provider": provider,
         "model": model,
         "prompt_version": "v1",
@@ -242,6 +248,9 @@ def _enrichment_payload(
         "slide_analysis": response.slide_analysis,
         "resources": response.resources,
         "warnings": response.warnings,
+        "step_timings": response.step_timings,
+        "step_token_usage": response.step_token_usage,
+        "step_outcomes": response.step_outcomes,
     }
     if model_routing:
         payload["model_routing"] = model_routing

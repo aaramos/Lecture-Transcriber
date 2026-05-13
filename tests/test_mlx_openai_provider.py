@@ -12,15 +12,19 @@ from lecture_processor.ai.providers.base import (
     ProviderTransientError,
 )
 from lecture_processor.ai.providers.mlx_openai import (
+    DEFAULT_SLIDE_BATCH_SIZE,
     MLXTextProvider,
     MLXVisionProvider,
     _OpenAICompatibleClient,
     _Usage,
+    _configured_slide_batch_size,
     _lm_studio_native_base_url,
     _lm_studio_openai_base_url,
     _loaded_model_instances_from_payload,
     _model_ids_from_payload,
     _resources_from_gathered_context,
+    _slide_batch_max_tokens,
+    _slide_batches,
     _structured_json_from_message,
 )
 
@@ -28,6 +32,10 @@ from lecture_processor.ai.providers.mlx_openai import (
 class MLXOpenAIProviderTests(unittest.TestCase):
     def setUp(self):
         _OpenAICompatibleClient._loaded_instance_cache = {}
+        _OpenAICompatibleClient._load_config_support_cache = {}
+        _OpenAICompatibleClient.clear_model_verification_cache()
+        _OpenAICompatibleClient._set_native_max_token_field("max_tokens")
+        _OpenAICompatibleClient._chat_template_kwargs_warning_logged = False
 
     def test_text_provider_parses_openai_compatible_overview_response(self):
         provider = MLXTextProvider(base_url="http://local.test/v1", model="default")
@@ -47,7 +55,7 @@ class MLXOpenAIProviderTests(unittest.TestCase):
         self.assertGreater(overview["input_tokens"], 0)
         self.assertIn("local LM Studio text", " ".join(overview["warnings"]))
 
-    def test_overview_prompt_trims_transcript_to_16000_chars(self):
+    def test_overview_prompt_trims_transcript_to_100000_chars(self):
         provider = MLXTextProvider(base_url="http://local.test/v1", model="default")
         provider._client = FakeClient(
             {
@@ -58,11 +66,11 @@ class MLXOpenAIProviderTests(unittest.TestCase):
             }
         )
 
-        provider.analyze_overview(_request(transcript_text="word " * 5000))
+        provider.analyze_overview(_request(transcript_text="word " * 25000))
 
         prompt = provider._client.messages[1]["content"]
         self.assertIn("[trimmed]", prompt)
-        self.assertLess(len(prompt), 17000)
+        self.assertLess(len(prompt), 101000)
 
     def test_transcript_prompt_requests_readable_paragraphs(self):
         provider = MLXTextProvider(base_url="http://local.test/v1", model="default")
@@ -74,6 +82,24 @@ class MLXOpenAIProviderTests(unittest.TestCase):
         prompt = provider._client.messages[1]["content"]
         self.assertIn("Add paragraph breaks every 2-5 sentences", prompt)
         self.assertIn("not one large blob", prompt)
+
+    def test_slide_batch_size_env_groups_slides(self):
+        slides = [{"id": index} for index in range(1, 8)]
+
+        with mock.patch.dict("os.environ", {"LECTURE_SLIDE_BATCH_SIZE": "3"}, clear=False):
+            batches = _slide_batches(slides)
+
+        self.assertEqual([3, 3, 1], [len(batch) for batch in batches])
+        self.assertEqual([[1, 2, 3], [4, 5, 6], [7]], [[slide["id"] for slide in batch] for batch in batches])
+
+    def test_invalid_slide_batch_size_env_uses_default(self):
+        with mock.patch.dict("os.environ", {"LECTURE_SLIDE_BATCH_SIZE": "not-a-number"}, clear=False):
+            self.assertEqual(DEFAULT_SLIDE_BATCH_SIZE, _configured_slide_batch_size())
+
+    def test_slide_batch_max_tokens_scales_with_batch_size(self):
+        self.assertEqual(4096, _slide_batch_max_tokens([{"id": 1}]))
+        self.assertEqual(4096, _slide_batch_max_tokens([{"id": index} for index in range(4)]))
+        self.assertEqual(4096, _slide_batch_max_tokens([{"id": index} for index in range(12)]))
 
     def test_vision_provider_sends_slide_image_as_native_data_url(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -147,6 +173,60 @@ class MLXOpenAIProviderTests(unittest.TestCase):
                 self.assertEqual((1600, 900), source_image.size)
             self.assertEqual(original_size, slide_path.stat().st_size)
 
+    def test_vision_provider_accepts_complete_slide_batch(self):
+        provider = MLXVisionProvider(base_url="http://local.test/v1", model="default")
+        provider._client = SequenceImageClient(
+            [
+                {
+                    "slide_analysis": [
+                        _slide_payload(1, "Slide one."),
+                        _slide_payload(2, "Slide two."),
+                        _slide_payload(3, "Slide three."),
+                    ],
+                    "warnings": [],
+                }
+            ]
+        )
+
+        with mock.patch.dict("os.environ", {"LECTURE_SLIDE_BATCH_SIZE": "3"}, clear=False):
+            result = provider.analyze_slides(_multi_slide_request(3))
+
+        self.assertEqual(["Slide one.", "Slide two.", "Slide three."], [
+            item["caption"] for item in result["slide_analysis"]
+        ])
+        self.assertEqual(1, len(provider._client.image_inputs))
+        self.assertEqual([4096], provider._client.max_tokens)
+        self.assertIn("Do not mix visual details between slide_ids", provider._client.image_inputs[0][0]["content"])
+        self.assertIn("low-value", provider._client.image_inputs[0][0]["content"])
+
+    def test_vision_provider_uses_smart_slide_metadata_without_second_image_pass(self):
+        request = AnalyzeLectureRequest(
+            lecture_id="lecture",
+            transcript_text="speaker discusses the slide",
+            segments=[{"id": 1, "text": "speaker discusses the slide"}],
+            slides=[
+                {
+                    "id": 1,
+                    "filename": "slide_0001.png",
+                    "linked_segment_ids": [1],
+                    "title": "Questions for Business Leaders",
+                    "build_stage": "full",
+                    "layout": "full-screen",
+                    "description": "A slide with four columns of business questions.",
+                }
+            ],
+            duration_minutes=2.0,
+        )
+        provider = MLXVisionProvider(base_url="http://local.test/v1", model="gemma")
+        provider._client = SequenceImageClient([])
+
+        result = provider.analyze_slides(request)
+
+        self.assertEqual("A slide with four columns of business questions.", result["slide_analysis"][0]["caption"])
+        self.assertIn("Questions for Business Leaders", result["slide_analysis"][0]["summary"])
+        self.assertEqual([], provider._client.image_inputs)
+        self.assertIn("skipped a second raw-image pass", " ".join(result["warnings"]))
+
     def test_vision_provider_retries_missing_slide_ids_once(self):
         request = AnalyzeLectureRequest(
             lecture_id="lecture",
@@ -201,6 +281,50 @@ class MLXOpenAIProviderTests(unittest.TestCase):
         self.assertIn("slide_id=2", provider._client.image_inputs[1][0]["content"])
         self.assertNotIn("slide_id=1", provider._client.image_inputs[1][0]["content"])
 
+    def test_batched_slide_failure_tries_solo_before_local_fallback(self):
+        provider = MLXVisionProvider(base_url="http://local.test/v1", model="default")
+        provider._client = SequenceImageClient(
+            [
+                ProviderResponseError("batch failed"),
+                {"slide_analysis": [_slide_payload(1, "Recovered slide one.")], "warnings": []},
+                ProviderResponseError("solo failed"),
+            ]
+        )
+
+        with mock.patch.dict("os.environ", {"LECTURE_SLIDE_BATCH_SIZE": "2"}, clear=False):
+            result = provider.analyze_slides(_multi_slide_request(2))
+
+        captions = [item["caption"] for item in result["slide_analysis"]]
+        warnings = " ".join(result["warnings"])
+        self.assertEqual("Recovered slide one.", captions[0])
+        self.assertIn("slide-2", result["slide_analysis"][1]["tags"])
+        self.assertEqual(3, len(provider._client.image_inputs))
+        self.assertIn("retrying each slide separately", warnings)
+        self.assertIn("Slide 2 used local fallback", warnings)
+
+    def test_slide_retries_do_not_duplicate_output_rows(self):
+        provider = MLXVisionProvider(base_url="http://local.test/v1", model="default")
+        provider._client = SequenceImageClient(
+            [
+                {"slide_analysis": [_slide_payload(1, "Slide one.")], "warnings": []},
+                {
+                    "slide_analysis": [
+                        _slide_payload(1, "Duplicate slide one."),
+                        _slide_payload(2, "Recovered slide two."),
+                    ],
+                    "warnings": [],
+                },
+            ]
+        )
+
+        with mock.patch.dict("os.environ", {"LECTURE_SLIDE_BATCH_SIZE": "2"}, clear=False):
+            result = provider.analyze_slides(_multi_slide_request(2))
+
+        self.assertEqual([1, 2], [item["slide_id"] for item in result["slide_analysis"]])
+        self.assertEqual(["Slide one.", "Recovered slide two."], [
+            item["caption"] for item in result["slide_analysis"]
+        ])
+
     def test_image_chat_uses_lm_studio_native_api_shape(self):
         captured = {}
 
@@ -253,9 +377,11 @@ class MLXOpenAIProviderTests(unittest.TestCase):
             ],
             captured["urls"],
         )
-        self.assertEqual("Return JSON.", captured["body"]["system_prompt"])
+        self.assertEqual("Return JSON. /no_think", captured["body"]["system_prompt"])
         self.assertEqual({"type": "text", "content": "Describe slide 1."}, captured["body"]["input"][0])
         self.assertEqual("data:image/png;base64,aW1hZ2U=", captured["body"]["input"][1]["data_url"])
+        self.assertEqual(32, captured["body"]["max_tokens"])
+        self.assertNotIn("chat_template_kwargs", captured["body"])
         self.assertNotIn("context_length", captured["body"])
         self.assertNotIn("reasoning", captured["body"])
         self.assertNotIn("messages", captured["body"])
@@ -295,6 +421,146 @@ class MLXOpenAIProviderTests(unittest.TestCase):
         self.assertEqual(1, usage.input_tokens)
         self.assertIs(captured["body"]["think"], False)
         self.assertIs(captured["body"]["stream"], False)
+
+    def test_native_chat_falls_back_when_max_tokens_field_is_rejected(self):
+        captured = {"chat_bodies": []}
+
+        class FakeResponse:
+            def __init__(self, payload):
+                self.payload = payload
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self):
+                return json.dumps(self.payload).encode("utf-8")
+
+        class FakeErrorBody:
+            def read(self):
+                return b'{"error":"Unknown field max_tokens"}'
+
+            def close(self):
+                return None
+
+        def fake_urlopen(request, timeout):
+            if request.full_url.endswith("/models"):
+                return FakeResponse({"models": [{"type": "llm", "key": "gemma", "loaded_instances": [{"id": "gemma"}]}]})
+            body = json.loads(request.data.decode("utf-8"))
+            captured["chat_bodies"].append(body)
+            if "max_tokens" in body:
+                raise urllib.error.HTTPError(request.full_url, 400, "Bad Request", {}, FakeErrorBody())
+            return FakeResponse({"output": [{"type": "message", "content": "ok"}], "stats": {}})
+
+        client = _OpenAICompatibleClient("http://localhost:1234/v1", "gemma", 30, disable_thinking=True)
+        with mock.patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            text, _usage, _tools = client.chat_text_with_lm_studio_native(
+                "Hello.",
+                system="System.",
+                max_tokens=32,
+                temperature=0.0,
+                context="test",
+            )
+
+        self.assertEqual("ok", text)
+        self.assertIn("max_tokens", captured["chat_bodies"][0])
+        self.assertIn("max_completion_tokens", captured["chat_bodies"][1])
+        self.assertEqual("max_completion_tokens", _OpenAICompatibleClient._native_max_token_field)
+
+    def test_native_chat_retries_without_chat_template_kwargs_when_rejected(self):
+        captured = {"chat_bodies": []}
+
+        class FakeResponse:
+            def __init__(self, payload):
+                self.payload = payload
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self):
+                return json.dumps(self.payload).encode("utf-8")
+
+        class FakeErrorBody:
+            def read(self):
+                return b'{"error":"Unknown field chat_template_kwargs"}'
+
+            def close(self):
+                return None
+
+        def fake_urlopen(request, timeout):
+            if request.full_url.endswith("/models"):
+                return FakeResponse({"models": [{"type": "llm", "key": "gemma", "loaded_instances": [{"id": "gemma"}]}]})
+            body = json.loads(request.data.decode("utf-8"))
+            captured["chat_bodies"].append(body)
+            if "chat_template_kwargs" in body:
+                raise urllib.error.HTTPError(request.full_url, 400, "Bad Request", {}, FakeErrorBody())
+            return FakeResponse({"output": [{"type": "message", "content": "ok"}], "stats": {}})
+
+        client = _OpenAICompatibleClient("http://localhost:1234/v1", "gemma", 30, disable_thinking=True)
+        with mock.patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            text, _usage, _tools = client.chat_text_with_lm_studio_native(
+                "Hello.",
+                system="System.",
+                max_tokens=32,
+                temperature=0.0,
+                context="test",
+            )
+
+        self.assertEqual("ok", text)
+        self.assertIn("chat_template_kwargs", captured["chat_bodies"][0])
+        self.assertNotIn("chat_template_kwargs", captured["chat_bodies"][1])
+
+    def test_native_chat_retries_without_unsupported_inference_fields(self):
+        captured = {"chat_bodies": []}
+
+        class FakeResponse:
+            def __init__(self, payload):
+                self.payload = payload
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self):
+                return json.dumps(self.payload).encode("utf-8")
+
+        class FakeErrorBody:
+            def read(self):
+                return b'{"error":{"message":"Unrecognized key(s) in object: \'seed\', \'frequency_penalty\'"}}'
+
+            def close(self):
+                return None
+
+        def fake_urlopen(request, timeout):
+            if request.full_url.endswith("/models"):
+                return FakeResponse({"models": [{"type": "llm", "key": "gemma", "loaded_instances": [{"id": "gemma"}]}]})
+            body = json.loads(request.data.decode("utf-8"))
+            captured["chat_bodies"].append(body)
+            if "seed" in body or "frequency_penalty" in body:
+                raise urllib.error.HTTPError(request.full_url, 400, "Bad Request", {}, FakeErrorBody())
+            return FakeResponse({"output": [{"type": "message", "content": "ok"}], "stats": {}})
+
+        client = _OpenAICompatibleClient("http://localhost:1234/v1", "gemma", 30)
+        with mock.patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            text, _usage = client.chat_text(
+                [{"role": "user", "content": "Hello."}],
+                max_tokens=32,
+                temperature=0.0,
+                context="test",
+            )
+
+        self.assertEqual("ok", text)
+        self.assertIn("seed", captured["chat_bodies"][0])
+        self.assertIn("frequency_penalty", captured["chat_bodies"][0])
+        self.assertNotIn("seed", captured["chat_bodies"][1])
+        self.assertNotIn("frequency_penalty", captured["chat_bodies"][1])
 
     def test_default_model_uses_first_available_lm_studio_model(self):
         captured = {}
@@ -436,8 +702,10 @@ class MLXOpenAIProviderTests(unittest.TestCase):
         self.assertEqual(["brave_web_search"], tools)
         self.assertEqual("http://localhost:1234/api/v1/chat", captured["url"])
         self.assertEqual("gemma-live", captured["body"]["model"])
-        self.assertEqual("Search first.", captured["body"]["system_prompt"])
+        self.assertEqual("Search first. /no_think", captured["body"]["system_prompt"])
         self.assertEqual("Find resources.", captured["body"]["input"])
+        self.assertEqual(256, captured["body"]["max_tokens"])
+        self.assertNotIn("chat_template_kwargs", captured["body"])
         self.assertNotIn("reasoning", captured["body"])
         self.assertNotIn("Authorization", captured["headers"])
         integration_ids = [item["id"] for item in captured["body"]["integrations"]]
@@ -524,6 +792,7 @@ class MLXOpenAIProviderTests(unittest.TestCase):
         self.assertEqual("ok", text)
         self.assertEqual(1, len(captured["chat_bodies"]))
         self.assertNotIn("reasoning", captured["chat_bodies"][0])
+        self.assertNotIn("chat_template_kwargs", captured["chat_bodies"][0])
 
     def test_structured_json_parser_reads_message_content(self):
         parsed = _structured_json_from_message(
@@ -705,6 +974,29 @@ class MLXOpenAIProviderTests(unittest.TestCase):
             direct_search.call_args.kwargs["queries"],
         )
 
+    def test_direct_resource_formatter_allows_six_resources(self):
+        resources_payload = [
+            {
+                "title": f"Resource {index}",
+                "url": f"https://example.com/resource-{index}",
+                "summary": f"Useful source {index}.",
+                "source_quality": "medium",
+            }
+            for index in range(1, 7)
+        ]
+        provider = MLXTextProvider(base_url="http://local.test/v1", model="default")
+        provider._client = FakeClient({"resources": resources_payload, "warnings": []})
+
+        with mock.patch(
+            "lecture_processor.ai.providers.mlx_openai._direct_resource_candidates",
+            return_value=(resources_payload, []),
+        ):
+            result = provider.analyze_resources(_request())
+
+        self.assertEqual(6, len(result["resources"]))
+        self.assertEqual("Resource 6", result["resources"][-1]["title"])
+        self.assertIn("up to 6", provider._client.format_prompt)
+
     def test_resource_query_planner_failure_uses_heuristic_queries(self):
         provider = MLXTextProvider(base_url="http://local.test/v1", model="default")
         provider._client = FailingPlannerClient()
@@ -715,6 +1007,7 @@ class MLXOpenAIProviderTests(unittest.TestCase):
 
         self.assertEqual([], direct_search.call_args.kwargs["queries"])
         self.assertIn("Resource query planner failed", " ".join(resources["warnings"]))
+        self.assertIn("Run these searches in order", provider._client.tool_prompt)
 
     def test_resources_fallback_extracts_verified_tool_results_when_json_format_fails(self):
         provider = MLXTextProvider(base_url="http://local.test/v1", model="default")
@@ -985,7 +1278,9 @@ class MLXOpenAIProviderTests(unittest.TestCase):
                     context="test",
                 )
 
-        self.assertEqual([{"model": "gemma"}], captured["load_bodies"])
+        self.assertEqual("gemma", captured["load_bodies"][0]["model"])
+        self.assertEqual(65536, captured["load_bodies"][0]["config"]["context_length"])
+        self.assertTrue(captured["load_bodies"][0]["config"]["flash_attention"])
         self.assertEqual(["gemma-live", "gemma-live"], captured["chat_models"])
         self.assertEqual(
             [
@@ -993,11 +1288,140 @@ class MLXOpenAIProviderTests(unittest.TestCase):
                 "http://localhost:1234/api/v1/models/load",
                 "http://localhost:1234/api/v1/models",
                 "http://localhost:1234/api/v1/chat",
-                "http://localhost:1234/api/v1/models",
                 "http://localhost:1234/api/v1/chat",
             ],
             captured["urls"],
         )
+
+    def test_lm_studio_load_retries_without_config_when_rejected(self):
+        captured = {"load_bodies": [], "chat_models": []}
+        state = {"model_loaded": False}
+
+        class FakeResponse:
+            def __init__(self, payload):
+                self.payload = payload
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self):
+                return json.dumps(self.payload).encode("utf-8")
+
+        class FakeErrorBody:
+            def read(self):
+                return b"{\"error\":{\"message\":\"Unrecognized key(s) in object: 'config'\",\"code\":\"unrecognized_keys\"}}"
+
+            def close(self):
+                return None
+
+        def fake_urlopen(request, timeout):
+            if request.full_url.endswith("/models"):
+                loaded_instances = [{"id": "gemma-live"}] if state["model_loaded"] else []
+                return FakeResponse({"models": [{"type": "llm", "key": "gemma", "loaded_instances": loaded_instances}]})
+            if request.full_url.endswith("/models/load"):
+                body = json.loads(request.data.decode("utf-8"))
+                captured["load_bodies"].append(body)
+                if "config" in body:
+                    raise urllib.error.HTTPError(request.full_url, 400, "Bad Request", {}, FakeErrorBody())
+                state["model_loaded"] = True
+                return FakeResponse({"type": "llm", "instance_id": "gemma-live", "status": "loaded"})
+            body = json.loads(request.data.decode("utf-8"))
+            captured["chat_models"].append(body["model"])
+            return FakeResponse({"output": [{"type": "message", "content": "ok"}], "stats": {}})
+
+        client = _OpenAICompatibleClient("http://localhost:1234/v1", "gemma", 30)
+        with mock.patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            client.chat_text_with_lm_studio_native(
+                "Hello.",
+                system="System.",
+                max_tokens=32,
+                temperature=0.0,
+                context="test",
+            )
+
+        self.assertEqual("gemma", captured["load_bodies"][0]["model"])
+        self.assertIn("config", captured["load_bodies"][0])
+        self.assertEqual({"model": "gemma"}, captured["load_bodies"][1])
+        self.assertEqual(["gemma-live"], captured["chat_models"])
+        self.assertFalse(_OpenAICompatibleClient._load_config_support_cache["http://localhost:1234/api/v1"])
+
+    def test_openai_image_chat_loads_model_but_sends_model_id(self):
+        captured = {"urls": [], "body": None}
+        state = {"model_loaded": False}
+
+        class FakeResponse:
+            def __init__(self, payload):
+                self.payload = payload
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self):
+                return json.dumps(self.payload).encode("utf-8")
+
+        def fake_urlopen(request, timeout):
+            captured["urls"].append(request.full_url)
+            if request.full_url.endswith("/models"):
+                loaded_instances = [{"id": "gemma-live"}] if state["model_loaded"] else []
+                return FakeResponse({"models": [{"type": "llm", "key": "gemma", "loaded_instances": loaded_instances}]})
+            if request.full_url.endswith("/models/load"):
+                state["model_loaded"] = True
+                return FakeResponse({"instance_id": "gemma-live", "status": "loaded"})
+            captured["body"] = json.loads(request.data.decode("utf-8"))
+            return FakeResponse(
+                {
+                    "choices": [{"message": {"content": "DESCRIPTION: x\nVERDICT: NOT SLIDE"}}],
+                    "usage": {"prompt_tokens": 1, "completion_tokens": 2},
+                }
+            )
+
+        client = _OpenAICompatibleClient("http://localhost:1234/v1", "gemma", 30)
+        with mock.patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            text, usage = client.chat_text_with_openai_images(
+                [{"role": "user", "content": [{"type": "text", "text": "classify"}]}],
+                max_tokens=32,
+                temperature=0.0,
+                context="test classifier",
+            )
+
+        self.assertEqual("DESCRIPTION: x\nVERDICT: NOT SLIDE", text)
+        self.assertEqual(2, usage.output_tokens)
+        self.assertEqual("gemma", captured["body"]["model"])
+        self.assertIn("http://localhost:1234/api/v1/models/load", captured["urls"])
+        self.assertEqual("http://localhost:1234/v1/chat/completions", captured["urls"][-1])
+
+    def test_lm_studio_load_clears_verification_cache(self):
+        captured = {}
+        native_base = _lm_studio_native_base_url("http://localhost:1234/v1")
+        _OpenAICompatibleClient._model_verification_cache[(native_base, "old-model")] = ("old-live", 1.0)
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self):
+                return json.dumps({"instance_id": "gemma-live"}).encode("utf-8")
+
+        def fake_urlopen(request, timeout):
+            captured["url"] = request.full_url
+            return FakeResponse()
+
+        client = _OpenAICompatibleClient("http://localhost:1234/v1", "gemma", 30)
+        with mock.patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            instance_id = client._load_model("gemma", "test", clear_existing=False)
+
+        self.assertEqual("gemma-live", instance_id)
+        self.assertEqual("http://localhost:1234/api/v1/models/load", captured["url"])
+        self.assertEqual({}, _OpenAICompatibleClient._model_verification_cache)
 
     def test_lm_studio_unloads_competing_model_even_when_requested_model_is_loaded(self):
         captured = {"urls": [], "unload_bodies": [], "chat_models": []}
@@ -1202,6 +1626,7 @@ class MLXOpenAIProviderTests(unittest.TestCase):
             "gemma": "gemma-live",
             "gemma-live": "gemma-live",
         }
+        _OpenAICompatibleClient._model_verification_cache[(native_base, "gemma")] = ("gemma-live", 1.0)
 
         class FakeResponse:
             def __enter__(self):
@@ -1227,6 +1652,7 @@ class MLXOpenAIProviderTests(unittest.TestCase):
         self.assertEqual({"instance_id": "gemma-live"}, captured["body"])
         self.assertNotIn("gemma", _OpenAICompatibleClient._loaded_instance_cache[native_base])
         self.assertNotIn("gemma-live", _OpenAICompatibleClient._loaded_instance_cache[native_base])
+        self.assertEqual({}, _OpenAICompatibleClient._model_verification_cache)
 
 
 class FakeClient:
@@ -1332,10 +1758,15 @@ class SequenceImageClient:
     def __init__(self, payloads):
         self.payloads = list(payloads)
         self.image_inputs = []
+        self.max_tokens = []
 
     def chat_json_with_lm_studio_images(self, input_items, *, system, max_tokens, temperature, context):
         self.image_inputs.append(input_items)
-        return self.payloads.pop(0), _Usage(input_tokens=12, output_tokens=8)
+        self.max_tokens.append(max_tokens)
+        payload = self.payloads.pop(0)
+        if isinstance(payload, Exception):
+            raise payload
+        return payload, _Usage(input_tokens=12, output_tokens=8)
 
 
 def _request(*, lecture_dir=None, transcript_text="hello local models"):
@@ -1347,6 +1778,28 @@ def _request(*, lecture_dir=None, transcript_text="hello local models"):
         duration_minutes=2.0,
         lecture_dir=lecture_dir,
     )
+
+
+def _multi_slide_request(count):
+    slides = [{"id": index, "linked_segment_ids": [index]} for index in range(1, count + 1)]
+    return AnalyzeLectureRequest(
+        lecture_id="lecture",
+        transcript_text=" ".join(f"slide {index}" for index in range(1, count + 1)),
+        segments=[{"id": index, "text": f"slide {index}"} for index in range(1, count + 1)],
+        slides=slides,
+        duration_minutes=float(count),
+    )
+
+
+def _slide_payload(slide_id, caption):
+    return {
+        "slide_id": slide_id,
+        "descriptive_filename": f"slide_{slide_id:04d}.png",
+        "caption": caption,
+        "summary": caption,
+        "tags": [f"slide-{slide_id}"],
+        "instructor_commentary": f"Notes for slide {slide_id}.",
+    }
 
 
 if __name__ == "__main__":

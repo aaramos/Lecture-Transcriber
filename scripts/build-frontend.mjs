@@ -9,6 +9,7 @@ await rm(dist, { force: true, recursive: true });
 await mkdir(join(dist, "src"), { recursive: true });
 await cp(join(root, "index.html"), join(dist, "index.html"));
 await cp(join(root, "src", "main.js"), join(dist, "src", "main.js"));
+await cp(join(root, "src", "token_metrics.js"), join(dist, "src", "token_metrics.js"));
 await cp(join(root, "src", "styles.css"), join(dist, "src", "styles.css"));
 
 console.log("Built frontend to dist/");

@@ -103,6 +103,7 @@ class GeminiProvider:
         cache = _load_chunk_cache(cache_path, request, self.model)
         warnings = list(cache.get("warnings") or [])
         usage = {"input": 0, "output": 0}
+        step_token_usage: Dict[str, Dict] = {}
         transcript_chunks = _transcript_chunks(request) if include_transcript else []
         slides_for_gemini, filtered_slides = (
             _filter_slides_for_gemini(request) if include_slides else ([], {})
@@ -121,14 +122,31 @@ class GeminiProvider:
         )
         completed_steps = 0
 
-        def emit(step: str) -> None:
+        def add_step_usage(key: str, response) -> Dict[str, int]:
+            entry = _usage_entry_from_response(response)
+            if entry["total_tokens"] <= 0:
+                return entry
+            current = step_token_usage.get(key) or {"input_tokens": 0, "output_tokens": 0}
+            step_token_usage[key] = _token_usage_entry(
+                int(current.get("input_tokens") or 0) + entry["input_tokens"],
+                int(current.get("output_tokens") or 0) + entry["output_tokens"],
+            )
+            return entry
+
+        def emit(step: str, step_usage: Optional[Dict[str, int]] = None) -> None:
+            payload = {
+                "step": step,
+                "completed": completed_steps,
+                "total": total_steps,
+                "input_tokens": usage["input"],
+                "output_tokens": usage["output"],
+            }
+            if step_usage:
+                payload["step_input_tokens"] = step_usage["input_tokens"]
+                payload["step_output_tokens"] = step_usage["output_tokens"]
             _emit_progress(
                 progress_callback,
-                step=step,
-                completed=completed_steps,
-                total=total_steps,
-                input_tokens=usage["input"],
-                output_tokens=usage["output"],
+                **payload,
             )
 
         chunks = cache.setdefault("chunks", {})
@@ -136,6 +154,7 @@ class GeminiProvider:
         if should_generate_overview:
             overview = chunks.get("overview")
         if should_generate_overview and not overview:
+            overview_step_usage = {}
             try:
                 overview, response = self._generate_json(
                     _overview_prompt(request),
@@ -146,6 +165,7 @@ class GeminiProvider:
                     response_schema=_overview_response_schema(),
                 )
                 _add_usage(usage, response)
+                overview_step_usage = add_step_usage("overview", response)
             except ProviderResponseError as exc:
                 overview = {
                     "title": _fallback_title(request),
@@ -165,7 +185,7 @@ class GeminiProvider:
         warnings.extend(overview.get("warnings") or [])
         if should_generate_overview:
             completed_steps += 1
-            emit("overview")
+            emit("overview", locals().get("overview_step_usage"))
 
         transcript_cache = chunks.setdefault("transcript", {})
         slide_cache = chunks.setdefault("slides", {})
@@ -236,14 +256,17 @@ class GeminiProvider:
                     if kind == "transcript":
                         transcript_results[index] = payload
                         step = f"transcript {index}/{len(transcript_chunks)}"
+                        step_usage = add_step_usage("transcript_cleanup", response)
                     elif kind == "slides":
                         slide_results[index] = payload
                         step = f"slides {index}/{len(slide_batches)}"
+                        step_usage = add_step_usage("slide_analysis", response)
                     else:
                         resources = payload
                         step = "resources"
+                        step_usage = add_step_usage("resource_formatter", response)
                     completed_steps += 1
-                    emit(step)
+                    emit(step, step_usage)
 
         formatted_parts = [
             str(transcript_results.get(chunk["index"], {}).get("formatted_transcript") or chunk["text"]).strip()
@@ -272,6 +295,7 @@ class GeminiProvider:
             output_token_estimate=usage["output"],
             raw_response_id="chunked",
             warnings=_dedupe_warnings(warnings),
+            step_token_usage=step_token_usage,
         )
 
     def _analyze_transcript_chunk(
@@ -1056,7 +1080,7 @@ Transcript chunk:
 
 def _slide_batch_prompt(request: AnalyzeLectureRequest, slides: List[Dict], overview: Dict) -> str:
     slide_lines = "\n".join(
-        f"- Slide {slide.get('id')}: {slide.get('filename')} @{slide.get('timestamp_seconds', 0):.1f}s"
+        _slide_prompt_line(slide)
         for slide in slides
     )
     context = "\n\n".join(
@@ -1093,6 +1117,19 @@ Slides in this batch:
 Nearby transcript:
 {context}
 """.strip()
+
+
+def _slide_prompt_line(slide: Dict) -> str:
+    metadata = []
+    for label, key in (("title", "title"), ("stage", "build_stage"), ("layout", "layout")):
+        value = str(slide.get(key) or "").strip()
+        if value:
+            metadata.append(f"{label}={value}")
+    description = str(slide.get("description") or "").strip()
+    if description:
+        metadata.append(f"description={description[:220]}")
+    metadata_text = f" | {' | '.join(metadata)}" if metadata else ""
+    return f"- Slide {slide.get('id')}: {slide.get('filename')} @{slide.get('timestamp_seconds', 0):.1f}s{metadata_text}"
 
 
 def _resources_prompt(request: AnalyzeLectureRequest, overview: Dict) -> str:
@@ -1614,6 +1651,26 @@ def _add_usage(usage: Dict[str, int], response) -> None:
         return
     usage["input"] += int(getattr(metadata, "prompt_token_count", 0) or 0)
     usage["output"] += int(getattr(metadata, "candidates_token_count", 0) or 0)
+
+
+def _usage_entry_from_response(response) -> Dict[str, int]:
+    metadata = getattr(response, "usage_metadata", None)
+    if not metadata:
+        return _token_usage_entry(0, 0)
+    return _token_usage_entry(
+        int(getattr(metadata, "prompt_token_count", 0) or 0),
+        int(getattr(metadata, "candidates_token_count", 0) or 0),
+    )
+
+
+def _token_usage_entry(input_tokens: int, output_tokens: int) -> Dict[str, int]:
+    input_count = max(0, int(input_tokens or 0))
+    output_count = max(0, int(output_tokens or 0))
+    return {
+        "input_tokens": input_count,
+        "output_tokens": output_count,
+        "total_tokens": input_count + output_count,
+    }
 
 
 class _UsageTotals:

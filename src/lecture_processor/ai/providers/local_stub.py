@@ -22,19 +22,28 @@ class LocalStubProvider:
 
     def analyze_lecture(self, request: AnalyzeLectureRequest) -> AnalyzeLectureResponse:
         overview = local_overview(request, self.model)
+        transcript = local_formatted_transcript(request, self.model)
+        slides = local_slide_analysis(request, self.model)
+        resources = local_resources(request, self.model)
         return AnalyzeLectureResponse(
             title=overview["title"],
             executive_summary=overview["executive_summary"],
             outline=overview["outline"],
-            formatted_transcript=local_formatted_transcript(request, self.model)["formatted_transcript"],
-            slide_analysis=local_slide_analysis(request, self.model)["slide_analysis"],
-            resources=local_resources(request, self.model)["resources"],
+            formatted_transcript=transcript["formatted_transcript"],
+            slide_analysis=slides["slide_analysis"],
+            resources=resources["resources"],
             input_token_estimate=max(1, len(request.transcript_text.split())),
             output_token_estimate=300,
             raw_response_id="local-stub",
             warnings=[
                 "Local model stub was used. Replace this route with a real local model when configuration is ready."
             ],
+            step_token_usage={
+                "overview": _token_usage_entry(overview),
+                "transcript_cleanup": _token_usage_entry(transcript),
+                "slide_analysis": _token_usage_entry(slides),
+                "resource_formatter": _token_usage_entry(resources),
+            },
         )
 
 
@@ -47,6 +56,8 @@ def local_overview(request: AnalyzeLectureRequest, model: str) -> Dict:
         ),
         "outline": _outline_from_slides(request),
         "warnings": [f"Overview used local stub model: {model}"],
+        "input_tokens": _estimate_tokens(request.transcript_text),
+        "output_tokens": 80,
     }
 
 
@@ -54,6 +65,8 @@ def local_formatted_transcript(request: AnalyzeLectureRequest, model: str) -> Di
     return {
         "formatted_transcript": " ".join(str(request.transcript_text or "").split()),
         "warnings": [f"Transcript editing used local stub model: {model}"],
+        "input_tokens": _estimate_tokens(request.transcript_text),
+        "output_tokens": _estimate_tokens(request.transcript_text),
     }
 
 
@@ -74,6 +87,8 @@ def local_slide_analysis(request: AnalyzeLectureRequest, model: str) -> Dict:
     return {
         "slide_analysis": analysis,
         "warnings": [f"Slide analysis used local stub model: {model}"],
+        "input_tokens": max(1, len(slides) * 40),
+        "output_tokens": max(1, len(analysis) * 80),
     }
 
 
@@ -81,6 +96,8 @@ def local_resources(_request: AnalyzeLectureRequest, model: str) -> Dict:
     return {
         "resources": [],
         "warnings": [f"Resources used local stub model: {model}; no web resources were generated."],
+        "input_tokens": 40,
+        "output_tokens": 20,
     }
 
 
@@ -121,6 +138,20 @@ def _title_from_transcript(request: AnalyzeLectureRequest) -> str:
     return request.lecture_id.replace("_", " ").strip().title() or "Untitled Lecture"
 
 
+def _token_usage_entry(payload: Dict) -> Dict[str, int]:
+    input_tokens = max(0, int(payload.get("input_tokens") or 0))
+    output_tokens = max(0, int(payload.get("output_tokens") or 0))
+    return {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "total_tokens": input_tokens + output_tokens,
+    }
+
+
+def _estimate_tokens(text: str) -> int:
+    return max(1, len(str(text or "")) // 4)
+
+
 def _outline_from_slides(request: AnalyzeLectureRequest) -> List[Dict]:
     slides = request.slides or []
     if not slides:
@@ -138,13 +169,21 @@ def _outline_from_slides(request: AnalyzeLectureRequest) -> List[Dict]:
 def _slide_note(request: AnalyzeLectureRequest, slide: Dict, index: int) -> Dict:
     slide_id = int(slide.get("id") or index)
     commentary = _commentary_for_slide(request, slide)
-    summary = commentary if len(commentary) <= 260 else commentary[:257].rsplit(" ", 1)[0] + "..."
+    description = str(slide.get("description") or "").strip()
+    title = str(slide.get("title") or "").strip()
+    summary_source = " ".join(part for part in [title, description] if part) or commentary
+    summary = summary_source if len(summary_source) <= 260 else summary_source[:257].rsplit(" ", 1)[0] + "..."
+    tags = ["lecture", "local-stub", f"slide-{slide_id}"]
+    for key in ("build_stage", "layout"):
+        value = str(slide.get(key) or "").strip()
+        if value:
+            tags.append(value)
     return {
         "slide_id": slide_id,
         "descriptive_filename": f"slide_{slide_id:04d}_local_stub.png",
-        "caption": None,
+        "caption": description or None,
         "summary": summary,
-        "tags": ["lecture", "local-stub", f"slide-{slide_id}"],
+        "tags": tags,
         "instructor_commentary": commentary,
     }
 

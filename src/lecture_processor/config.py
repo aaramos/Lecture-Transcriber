@@ -128,6 +128,7 @@ class BatchConfig:
     mlx_text_base_url: str = field(default_factory=default_local_text_base_url)
     mlx_vision_base_url: str = field(default_factory=default_local_vision_base_url)
     mlx_request_timeout_seconds: int = 120
+    mlx_disable_thinking: bool = False
     skip_ai_enrichment_reason: str = ""
     gemini_max_concurrency: int = 3
     render_html: bool = True

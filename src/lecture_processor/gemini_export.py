@@ -129,28 +129,51 @@ def _legacy_slides(slides_dir: Path, segments: List[Dict]) -> List[Dict]:
     if not slides_dir.exists():
         return []
     slides = []
-    for index, path in enumerate(sorted(slides_dir.glob("*.png")), start=1):
-        timestamp = _slide_timestamp(path.name)
+    slide_paths = sorted(slides_dir.glob("*.png"))
+    slide_timestamps = [_slide_timestamp(path.name) for path in slide_paths]
+    for index, path in enumerate(slide_paths, start=1):
+        timestamp = slide_timestamps[index - 1]
+        next_timestamp = slide_timestamps[index] if index < len(slide_timestamps) else None
         slides.append(
             {
                 "id": index,
                 "filename": path.name,
                 "relative_path": f"slides/{path.name}",
                 "timestamp_seconds": timestamp,
-                "linked_segment_ids": _linked_segment_ids(segments, timestamp),
+                "linked_segment_ids": _linked_segment_ids(segments, timestamp, next_timestamp),
             }
         )
     return slides
 
 
-def _linked_segment_ids(segments: List[Dict], timestamp: float) -> List[int]:
-    window_start = max(0.0, timestamp - 45.0)
-    window_end = timestamp + 120.0
+def _linked_segment_ids(segments: List[Dict], timestamp: float, next_timestamp: Optional[float] = None) -> List[int]:
+    window_start = max(0.0, float(timestamp or 0.0))
+    transcript_end = max((float(segment.get("end", 0.0)) for segment in segments), default=window_start)
+    window_end = float(next_timestamp) if next_timestamp is not None and next_timestamp > window_start else transcript_end
+    if window_end <= window_start:
+        window_end = window_start
     linked = []
     for segment in segments:
-        if float(segment.get("end", 0.0)) >= window_start and float(segment.get("start", 0.0)) <= window_end:
+        if float(segment.get("end", 0.0)) > window_start and float(segment.get("start", 0.0)) < window_end:
             linked.append(int(segment.get("id", 0)))
-    return linked[:12]
+    if linked:
+        return linked
+    fallback_id = _segment_id_at_or_after(segments, window_start)
+    return [fallback_id] if fallback_id is not None else []
+
+
+def _segment_id_at_or_after(segments: List[Dict], timestamp: float) -> Optional[int]:
+    for segment in segments:
+        start = float(segment.get("start", 0.0))
+        end = float(segment.get("end", 0.0))
+        if start <= timestamp <= end:
+            return int(segment.get("id", 0))
+    for segment in segments:
+        if float(segment.get("start", 0.0)) >= timestamp:
+            return int(segment.get("id", 0))
+    if segments:
+        return int(segments[-1].get("id", 0))
+    return None
 
 
 def _slide_timestamp(filename: str) -> float:

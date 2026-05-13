@@ -8,6 +8,16 @@ __pycache__/
 .venv/
 .tools/
 .models/
+.harness_backups/
+.harness_sessions/
+.harness_tests/
+.harness_review_sheets/
+results.json
+report.md
+Test Slides*/
+Test Slides*.zip
+Test Slides*.html
+lecture_ai_pipeline_handoff_*.zip
 handoff/
 node_modules/
 venv/

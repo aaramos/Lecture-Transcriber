@@ -1,4 +1,5 @@
 import hashlib
+import json
 import platform
 import re
 import socket
@@ -152,8 +153,12 @@ def build_slide_records(slides_dir: Path, transcript: TranscriptResult) -> List[
     if not slides_dir.exists():
         return []
     records = []
-    for index, path in enumerate(sorted(slides_dir.glob("*.png")), start=1):
-        timestamp = _slide_timestamp(path.name)
+    slide_paths = sorted(slides_dir.glob("*.png"))
+    slide_timestamps = [_slide_timestamp(path.name) for path in slide_paths]
+    for index, path in enumerate(slide_paths, start=1):
+        timestamp = slide_timestamps[index - 1]
+        next_timestamp = slide_timestamps[index] if index < len(slide_timestamps) else None
+        metadata = _slide_metadata(path)
         records.append(
             {
                 "id": index,
@@ -161,16 +166,44 @@ def build_slide_records(slides_dir: Path, transcript: TranscriptResult) -> List[
                 "relative_path": f"slides/{path.name}",
                 "thumbnail_path": None,
                 "timestamp_seconds": timestamp,
+                "title": metadata.get("title"),
+                "build_stage": metadata.get("build_stage"),
+                "layout": metadata.get("layout"),
+                "description": metadata.get("description"),
+                "slide_analysis": None,
                 "image": {
                     "width": _image_size(path)[0],
                     "height": _image_size(path)[1],
                     "byte_size": _stat_or_none(path)["byte_size"],
                     "sha256": _sha256_file(path),
                 },
-                "linked_segment_ids": _linked_segment_ids(transcript, timestamp),
+                "linked_segment_ids": _linked_segment_ids(transcript, timestamp, next_timestamp),
             }
         )
     return records
+
+
+def _slide_metadata(path: Path) -> Dict:
+    sidecar = path.with_suffix(".json")
+    if not sidecar.exists():
+        return {}
+    try:
+        payload = json.loads(sidecar.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    return {
+        "title": _clean_optional_string(payload.get("title")),
+        "build_stage": _clean_optional_string(payload.get("build_stage")),
+        "layout": _clean_optional_string(payload.get("layout")),
+        "description": _clean_optional_string(payload.get("description")),
+    }
+
+
+def _clean_optional_string(value) -> Optional[str]:
+    text = str(value or "").strip()
+    return text or None
 
 
 def write_batch_artifact(
@@ -226,6 +259,7 @@ def build_batch_artifact(
             "mlx_text_base_url": config.mlx_text_base_url,
             "mlx_vision_base_url": config.mlx_vision_base_url,
             "mlx_request_timeout_seconds": config.mlx_request_timeout_seconds,
+            "mlx_disable_thinking": config.mlx_disable_thinking,
             "render_html": config.render_html,
         },
         "lectures": lectures,
@@ -324,16 +358,34 @@ def _slide_timestamp(filename: str) -> float:
     return float(hours * 3600 + minutes * 60 + seconds)
 
 
-def _linked_segment_ids(transcript: TranscriptResult, timestamp: float) -> List[int]:
+def _linked_segment_ids(transcript: TranscriptResult, timestamp: float, next_timestamp: Optional[float] = None) -> List[int]:
     if not transcript.segments:
         return []
-    window_start = max(0.0, timestamp - 45.0)
-    window_end = timestamp + 120.0
+    window_start = max(0.0, float(timestamp or 0.0))
+    transcript_end = max((segment.end for segment in transcript.segments), default=window_start)
+    window_end = float(next_timestamp) if next_timestamp is not None and next_timestamp > window_start else transcript_end
+    if window_end <= window_start:
+        window_end = window_start
     linked = []
     for index, segment in enumerate(transcript.segments):
-        if segment.end >= window_start and segment.start <= window_end:
+        if segment.end > window_start and segment.start < window_end:
             linked.append(index)
-    return linked[:12]
+    if linked:
+        return linked
+    fallback_id = _segment_id_at_or_after(transcript, window_start)
+    return [fallback_id] if fallback_id is not None else []
+
+
+def _segment_id_at_or_after(transcript: TranscriptResult, timestamp: float) -> Optional[int]:
+    for index, segment in enumerate(transcript.segments):
+        if segment.start <= timestamp <= segment.end:
+            return index
+    for index, segment in enumerate(transcript.segments):
+        if segment.start >= timestamp:
+            return index
+    if transcript.segments:
+        return len(transcript.segments) - 1
+    return None
 
 
 def _resolved_transcription_engine(metadata: Dict, config: BatchConfig) -> str:

@@ -1,3 +1,5 @@
+import { formatTokenCount, tokenMetricLabel } from "./token_metrics.js";
+
 const invoke = window.__TAURI__?.core?.invoke;
 
 if (!invoke) {
@@ -37,6 +39,18 @@ const STEP_SHORT_LABELS = {
 };
 
 const AI_STEP_ORDER = ["AIOverview", "AITranscript", "AISlides", "AIResources"];
+const AI_STEP_TOKEN_KEYS = {
+  overview: "AIOverview",
+  transcript: "AITranscript",
+  transcript_cleanup: "AITranscript",
+  slides: "AISlides",
+  slide_analysis: "AISlides",
+  resources: "AIResources",
+  resource_planner: "AIResources",
+  resource_search: "AIResources",
+  resource_formatter: "AIResources",
+};
+const AI_OUTCOME_PRIORITY = ["fallback", "metadata_used", "skipped", "success"];
 const STEP_ORDER = [
   "Import",
   "Probe",
@@ -156,6 +170,7 @@ const state = {
   tokensSent: 0,
   tokensReceived: 0,
   tokenUsageBySource: new Map(),
+  stepTokenUsageBySource: new Map(),
   lmStudioTokenSaved: false,
   aiEnhancePreference: DEFAULT_SETTINGS.aiEnhance,
   dependencyReady: false,
@@ -835,6 +850,7 @@ function resetResults() {
   state.tokensSent = 0;
   state.tokensReceived = 0;
   state.tokenUsageBySource.clear();
+  state.stepTokenUsageBySource.clear();
   state.files.clear();
   state.fileOrder = [];
   setProgress(0, 0);
@@ -896,6 +912,35 @@ function stepRunningDetail(step) {
   return `${label} started`;
 }
 
+function stepFinishedDetail(event) {
+  const elapsed = `${Number(event.elapsed_seconds || 0).toFixed(1)}s`;
+  if (event.step !== "Slides") return elapsed;
+  const metric = slideExtractionMetric(event);
+  return metric ? `${elapsed} · ${metric}` : elapsed;
+}
+
+function countLabel(count, singular, plural = `${singular}s`) {
+  const value = Number(count || 0);
+  return `${value.toLocaleString()} ${value === 1 ? singular : plural}`;
+}
+
+function slideExtractionMetric(event) {
+  const captured = Number(event.captured_image_count ?? event.capturedImageCount);
+  const kept = Number(event.slide_count ?? event.slideCount);
+  if (!Number.isFinite(captured) || !Number.isFinite(kept)) return "";
+  return `${countLabel(captured, "image")} captured, ${countLabel(kept, "slide")} kept`;
+}
+
+function aiSlidesMetric(event) {
+  const remainingSlides = Number(event.slide_count_remaining ?? event.remaining_slide_count);
+  return Number.isFinite(remainingSlides) ? `${countLabel(remainingSlides, "slide note", "slide notes")}` : "";
+}
+
+function annotateStepMetric(steps, key, metric) {
+  if (!metric) return steps || [];
+  return (steps || []).map((step) => (step.key === key ? { ...step, countMetric: metric } : step));
+}
+
 function aiStepKeyForProgress(step) {
   const normalized = String(step || "").toLowerCase();
   if (normalized.includes("overview")) return "AIOverview";
@@ -908,7 +953,9 @@ function aiStepKeyForProgress(step) {
 function aiProgressDetail(event, aiStep, countText) {
   const label = aiStep ? STEP_LABELS[aiStep] : "AI notes";
   const model = String(event.model || "").trim();
-  return `${label}${model ? ` · ${model}` : ""}${countText}`;
+  const slideMetric = aiStep === "AISlides" ? aiSlidesMetric(event) : "";
+  const slideText = slideMetric ? ` · ${slideMetric}` : "";
+  return `${label}${model ? ` · ${model}` : ""}${countText}${slideText}`;
 }
 
 function markStepStarted(file, step) {
@@ -1045,6 +1092,40 @@ function markAiStepStarted(file, step) {
   };
 }
 
+function markAiStepFinished(file, step, elapsedSeconds = null, outcome = null, message = null) {
+  const now = Date.now();
+  const steps = ensureStepStates(file, step);
+  const finishedIndex = steps.findIndex((item) => item.key === step);
+  const normalizedOutcome = normalizeAiOutcome(outcome);
+  return {
+    steps: steps.map((item, index) => {
+      if (item.key === step) {
+        return {
+          ...item,
+          status: "done",
+          startedAt: item.startedAt || null,
+          elapsedSeconds: Number.isFinite(Number(elapsedSeconds))
+            ? Number(elapsedSeconds)
+            : item.elapsedSeconds ?? elapsedSinceStart(item.startedAt, now),
+          outcome: normalizedOutcome || item.outcome || "success",
+          outcomeMessage: message || item.outcomeMessage || aiOutcomeMessage(normalizedOutcome, step),
+        };
+      }
+      if (index < finishedIndex && isAiDetailStep(item.key) && ["waiting", "active"].includes(item.status)) {
+        return {
+          ...item,
+          status: "done",
+          elapsedSeconds: item.elapsedSeconds ?? elapsedSinceStart(item.startedAt, now),
+        };
+      }
+      return item;
+    }),
+    currentStep: null,
+    currentStepStartedAt: null,
+    lastEventAt: now,
+  };
+}
+
 function markAiStepsFinished(file, elapsedSeconds = null) {
   const steps = ensureStepStates(file);
   const now = Date.now();
@@ -1063,6 +1144,89 @@ function markAiStepsFinished(file, elapsedSeconds = null) {
     currentStepStartedAt: null,
     lastEventAt: now,
   };
+}
+
+function applyAiStepTimingOverrides(patch, event) {
+  const secondsByStep = aiStepSecondsFromTimings(event);
+  if (!Object.keys(secondsByStep).length || !Array.isArray(patch?.steps)) return patch;
+  return {
+    ...patch,
+    steps: patch.steps.map((step) => {
+      if (!isAiDetailStep(step.key) || !Number.isFinite(secondsByStep[step.key])) return step;
+      return {
+        ...step,
+        elapsedSeconds: secondsByStep[step.key],
+      };
+    }),
+  };
+}
+
+function applyAiStepOutcomeOverrides(patch, event) {
+  const outcomesByStep = aiStepOutcomesFromEvent(event);
+  if (!Object.keys(outcomesByStep).length || !Array.isArray(patch?.steps)) return patch;
+  return {
+    ...patch,
+    steps: patch.steps.map((step) => {
+      const outcome = outcomesByStep[step.key];
+      if (!isAiDetailStep(step.key) || !outcome) return step;
+      return {
+        ...step,
+        outcome: outcome.outcome,
+        outcomeMessage: outcome.message || aiOutcomeMessage(outcome.outcome, step.key),
+      };
+    }),
+  };
+}
+
+function aiStepSecondsFromTimings(event) {
+  const timings = event.step_timings || event.stepTimings;
+  if (!timings || typeof timings !== "object") return {};
+  return Object.entries(timings).reduce((sum, [key, timing]) => {
+    const stepKey = aiStepKeyForTokenUsageKey(key);
+    const seconds = Number(timing?.elapsed_seconds ?? timing?.elapsedSeconds);
+    if (stepKey && Number.isFinite(seconds)) {
+      sum[stepKey] = Number(sum[stepKey] || 0) + Math.max(0, seconds);
+    }
+    return sum;
+  }, {});
+}
+
+function aiStepOutcomesFromEvent(event) {
+  const outcomes = event.step_outcomes || event.stepOutcomes;
+  if (!outcomes || typeof outcomes !== "object") return {};
+  return Object.entries(outcomes).reduce((sum, [key, value]) => {
+    const stepKey = aiStepKeyForTokenUsageKey(key);
+    if (!stepKey || !value || typeof value !== "object") return sum;
+    const outcome = normalizeAiOutcome(value.outcome);
+    if (!outcome) return sum;
+    sum[stepKey] = {
+      outcome,
+      message: String(value.message || "").trim() || aiOutcomeMessage(outcome, stepKey),
+    };
+    return sum;
+  }, {});
+}
+
+function aiStepOutcomeFromEvent(event, stepKey) {
+  const outcome = normalizeAiOutcome(event.step_outcome ?? event.stepOutcome);
+  if (!outcome) return null;
+  return {
+    outcome,
+    message: String(event.step_message ?? event.stepMessage ?? "").trim() || aiOutcomeMessage(outcome, stepKey),
+  };
+}
+
+function normalizeAiOutcome(outcome) {
+  const normalized = String(outcome || "").trim().toLowerCase();
+  return ["success", "fallback", "skipped", "metadata_used"].includes(normalized) ? normalized : null;
+}
+
+function aiOutcomeMessage(outcome, stepKey = "") {
+  if (outcome === "fallback" && stepKey === "AITranscript") return "Raw transcript kept";
+  if (outcome === "fallback") return "Fallback used";
+  if (outcome === "metadata_used") return "Metadata used";
+  if (outcome === "skipped") return "No model call";
+  return "";
 }
 
 function elapsedSinceStart(startedAt, now = Date.now()) {
@@ -1140,8 +1304,8 @@ function renderStepStrip(file, source = "") {
     .map((step) => {
       const stateClass = escapeHtml(step.status || "waiting");
       const time = stepTimeLabel(file, step);
-      const tokenRate = isAiDetailStep(step.key) ? fileTokensPerSecondLabel(file, source) : "";
-      const metric = [time, tokenRate].filter(Boolean).join(" · ");
+      const tokenMetric = isAiDetailStep(step.key) ? fileStepTokenMetric(file, source, step.key) : "";
+      const metric = [time, step.countMetric, tokenMetric].filter(Boolean).join(" · ");
       return `<span class="video-step ${stateClass}"><span>${escapeHtml(step.label)}</span>${
         metric ? `<span class="video-step-time">${escapeHtml(metric)}</span>` : ""
       }</span>`;
@@ -1152,8 +1316,14 @@ function renderStepStrip(file, source = "") {
 
 function stepTimeLabel(file, step) {
   if (step.status === "active") return activeStepDuration(file, step);
-  if (Number.isFinite(Number(step.elapsedSeconds))) return formatDuration(step.elapsedSeconds);
-  return "0s";
+  if (isAiDetailStep(step.key) && step.outcome && step.outcome !== "success") {
+    return step.outcomeMessage || aiOutcomeMessage(step.outcome, step.key);
+  }
+  if (step.status === "skipped") return "Skipped";
+  if (Number.isFinite(Number(step.elapsedSeconds))) {
+    return Number(step.elapsedSeconds) === 0 && step.status === "done" ? "<1s" : formatDuration(step.elapsedSeconds);
+  }
+  return "";
 }
 
 function activeStepDetail(file) {
@@ -1197,28 +1367,24 @@ function renderFileTokenStats(file, source) {
   return ` · Tokens in ${escapeHtml(sent)} · out ${escapeHtml(received)}`;
 }
 
-function fileTokensPerSecondLabel(file, source = "") {
-  const usage = source ? state.tokenUsageBySource.get(source) : null;
-  const tokens = Number(usage?.sent || 0) + Number(usage?.received || 0);
-  const seconds = aiElapsedSeconds(file) || fileElapsedSeconds(file);
-  if (tokens <= 0 || seconds <= 0) return globalTokensPerSecondLabel();
-  return `${(tokens / seconds).toFixed(1)} tok/s`;
+function fileStepTokenMetric(file, source, stepKey) {
+  const step = ensureStepStates(file).find((item) => item.key === stepKey);
+  if (step?.outcome && step.outcome !== "success") return "";
+  const usage = source ? stepTokenUsageForSource(source, stepKey) : null;
+  return tokenMetricLabel(usage, stepElapsedSeconds(file, stepKey), { compact: true });
 }
 
 function aiElapsedSeconds(file) {
   return ensureStepStates(file)
     .filter((step) => isAiDetailStep(step.key))
-    .reduce((sum, step) => {
-      if (step.status === "active") return sum + Number(activeStepDurationSeconds(file, step) || 0);
-      return sum + Number(step.elapsedSeconds || 0);
-    }, 0);
+    .reduce((sum, step) => sum + stepElapsedSeconds(file, step.key), 0);
 }
 
-function globalTokensPerSecondLabel() {
-  const elapsedSeconds = state.runStartedAt ? Math.max(1, (Date.now() - state.runStartedAt) / 1000) : 0;
-  const tokens = Number(state.tokensSent || 0) + Number(state.tokensReceived || 0);
-  if (!tokens || !elapsedSeconds) return "-- tok/s";
-  return `${(tokens / elapsedSeconds).toFixed(1)} tok/s`;
+function stepElapsedSeconds(file, stepKey) {
+  const step = ensureStepStates(file).find((item) => item.key === stepKey);
+  if (!step) return 0;
+  if (step.status === "active") return Number(activeStepDurationSeconds(file, step) || 0);
+  return Number(step.elapsedSeconds || 0);
 }
 
 function fileElapsedSeconds(file) {
@@ -1247,7 +1413,9 @@ function formatFileLength(seconds) {
 }
 
 function formatDuration(seconds) {
-  const wholeSeconds = Math.max(0, Math.floor(Number(seconds) || 0));
+  const value = Number(seconds) || 0;
+  if (value > 0 && value < 1) return "<1s";
+  const wholeSeconds = Math.max(0, Math.round(value));
   if (wholeSeconds < 60) return `${wholeSeconds}s`;
   const minutes = Math.floor(wholeSeconds / 60);
   const remainingSeconds = wholeSeconds % 60;
@@ -1381,11 +1549,15 @@ function handleProcessorEvent(event) {
       });
       return;
     }
-    const stepPatch = markStepFinished(state.files.get(event.source), event.step, Number(event.elapsed_seconds || 0));
+    let stepPatch = markStepFinished(state.files.get(event.source), event.step, Number(event.elapsed_seconds || 0));
+    stepPatch = {
+      ...stepPatch,
+      steps: annotateStepMetric(stepPatch.steps, event.step, event.step === "Slides" ? slideExtractionMetric(event) : ""),
+    };
     const activeStep = stepPatch.steps.find((item) => item.status === "active");
     updateFile(event.source, {
       stage: activeStep ? STEP_LABELS[activeStep.key] || activeStep.key : `${STEP_LABELS[event.step] || event.step} complete`,
-      detail: activeStep ? stepRunningDetail(activeStep.key) : `${Number(event.elapsed_seconds || 0).toFixed(1)}s`,
+      detail: activeStep ? stepRunningDetail(activeStep.key) : stepFinishedDetail(event),
       progress: progressFromSteps(stepPatch.steps, STEP_DONE_PROGRESS[event.step] || 20),
       ...stepPatch,
     });
@@ -1413,12 +1585,23 @@ function handleProcessorEvent(event) {
     const countText = total > 0 ? ` (${completed}/${total})` : "";
     const current = state.files.get(event.source);
     const aiStep = aiStepKeyForProgress(event.step);
+    const outcome = aiStep ? aiStepOutcomeFromEvent(event, aiStep) : null;
     const activePatch = aiStep
-      ? markAiStepStarted(current, aiStep)
+      ? markAiStepFinished(
+          current,
+          aiStep,
+          event.step_elapsed_seconds ?? event.stepElapsedSeconds,
+          outcome?.outcome,
+          outcome?.message,
+        )
       : current?.currentStep === "Enrich"
         ? {}
         : markStepStarted(current, "Enrich");
-    const progressSteps = activePatch.steps || current?.steps || [];
+    const metricPatch =
+      aiStep === "AISlides"
+        ? { ...activePatch, steps: annotateStepMetric(activePatch.steps || current?.steps || [], aiStep, aiSlidesMetric(event)) }
+        : activePatch;
+    const progressSteps = metricPatch.steps || current?.steps || [];
     updateFile(event.source, {
       status: "running",
       stage: aiStep ? STEP_LABELS[aiStep] : STEP_LABELS.Enrich,
@@ -1426,13 +1609,16 @@ function handleProcessorEvent(event) {
       progress: aiStep
         ? progressFromSteps(progressSteps, STEP_START_PROGRESS[aiStep])
         : Math.max(STEP_START_PROGRESS.Enrich, Math.min(STEP_DONE_PROGRESS.Enrich, 88 + completed)),
-      ...activePatch,
+      ...metricPatch,
     });
   } else if (event.kind === "enrichment_finished") {
     applyTokenUsage(event);
     const current = state.files.get(event.source);
     const aiPatch = hasDetailedAiSteps(current)
-      ? markAiStepsFinished(current, Number(event.elapsed_seconds || 0))
+      ? applyAiStepOutcomeOverrides(
+          applyAiStepTimingOverrides(markAiStepsFinished(current, Number(event.elapsed_seconds || 0)), event),
+          event,
+        )
       : markStepFinished(current, "Enrich", Number(event.elapsed_seconds || 0));
     updateFile(event.source, {
       detail: event.title ? `AI notes finished: ${event.title}` : "AI notes finished",
@@ -1503,30 +1689,120 @@ function renderAiPhaseStatus(entries) {
 
   elements.aiStatus.classList.remove("hidden");
   const phases = [
+    { key: "AIAll", title: "All AI", model: "Batch total", total: true },
     { key: "AIOverview", title: "Overview", model: routeModelValue("overview") },
     { key: "AITranscript", title: "Transcript", model: routeModelValue("transcript") },
     { key: "AISlides", title: "Slides", model: routeModelValue("slides") },
     { key: "AIResources", title: "Resources", model: routeModelValue("resources") },
   ];
-  const activePhase = phases.find((phase) => aiPhaseStatus(entries, phase.key) === "active");
-  const loadedModel = activePhase?.model || lastDoneAiModel(entries, phases) || "none";
+  const stepPhases = phases.filter((phase) => !phase.total);
+  const activePhase = stepPhases.find((phase) => aiPhaseStatus(entries, phase.key) === "active");
+  const loadedModel = activePhase?.model || lastDoneAiModel(entries, stepPhases) || "none";
   elements.aiLoadedModel.textContent = `Loaded model: ${loadedModel || "none"}`;
   elements.aiPhaseTrack.innerHTML = phases.map((phase) => {
-    const status = aiPhaseStatus(entries, phase.key);
-    const statusLabel = status === "done" ? "Done" : status === "active" ? "Active" : status === "skipped" ? "Skipped" : "Waiting";
-    const model = phase.model || "No model selected";
-    const tokenRate = globalTokensPerSecondLabel();
+    const status = phase.total ? aiCombinedStatus(entries) : aiPhaseStatus(entries, phase.key);
+    const outcome = phase.total ? aggregateAiOutcome(entries) : aiPhaseOutcome(entries, phase.key);
+    const statusLabel = aiPhaseStatusLabel(status, outcome);
+    const model = aiPhaseModelLabel(phase.model, status, outcome);
+    const usage = phase.total ? aggregateAiStepUsage(entries) : aggregateAiStepUsage(entries, phase.key);
+    const seconds = phase.total ? aggregateAiElapsedSeconds(entries) : aggregateAiStepElapsedSeconds(entries, phase.key);
+    const tokenMetric = aiPhaseMetricLabel(usage, seconds, status, outcome, phase.key);
     return `
-      <div class="phase ${escapeHtml(status)}">
+      <div class="phase ${escapeHtml(status)} ${escapeHtml(outcome || "")}">
         <div class="phase-title">
           <strong>${escapeHtml(phase.title)}</strong>
           <span>${escapeHtml(statusLabel)}</span>
         </div>
         <div class="phase-model">${escapeHtml(model)}</div>
-        <div class="phase-metric">Avg ${escapeHtml(tokenRate)}</div>
+        <div class="phase-metric">${escapeHtml(tokenMetric)}</div>
       </div>
     `;
   }).join("");
+}
+
+function aiPhaseStatusLabel(status, outcome) {
+  if (status === "active") return "Running";
+  if (status === "skipped") return "Skipped";
+  if (status === "failed") return "Failed";
+  if (status === "waiting") return "Waiting";
+  if (outcome === "mixed") return "Mixed";
+  if (outcome === "fallback") return "Fallback";
+  if (outcome === "metadata_used") return "Metadata";
+  return "Done";
+}
+
+function aiPhaseModelLabel(model, status, outcome) {
+  const label = model || "No model selected";
+  if (status === "waiting") return `Planned: ${label}`;
+  if (outcome === "fallback") return `Planned: ${label}`;
+  if (outcome === "metadata_used") return "No image model call";
+  if (status === "active") return `Using: ${label}`;
+  if (status === "done") return `Used: ${label}`;
+  return label;
+}
+
+function aiPhaseMetricLabel(usage, seconds, status, outcome, stepKey) {
+  if (status === "waiting") return "No tokens yet";
+  if (outcome === "fallback") return aiOutcomeMessage("fallback", stepKey);
+  if (outcome === "metadata_used") return "No model call";
+  if (outcome === "skipped") return "No model call";
+  if (outcome === "mixed") return "Mixed AI results";
+  return tokenMetricLabel(usage, seconds, { compact: true }) || "No tokens recorded";
+}
+
+function aiCombinedStatus(entries) {
+  const statuses = AI_STEP_ORDER.map((stepKey) => aiPhaseStatus(entries, stepKey));
+  if (statuses.some((status) => status === "active")) return "active";
+  if (statuses.length && statuses.every((status) => status === "done")) return "done";
+  if (statuses.length && statuses.every((status) => status === "skipped")) return "skipped";
+  if (statuses.some((status) => status === "failed")) return "failed";
+  return "waiting";
+}
+
+function aiPhaseOutcome(entries, stepKey) {
+  const outcomes = entries
+    .map(([_source, file]) => ensureStepStates(file).find((step) => step.key === stepKey)?.outcome)
+    .map(normalizeAiOutcome)
+    .filter(Boolean);
+  return highestPriorityOutcome(outcomes);
+}
+
+function aggregateAiOutcome(entries) {
+  const outcomes = AI_STEP_ORDER.map((stepKey) => aiPhaseOutcome(entries, stepKey)).filter(Boolean);
+  if (!outcomes.length) return null;
+  const unique = new Set(outcomes);
+  if (unique.size > 1 || [...unique].some((outcome) => outcome !== "success")) return "mixed";
+  return "success";
+}
+
+function highestPriorityOutcome(outcomes) {
+  for (const outcome of AI_OUTCOME_PRIORITY) {
+    if (outcomes.includes(outcome)) return outcome;
+  }
+  return null;
+}
+
+function aggregateAiStepUsage(entries, stepKey = null) {
+  return entries.reduce((sum, [source]) => {
+    const usageByStep = state.stepTokenUsageBySource.get(source) || {};
+    const relevantSteps = stepKey ? [stepKey] : AI_STEP_ORDER;
+    relevantSteps.forEach((key) => {
+      const usage = usageByStep[key];
+      if (usage) {
+        sum.sent += Number(usage.sent || 0);
+        sum.received += Number(usage.received || 0);
+      }
+    });
+    return sum;
+  }, { sent: 0, received: 0 });
+}
+
+function aggregateAiStepElapsedSeconds(entries, stepKey) {
+  return entries.reduce((sum, [_source, file]) => sum + stepElapsedSeconds(file, stepKey), 0);
+}
+
+function aggregateAiElapsedSeconds(entries) {
+  return entries.reduce((sum, [_source, file]) => sum + aiElapsedSeconds(file), 0);
 }
 
 function aiPhaseStatus(entries, stepKey) {
@@ -2754,16 +3030,89 @@ function renderMetric(valueElement, statusElement, value, status, unavailable) {
   valueElement.closest(".system-card")?.classList.toggle("unavailable", unavailable);
 }
 
+function stepTokenUsageForSource(source, stepKey) {
+  return state.stepTokenUsageBySource.get(source)?.[stepKey] || { sent: 0, received: 0 };
+}
+
+function normalizedTokenUsage(inputTokens, outputTokens) {
+  const sent = Number(inputTokens);
+  const received = Number(outputTokens);
+  return {
+    sent: Number.isFinite(sent) ? Math.max(0, sent) : 0,
+    received: Number.isFinite(received) ? Math.max(0, received) : 0,
+  };
+}
+
+function addTokenUsage(left, right) {
+  return {
+    sent: Number(left?.sent || 0) + Number(right?.sent || 0),
+    received: Number(left?.received || 0) + Number(right?.received || 0),
+  };
+}
+
+function hasTokenUsage(usage) {
+  return Number(usage?.sent || 0) > 0 || Number(usage?.received || 0) > 0;
+}
+
+function totalTokenUsageByStep(usageByStep) {
+  return Object.values(usageByStep || {}).reduce((sum, usage) => addTokenUsage(sum, usage), { sent: 0, received: 0 });
+}
+
+function tokenUsageByStepFromEvent(event) {
+  const usageByStep = {};
+  const nested = event.step_token_usage || event.stepTokenUsage;
+  if (nested && typeof nested === "object") {
+    Object.entries(nested).forEach(([key, usage]) => {
+      const stepKey = aiStepKeyForTokenUsageKey(key);
+      if (!stepKey || !usage || typeof usage !== "object") return;
+      const entry = normalizedTokenUsage(usage.input_tokens ?? usage.inputTokens, usage.output_tokens ?? usage.outputTokens);
+      if (hasTokenUsage(entry)) {
+        usageByStep[stepKey] = addTokenUsage(usageByStep[stepKey], entry);
+      }
+    });
+  }
+
+  const stepKey = aiStepKeyForProgress(event.step);
+  const stepInput = event.step_input_tokens ?? event.stepInputTokens;
+  const stepOutput = event.step_output_tokens ?? event.stepOutputTokens;
+  const stepUsage = normalizedTokenUsage(stepInput, stepOutput);
+  if (stepKey && hasTokenUsage(stepUsage)) {
+    usageByStep[stepKey] = addTokenUsage(usageByStep[stepKey], stepUsage);
+  }
+  return usageByStep;
+}
+
+function hasNestedTokenUsage(event) {
+  const nested = event.step_token_usage || event.stepTokenUsage;
+  return Boolean(nested && typeof nested === "object");
+}
+
+function aiStepKeyForTokenUsageKey(key) {
+  const normalized = String(key || "").trim().toLowerCase();
+  return AI_STEP_TOKEN_KEYS[normalized] || aiStepKeyForProgress(normalized);
+}
+
 function applyTokenUsage(event) {
   const sent = Number(event.input_tokens ?? event.inputTokens ?? event.input_token_estimate ?? event.inputTokenEstimate);
   const received = Number(event.output_tokens ?? event.outputTokens ?? event.output_token_estimate ?? event.outputTokenEstimate);
-  if (!Number.isFinite(sent) && !Number.isFinite(received)) return;
+  const usageByStep = tokenUsageByStepFromEvent(event);
+  const replaceStepUsage = hasNestedTokenUsage(event);
+  if (!Number.isFinite(sent) && !Number.isFinite(received) && !Object.keys(usageByStep).length) return;
 
   if (event.source) {
+    if (Object.keys(usageByStep).length) {
+      const previousByStep = state.stepTokenUsageBySource.get(event.source) || {};
+      const nextByStep = { ...previousByStep };
+      Object.entries(usageByStep).forEach(([stepKey, usage]) => {
+        nextByStep[stepKey] = replaceStepUsage ? usage : addTokenUsage(previousByStep[stepKey], usage);
+      });
+      state.stepTokenUsageBySource.set(event.source, nextByStep);
+    }
     const previous = state.tokenUsageBySource.get(event.source) || { sent: 0, received: 0 };
+    const stepTotals = totalTokenUsageByStep(state.stepTokenUsageBySource.get(event.source));
     state.tokenUsageBySource.set(event.source, {
-      sent: Number.isFinite(sent) ? Math.max(0, sent) : previous.sent,
-      received: Number.isFinite(received) ? Math.max(0, received) : previous.received,
+      sent: Number.isFinite(sent) ? Math.max(0, sent) : hasTokenUsage(stepTotals) ? stepTotals.sent : previous.sent,
+      received: Number.isFinite(received) ? Math.max(0, received) : hasTokenUsage(stepTotals) ? stepTotals.received : previous.received,
     });
     const totals = [...state.tokenUsageBySource.values()].reduce(
       (sum, usage) => ({
@@ -2787,14 +3136,6 @@ function renderTokenMetrics() {
   elements.tokensReceivedMetric.textContent = formatTokenCount(state.tokensReceived);
   elements.tokensSentMetricStatus.textContent = state.tokensSent ? "AI prompt" : "Waiting";
   elements.tokensReceivedMetricStatus.textContent = state.tokensReceived ? "AI output" : "Waiting";
-}
-
-function formatTokenCount(value) {
-  const count = Math.max(0, Math.round(Number(value) || 0));
-  if (count >= 1_000_000) return `${(count / 1_000_000).toFixed(1)}M`;
-  if (count >= 10_000) return `${Math.round(count / 1_000)}K`;
-  if (count >= 1_000) return `${(count / 1_000).toFixed(1)}K`;
-  return String(count);
 }
 
 function waitForPaint() {

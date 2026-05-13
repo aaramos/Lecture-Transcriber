@@ -84,6 +84,11 @@
           "relative_path": {"type": "string"},
           "thumbnail_path": {"type": ["string", "null"]},
           "timestamp_seconds": {"type": "number", "minimum": 0},
+          "title": {"type": ["string", "null"]},
+          "build_stage": {"type": ["string", "null"], "enum": ["partial", "full", "transitioning", null]},
+          "layout": {"type": ["string", "null"], "enum": ["full-screen", "split-left", "split-right", null]},
+          "description": {"type": ["string", "null"]},
+          "slide_analysis": {"type": ["object", "null"]},
           "image": {
             "type": "object",
             "required": ["width", "height", "byte_size", "sha256"],

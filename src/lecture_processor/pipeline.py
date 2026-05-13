@@ -12,14 +12,15 @@ from typing import Callable, Dict, Iterator, List, Optional
 from .artifacts import LECTURE_ARTIFACT_NAME, load_json, utc_now_iso, write_batch_artifact, write_lecture_artifact
 from .ai.enrichment import enrich_lecture_artifact, enrich_lecture_artifacts_staged
 from .ai.model_routing import uses_experimental_routing
-from .config import AudioEnhancementMode, BatchConfig, RecordingSpeed, TranscriptionEngine
+from .config import AIModelProvider, AudioEnhancementMode, BatchConfig, RecordingSpeed, TranscriptionEngine
 from .control import ProcessingControl, default_control_file
 from .errors import LectureProcessorError
 from .errors import ProcessingStopped
 from .html_renderer import render_batch_index, render_lecture_page
 from .media import CleanAudioExtractor, DeepFilterAudioEnhancer, MediaInspector, MediaNormalizer
 from .models import BatchSummary, FileResult, FileStatus, MediaInfo, TranscriptResult
-from .slides import SlideExtractor
+from .slide_classifier import LmStudioSlideClassifier
+from .slides import SlideExtractionResult, SlideExtractor
 from .sources import discover_source_files, is_transcript_source, source_kind
 from .temp_cleanup import cleanup_processor_temp_files, remove_temp_path
 from .transcript_import import import_transcript, transcript_duration_seconds
@@ -29,6 +30,25 @@ from .writers import write_processing_log, write_text_atomic, write_transcript
 OUTPUT_LOCK_FILE = ".lecture_processor.lock"
 ALREADY_PROCESSED_MESSAGE = "Already processed"
 ALREADY_ENHANCED_MESSAGE = "Already enhanced"
+
+
+def _slide_extractor_for_config(config: BatchConfig) -> SlideExtractor:
+    classifier = None
+    classifier_model = str(config.ai_slides_model or "").strip()
+    if config.ai_slides_provider is AIModelProvider.MLX_VISION and classifier_model:
+        classifier = LmStudioSlideClassifier(
+            base_url=config.mlx_vision_base_url,
+            model=classifier_model,
+            timeout_seconds=config.mlx_request_timeout_seconds,
+        )
+    return SlideExtractor(
+        config.slide_sensitivity,
+        backend=config.slide_backend,
+        ffmpeg_path=config.ffmpeg_path,
+        ffmpeg_hwaccel=config.ffmpeg_hwaccel,
+        apple_silicon=config.apple_silicon,
+        classifier=classifier,
+    )
 
 
 class BatchProcessor:
@@ -56,13 +76,7 @@ class BatchProcessor:
             config.deep_filter_path,
         )
         self.transcriber = transcriber
-        self.slide_extractor = slide_extractor or SlideExtractor(
-            config.slide_sensitivity,
-            backend=config.slide_backend,
-            ffmpeg_path=config.ffmpeg_path,
-            ffmpeg_hwaccel=config.ffmpeg_hwaccel,
-            apple_silicon=config.apple_silicon,
-        )
+        self.slide_extractor = slide_extractor or _slide_extractor_for_config(config)
         self.progress_callback = progress_callback
         self.control = ProcessingControl(config.control_file or default_control_file(config.output_dir))
         self._defer_ai_enrichment = False
@@ -340,22 +354,21 @@ class BatchProcessor:
             log_lines[-1] = f"{log_lines[-1]} ({transcript.word_count} words)"
 
             slide_count = 0
+            processing_warnings: List[str] = []
             if media_info.has_video:
                 slides_dir = output_dir / "slides"
-                slide_count = self._time_step(
-                    "Slides",
+                slide_result = self._time_slide_extraction(
                     source,
+                    work_video,
+                    slides_dir,
                     log_lines,
                     step_state,
                     stage_timings,
-                    lambda: self.slide_extractor.extract(
-                        work_video,
-                        slides_dir,
-                        timestamp_scale=self.config.normalized_timestamp_scale,
-                        stop_requested=lambda: self.control.should_stop(source.name),
-                    ),
                 )
-                log_lines[-1] = f"{log_lines[-1]} ({slide_count} slides extracted)"
+                slide_count = slide_result.saved_count
+                processing_warnings.extend(slide_result.warnings)
+                for warning in processing_warnings:
+                    log_lines.append(f"Slides     NOTE {warning}")
 
             if temp_normalized:
                 remove_temp_path(temp_normalized)
@@ -376,6 +389,7 @@ class BatchProcessor:
                 transcript=transcript,
                 transcriber_metadata=getattr(self.transcriber, "metadata", {}),
                 stage_timings=stage_timings,
+                warnings=processing_warnings,
             )
             if self.config.ai_provider.value != "none" and not self._defer_ai_enrichment:
                 if self.config.skip_ai_enrichment_reason.strip():
@@ -772,6 +786,63 @@ class BatchProcessor:
         self._emit("step_finished", source=source.name, step=name, elapsed_seconds=round(elapsed, 1))
         return result
 
+    def _time_slide_extraction(
+        self,
+        source: Path,
+        media_path: Path,
+        slides_dir: Path,
+        log_lines: List[str],
+        step_state,
+        stage_timings,
+    ) -> SlideExtractionResult:
+        if self.control.should_stop(source.name):
+            raise ProcessingStopped("Stopped by user")
+        step_state["current"] = "Slides"
+        self._emit("step_started", source=source.name, step="Slides")
+        started = time.monotonic()
+        result = self._extract_slides_with_counts(source, media_path, slides_dir)
+        if self.control.should_stop(source.name):
+            raise ProcessingStopped("Stopped by user")
+        elapsed = time.monotonic() - started
+        stage_timings["Slides"] = round(elapsed, 3)
+        log_lines.append(f"Slides     OK  {elapsed:.1f}s ({_slide_count_detail(result)})")
+        self._emit(
+            "step_finished",
+            source=source.name,
+            step="Slides",
+            elapsed_seconds=round(elapsed, 1),
+            captured_image_count=result.candidate_count,
+            slide_count=result.saved_count,
+        )
+        return result
+
+    def _extract_slides_with_counts(
+        self,
+        source: Path,
+        media_path: Path,
+        slides_dir: Path,
+    ) -> SlideExtractionResult:
+        stop_requested = lambda: self.control.should_stop(source.name)
+        extract_with_result = getattr(self.slide_extractor, "extract_with_result", None)
+        if callable(extract_with_result):
+            return extract_with_result(
+                media_path,
+                slides_dir,
+                timestamp_scale=self.config.normalized_timestamp_scale,
+                stop_requested=stop_requested,
+            )
+        saved_count = self.slide_extractor.extract(
+            media_path,
+            slides_dir,
+            timestamp_scale=self.config.normalized_timestamp_scale,
+            stop_requested=stop_requested,
+        )
+        return SlideExtractionResult(
+            saved_count=saved_count,
+            candidate_count=int(getattr(self.slide_extractor, "last_candidate_count", saved_count) or saved_count),
+            warnings=list(getattr(self.slide_extractor, "last_warnings", []) or []),
+        )
+
     def _skip_ai_enrichment(self, source: Path, log_lines: List[str], step_state, stage_timings) -> None:
         reason = self.config.skip_ai_enrichment_reason.strip()
         step_state["current"] = "Enrich"
@@ -998,6 +1069,14 @@ class BatchProcessor:
             self.progress_callback(event)
         except Exception:
             pass
+
+
+def _slide_count_detail(result: SlideExtractionResult) -> str:
+    captured = int(result.candidate_count or 0)
+    kept = int(result.saved_count or 0)
+    captured_label = "image" if captured == 1 else "images"
+    kept_label = "slide" if kept == 1 else "slides"
+    return f"{captured} {captured_label} captured; {kept} {kept_label} kept"
 
 
 def discover_mov_files(folder: Path) -> List[Path]:

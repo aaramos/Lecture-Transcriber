@@ -1,4 +1,6 @@
+import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 
@@ -15,7 +17,14 @@ from .providers.local_stub import (
     local_resources,
     local_slide_analysis,
 )
-from .providers.mlx_openai import DEFAULT_LOCAL_MODEL, MLXTextProvider, MLXVisionProvider, _OpenAICompatibleClient
+from .providers.mlx_openai import (
+    DEFAULT_LOCAL_MODEL,
+    DEFAULT_ROLE_MAX_TOKENS,
+    MLXTextProvider,
+    MLXVisionProvider,
+    _OpenAICompatibleClient,
+    clear_lm_studio_model_verification_cache,
+)
 
 AI_ROUTE_STEPS = ("overview", "transcript", "slides", "resources")
 AI_PHASES = (
@@ -36,6 +45,17 @@ AI_ROLE_BY_STEP = {
     for step in steps
 }
 MLX_PROVIDERS = (AIModelProvider.MLX_TEXT, AIModelProvider.MLX_VISION)
+AI_ROLE_MODEL_CONFIG = {
+    role: {"max_tokens": max_tokens}
+    for role, max_tokens in DEFAULT_ROLE_MAX_TOKENS.items()
+}
+AI_TIMING_KEY_BY_STEP = {
+    "overview": "overview",
+    "transcript": "transcript_cleanup",
+    "slides": "slide_analysis",
+    "resources": "resource_formatter",
+}
+AI_TOKEN_KEY_BY_STEP = AI_TIMING_KEY_BY_STEP
 
 
 @dataclass(frozen=True)
@@ -101,6 +121,8 @@ def probe_lm_studio_model_availability(config: BatchConfig) -> RouteAvailability
                 continue
             available_models = models_by_base_url.get(base_url) or []
             selected_model = config.ai_step_model(step)
+            if step == "slides" and selected_model == DEFAULT_LOCAL_MODEL:
+                selected_model = _default_slide_analysis_model(config, resolved_step_models)
             if selected_model == DEFAULT_LOCAL_MODEL:
                 if available_models:
                     resolved_step_models[step] = available_models[0]
@@ -126,6 +148,17 @@ def probe_lm_studio_model_availability(config: BatchConfig) -> RouteAvailability
     return RouteAvailability(skipped_roles=skipped_roles, resolved_step_models=resolved_step_models)
 
 
+def _default_slide_analysis_model(config: BatchConfig, resolved_step_models: Dict[str, str]) -> str:
+    for step in ("overview", "transcript"):
+        resolved = str(resolved_step_models.get(step) or "").strip()
+        if resolved:
+            return resolved
+        explicit = str(getattr(config, f"ai_{step}_model") or "").strip()
+        if explicit:
+            return explicit
+    return DEFAULT_LOCAL_MODEL
+
+
 def routed_analyze_lecture(
     request: AnalyzeLectureRequest,
     config: BatchConfig,
@@ -147,6 +180,7 @@ def routed_analyze_lecture(
             config.ai_slides_provider is AIModelProvider.GEMINI
             or config.ai_resources_provider is AIModelProvider.GEMINI
         ):
+            clear_lm_studio_model_verification_cache()
             overview_override = _route_overview(request, config, None, availability=availability)
             progress.emit("overview", overview_override)
         gemini_response = gemini_provider.analyze_lecture_chunked(
@@ -166,7 +200,14 @@ def routed_analyze_lecture(
         "slides": None,
         "resources": None,
     }
+    step_timings: Dict[str, Dict] = {}
+    step_token_usage: Dict[str, Dict] = {}
+    step_outcomes: Dict[str, Dict] = {}
+    if gemini_response:
+        _merge_step_token_usage(step_token_usage, gemini_response.step_token_usage)
     for index, (_role, step) in enumerate(route_steps):
+        clear_lm_studio_model_verification_cache()
+        timer = _start_step_timer()
         if step == "overview":
             payload = overview_override or _route_overview(request, config, gemini_response, availability=availability)
         elif step == "transcript":
@@ -182,10 +223,20 @@ def routed_analyze_lecture(
                 availability=availability,
             )
         step_results[step] = payload
+        timing = _finish_step_timer(timer, **_timing_metadata(step, payload))
+        _record_step_timing(step_timings, step, timing, payload)
+        _record_step_token_usage(step_token_usage, step, payload)
+        outcome = _step_outcome_entry(step, payload)
+        step_outcomes[AI_TOKEN_KEY_BY_STEP.get(step, step)] = outcome
         if config.ai_step_provider(step) is not AIModelProvider.GEMINI and not (
             step == "overview" and overview_override is not None
         ):
-            progress.emit(step, payload)
+            progress_payload = dict(payload)
+            progress_payload["step_elapsed_seconds"] = timing.get("elapsed_seconds")
+            progress_payload["step_outcome"] = outcome["outcome"]
+            progress_payload["step_message"] = outcome["message"]
+            progress_payload.update(_slide_progress_counts(step, request, payload))
+            progress.emit(step, progress_payload)
 
         next_step = route_steps[index + 1][1] if index + 1 < len(route_steps) else None
         _append_transition_warning(
@@ -221,6 +272,9 @@ def routed_analyze_lecture(
         or 350,
         raw_response_id="experimental-routing",
         warnings=_dedupe_warnings(warnings),
+        step_timings=step_timings,
+        step_token_usage=step_token_usage,
+        step_outcomes=step_outcomes,
     )
 
 
@@ -246,6 +300,11 @@ def routed_analyze_lectures_staged(
             "slides": None,
             "resources": None,
             "warnings": [],
+            "step_timings": {},
+            "step_token_usage": {},
+            "step_outcomes": {},
+            "input_tokens": 0,
+            "output_tokens": 0,
         }
         for key, request in jobs
     }
@@ -255,9 +314,14 @@ def routed_analyze_lectures_staged(
     output_tokens = 0
 
     ordered_steps = _ordered_ai_steps(config, availability)
+    previous_stage_ref: Optional[_LocalModelRef] = None
     for index, (role, step) in enumerate(ordered_steps):
+        current_stage_ref = _local_model_ref_for_step(step, config, availability)
+        if index == 0 or not _same_model_ref(previous_stage_ref, current_stage_ref):
+            clear_lm_studio_model_verification_cache()
         for key, request in jobs:
             state = states[key]
+            timer = _start_step_timer()
             if step == "overview":
                 payload = _route_overview(request, config, None, availability=availability)
             elif step == "transcript":
@@ -274,9 +338,25 @@ def routed_analyze_lectures_staged(
                 )
 
             state[step] = payload
+            timing = _finish_step_timer(timer, **_timing_metadata(step, payload))
+            _record_step_timing(
+                state["step_timings"],
+                step,
+                timing,
+                payload,
+            )
             state["warnings"].extend(payload.get("warnings") or [])
-            input_tokens += int(payload.get("input_tokens") or 0)
-            output_tokens += int(payload.get("output_tokens") or 0)
+            step_usage = _token_usage_entry(
+                payload.get("input_tokens"),
+                payload.get("output_tokens"),
+            )
+            _record_step_token_usage(state["step_token_usage"], step, payload)
+            outcome = _step_outcome_entry(step, payload)
+            state["step_outcomes"][AI_TOKEN_KEY_BY_STEP.get(step, step)] = outcome
+            state["input_tokens"] += step_usage["input_tokens"]
+            state["output_tokens"] += step_usage["output_tokens"]
+            input_tokens += step_usage["input_tokens"]
+            output_tokens += step_usage["output_tokens"]
             completed_steps += 1
             if progress_callback:
                 progress_callback(
@@ -285,11 +365,19 @@ def routed_analyze_lectures_staged(
                         "step": f"staged {role} {step}",
                         "completed": completed_steps,
                         "total": total_steps,
-                        "input_tokens": input_tokens,
-                        "output_tokens": output_tokens,
+                        "input_tokens": state["input_tokens"],
+                        "output_tokens": state["output_tokens"],
+                        "step_input_tokens": step_usage["input_tokens"],
+                        "step_output_tokens": step_usage["output_tokens"],
+                        "step_elapsed_seconds": timing.get("elapsed_seconds"),
+                        "step_outcome": outcome["outcome"],
+                        "step_message": outcome["message"],
+                        "batch_input_tokens": input_tokens,
+                        "batch_output_tokens": output_tokens,
                         "provider": config.ai_step_provider(step).value,
                         "model": availability.model_for_step(step, config),
                         "role": role,
+                        **_slide_progress_counts(step, request, payload),
                     }
                 )
         next_step = ordered_steps[index + 1][1] if index + 1 < len(ordered_steps) else None
@@ -298,6 +386,7 @@ def routed_analyze_lectures_staged(
             if transition_warning:
                 for state in states.values():
                     state["warnings"].append(transition_warning)
+        previous_stage_ref = current_stage_ref
 
     responses: Dict[str, AnalyzeLectureResponse] = {}
     for key, state in states.items():
@@ -325,6 +414,9 @@ def routed_analyze_lectures_staged(
             or 350,
             raw_response_id="experimental-routing-staged",
             warnings=_dedupe_warnings(warnings),
+            step_timings=state["step_timings"],
+            step_token_usage=state["step_token_usage"],
+            step_outcomes=state["step_outcomes"],
         )
     return responses
 
@@ -466,9 +558,14 @@ def _mlx_provider(
     kwargs = {
         "model": (availability or RouteAvailability()).model_for_step(step, config),
         "timeout_seconds": config.mlx_request_timeout_seconds,
+        "role_max_tokens": {
+            role: int(role_config["max_tokens"])
+            for role, role_config in AI_ROLE_MODEL_CONFIG.items()
+        },
+        "disable_thinking": config.mlx_disable_thinking,
     }
     if provider is AIModelProvider.MLX_VISION:
-        return MLXVisionProvider(base_url=config.mlx_vision_base_url, **kwargs)
+        return MLXVisionProvider(base_url=config.mlx_text_base_url, **kwargs)
     return MLXTextProvider(base_url=config.mlx_text_base_url, **kwargs)
 
 
@@ -486,9 +583,104 @@ def _disabled_payload_for_step(step: str, request: AnalyzeLectureRequest, reason
     return payload
 
 
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _start_step_timer() -> Dict[str, object]:
+    return {"started_at": _utc_now_iso(), "monotonic": time.monotonic()}
+
+
+def _finish_step_timer(timer: Dict[str, object], **metadata) -> Dict:
+    payload = {
+        "started_at": str(timer.get("started_at") or _utc_now_iso()),
+        "finished_at": _utc_now_iso(),
+        "elapsed_seconds": round(max(0.0, time.monotonic() - float(timer.get("monotonic") or time.monotonic())), 3),
+    }
+    for key, value in metadata.items():
+        if value is not None:
+            payload[key] = value
+    return payload
+
+
+def _record_step_timing(step_timings: Dict[str, Dict], step: str, timing: Dict, payload: Dict) -> None:
+    nested = payload.get("step_timings") if isinstance(payload, dict) else None
+    if isinstance(nested, dict):
+        step_timings.update({str(key): value for key, value in nested.items() if isinstance(value, dict)})
+    if step == "resources" and nested:
+        return
+    step_timings[AI_TIMING_KEY_BY_STEP.get(step, step)] = timing
+
+
+def _record_step_token_usage(step_token_usage: Dict[str, Dict], step: str, payload: Dict) -> None:
+    nested = payload.get("step_token_usage") if isinstance(payload, dict) else None
+    if isinstance(nested, dict):
+        _merge_step_token_usage(step_token_usage, nested)
+    if step == "resources" and nested:
+        return
+    entry = _token_usage_entry(
+        payload.get("input_tokens") if isinstance(payload, dict) else 0,
+        payload.get("output_tokens") if isinstance(payload, dict) else 0,
+    )
+    if entry["total_tokens"] <= 0:
+        return
+    step_token_usage[AI_TOKEN_KEY_BY_STEP.get(step, step)] = entry
+
+
+def _merge_step_token_usage(target: Dict[str, Dict], source: Dict) -> None:
+    if not isinstance(source, dict):
+        return
+    for key, value in source.items():
+        if not isinstance(value, dict):
+            continue
+        entry = _token_usage_entry(value.get("input_tokens"), value.get("output_tokens"))
+        if entry["total_tokens"] <= 0:
+            continue
+        current = target.get(str(key)) or {}
+        target[str(key)] = _token_usage_entry(
+            int(current.get("input_tokens") or 0) + entry["input_tokens"],
+            int(current.get("output_tokens") or 0) + entry["output_tokens"],
+        )
+
+
+def _token_usage_entry(input_tokens, output_tokens) -> Dict[str, int]:
+    input_count = max(0, int(input_tokens or 0))
+    output_count = max(0, int(output_tokens or 0))
+    return {
+        "input_tokens": input_count,
+        "output_tokens": output_count,
+        "total_tokens": input_count + output_count,
+    }
+
+
+def _timing_metadata(step: str, payload: Dict) -> Dict:
+    if step == "transcript":
+        return {"chunk_count": int(payload.get("chunk_count") or 0)}
+    if step == "slides":
+        return {
+            "batch_count": int(payload.get("batch_count") or 0),
+            "retry_count": int(payload.get("retry_count") or 0),
+        }
+    return {}
+
+
+def _step_outcome_entry(step: str, payload: Dict) -> Dict[str, str]:
+    warnings = " ".join(str(item or "") for item in (payload.get("warnings") or []))
+    lowered = warnings.lower()
+    if step == "slides" and "smart slide extraction metadata" in lowered:
+        return {"outcome": "metadata_used", "message": "Metadata used"}
+    if any(marker in lowered for marker in ("route is off", "skipped because", "unavailable")):
+        return {"outcome": "skipped", "message": "No model call"}
+    if step == "transcript" and ("raw fallback" in lowered or "used raw" in lowered):
+        return {"outcome": "fallback", "message": "Raw transcript kept"}
+    if "fallback" in lowered or "local stub" in lowered:
+        return {"outcome": "fallback", "message": "Fallback used"}
+    return {"outcome": "success", "message": "Generated"}
+
+
 def _base_url_for_provider(provider: AIModelProvider, config: BatchConfig) -> str:
     if provider is AIModelProvider.MLX_VISION:
-        return config.mlx_vision_base_url
+        return config.mlx_text_base_url
     return config.mlx_text_base_url
 
 
@@ -503,22 +695,6 @@ def _offload_model_between_steps(
     config: BatchConfig,
     availability: Optional[RouteAvailability],
 ) -> Optional[str]:
-    completed_model = _local_model_ref_for_step(completed_step, config, availability)
-    if not completed_model:
-        return None
-    next_model = _local_model_ref_for_step(next_step, config, availability) if next_step else None
-    if not next_model:
-        return None
-    if next_model and completed_model.base_url == next_model.base_url and completed_model.model == next_model.model:
-        return None
-    try:
-        _OpenAICompatibleClient(
-            completed_model.base_url,
-            completed_model.model,
-            config.mlx_request_timeout_seconds,
-        ).unload_model(completed_model.model, f"LM Studio {completed_step} model transition")
-    except Exception as exc:
-        return f"LM Studio model offload after {completed_step} failed for {completed_model.model}: {exc}"
     return None
 
 
@@ -568,8 +744,9 @@ class _LocalProgress:
         if not self.progress_callback or self.total <= 0:
             return
         self.completed += 1
-        self.input_tokens += int(payload.get("input_tokens") or 0)
-        self.output_tokens += int(payload.get("output_tokens") or 0)
+        step_usage = _token_usage_entry(payload.get("input_tokens"), payload.get("output_tokens"))
+        self.input_tokens += step_usage["input_tokens"]
+        self.output_tokens += step_usage["output_tokens"]
         self.progress_callback(
             {
                 "step": f"local {step}",
@@ -577,6 +754,12 @@ class _LocalProgress:
                 "total": self.total,
                 "input_tokens": self.input_tokens,
                 "output_tokens": self.output_tokens,
+                "step_input_tokens": step_usage["input_tokens"],
+                "step_output_tokens": step_usage["output_tokens"],
+                "step_elapsed_seconds": payload.get("step_elapsed_seconds"),
+                "step_outcome": payload.get("step_outcome"),
+                "step_message": payload.get("step_message"),
+                **_progress_count_fields(payload),
             }
         )
 
@@ -585,6 +768,23 @@ def _local_route_count(config: BatchConfig) -> int:
     return sum(
         1 for step in AI_ROUTE_STEPS if config.ai_step_provider(step) is not AIModelProvider.GEMINI
     )
+
+
+def _slide_progress_counts(step: str, request: AnalyzeLectureRequest, payload: Dict) -> Dict:
+    if step != "slides":
+        return {}
+    input_count = len(request.slides or [])
+    remaining_count = len(payload.get("slide_analysis") or [])
+    return {
+        "input_slide_count": input_count,
+        "slide_count_remaining": remaining_count,
+        "remaining_slide_count": remaining_count,
+    }
+
+
+def _progress_count_fields(payload: Dict) -> Dict:
+    keys = ("input_slide_count", "slide_count_remaining", "remaining_slide_count")
+    return {key: payload[key] for key in keys if key in payload}
 
 
 def _sum_tokens(key: str, *payloads: Dict) -> int:

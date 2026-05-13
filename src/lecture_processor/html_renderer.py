@@ -7,6 +7,11 @@ from .artifacts import LECTURE_ARTIFACT_NAME, load_json
 from .models import BatchSummary, FileResult, FileStatus
 from .writers import write_text_atomic
 
+LOCAL_OVERVIEW_STUB_SUMMARY = (
+    "Local overview stub. This placeholder keeps the experimental routing path working "
+    "until a real local overview model is configured."
+)
+
 
 def render_lecture_page(lecture_json_path: Path) -> Path:
     artifact = load_json(lecture_json_path)
@@ -55,22 +60,22 @@ def _batch_html(output_dir: Path, summary: BatchSummary) -> str:
     for result in summary.results:
         artifact = _load_artifact_if_present(result.output_dir)
         title = (artifact.get("enrichment") or {}).get("title") if artifact else None
-        title = title or result.title or result.source.stem.replace("_", " ")
+        title = title or result.title or _display_name(result.source.stem)
         description = (artifact.get("enrichment") or {}).get("executive_summary") if artifact else None
-        description = description or result.short_summary or result.message or result.status.value
+        description = _batch_description(description or result.short_summary or result.message or result.status.value)
         html_path = result.html_path or (result.output_dir / "html" / "index.html")
         link = _relative(html_path, output_dir) if html_path.exists() else None
         thumb = _first_slide(result.output_dir)
         rows.append(_batch_row(result, title, description, link, thumb, output_dir))
 
-    title = f"{output_dir.name} Study Index"
+    display_title = _display_name(output_dir.name)
+    title = f"{display_title} Study Index"
     return "\n".join(
         [
             _html_head(title),
             "<body>",
             "<main>",
-            f"<header><p class=\"eyebrow\">Batch Study Index</p><h1>{_e(output_dir.name)}</h1>"
-            f"<p class=\"summary\">{summary.completed} completed, {summary.failed} failed, {summary.skipped} skipped, {summary.stopped} stopped.</p></header>",
+            f"<header><h1>{_e(display_title)}</h1></header>",
             "<section class=\"lecture-list\">",
             "\n".join(rows) or "<p>No lectures were processed.</p>",
             "</section>",
@@ -786,16 +791,35 @@ def _batch_row(result: FileResult, title: str, description: str, link: Optional[
     else:
         image_html = "<div></div>"
     action = f"<a href=\"{_e(link)}\">Open</a>" if link else f"<span class=\"status\">{_e(result.status.value)}</span>"
+    description_html = f"<p>{_e(description)}</p>" if description else ""
     return f"""
       <article class="lecture-row {result.status.value}">
         {image_html}
         <div>
           <h2>{_e(title)}</h2>
-          <p>{_e(description)}</p>
+          {description_html}
         </div>
         <div>{action}</div>
       </article>
     """
+
+
+def _batch_description(value: str) -> str:
+    clean = " ".join(str(value or "").split())
+    if not clean:
+        return ""
+    if clean == LOCAL_OVERVIEW_STUB_SUMMARY:
+        return "Overview unavailable"
+    return clean
+
+
+def _display_name(value: str) -> str:
+    clean = str(value or "").strip()
+    clean = re.sub(r"\.[A-Za-z0-9]+$", "", clean)
+    clean = re.sub(r"([_-])processed$", "", clean, flags=re.IGNORECASE)
+    clean = clean.replace("_", " ")
+    clean = re.sub(r"\s+", " ", clean).strip()
+    return clean or "Lecture"
 
 
 def _load_artifact_if_present(output_dir: Path) -> Optional[Dict]:

@@ -35,6 +35,10 @@ mlx = [
 ai = [
   "google-genai>=1.0.0"
 ]
+vision-harness = [
+  "requests>=2.31.0,<3.0.0",
+  "Pillow>=10.0.0"
+]
 dev = []
 
 [project.scripts]

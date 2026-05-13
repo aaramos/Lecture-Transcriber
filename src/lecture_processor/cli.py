@@ -30,7 +30,6 @@ from .media import ensure_media_tools, resolve_media_tool
 from .models import BatchSummary, FileStatus
 from .pipeline import BatchProcessor, discover_mov_files, enrich_processed_batch
 from .profiles import FAST_PROFILE_ID, QUALITY_PROFILE_ID, TURBO_PROFILE_ID, profile_from_legacy_quality
-from .slides import SlideExtractor
 from .sources import is_media_source
 from .temp_cleanup import cleanup_slide_temp_dirs
 from .transcription import build_transcriber
@@ -261,13 +260,6 @@ def _run_process(args) -> int:
         processor = BatchProcessor(
             config=config,
             transcriber=transcriber,
-            slide_extractor=SlideExtractor(
-                config.slide_sensitivity,
-                backend=config.slide_backend,
-                ffmpeg_path=config.ffmpeg_path,
-                ffmpeg_hwaccel=config.ffmpeg_hwaccel,
-                apple_silicon=config.apple_silicon,
-            ),
             progress_callback=event_printer,
         )
         summary = processor.run()

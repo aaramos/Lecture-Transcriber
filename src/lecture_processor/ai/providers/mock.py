@@ -44,6 +44,15 @@ class MockProvider:
             input_token_estimate=max(1, len(request.transcript_text.split())),
             output_token_estimate=250 + (60 * len(slide_analysis)),
             warnings=["Mock enrichment was used. Replace with Gemini for real AI-generated study notes."],
+            step_token_usage={
+                "overview": _token_usage_entry(_estimate_tokens(request.transcript_text), 80),
+                "transcript_cleanup": _token_usage_entry(
+                    _estimate_tokens(request.transcript_text),
+                    _estimate_tokens(request.transcript_text),
+                ),
+                "slide_analysis": _token_usage_entry(max(1, len(request.slides) * 40), max(1, len(slide_analysis) * 60)),
+                "resource_formatter": _token_usage_entry(40, 20),
+            },
         )
 
 
@@ -61,6 +70,20 @@ def _summary_from_transcript(text: str) -> str:
     if len(clean) <= 420:
         return clean
     return clean[:417].rsplit(" ", 1)[0] + "..."
+
+
+def _token_usage_entry(input_tokens: int, output_tokens: int) -> dict:
+    input_count = max(0, int(input_tokens or 0))
+    output_count = max(0, int(output_tokens or 0))
+    return {
+        "input_tokens": input_count,
+        "output_tokens": output_count,
+        "total_tokens": input_count + output_count,
+    }
+
+
+def _estimate_tokens(text: str) -> int:
+    return max(1, len(str(text or "")) // 4)
 
 
 def _formatted_transcript(text: str) -> str:

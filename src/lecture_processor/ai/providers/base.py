@@ -35,6 +35,9 @@ class AnalyzeLectureResponse:
     output_token_estimate: int = 0
     raw_response_id: Optional[str] = None
     warnings: List[str] = field(default_factory=list)
+    step_timings: Dict[str, Dict] = field(default_factory=dict)
+    step_token_usage: Dict[str, Dict] = field(default_factory=dict)
+    step_outcomes: Dict[str, Dict] = field(default_factory=dict)
 
 
 class AIProviderError(Exception):

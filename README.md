@@ -166,6 +166,74 @@ lecture-processor process /path/to/lectures \
 
 The desktop app uses one LM Studio server URL for text, vision, and resources. If your LM Studio server requires a token, Settings stores it in macOS Keychain and passes it only to the processor process.
 
+## Vision Model Test Harness
+
+`harness.py` compares local LM Studio vision models and prompt files against the same image folder over time. It appends each run to `results.json` and regenerates `report.md` from the full history.
+
+Install the small harness extra if this workspace has not already been bootstrapped:
+
+```bash
+python3 -m pip install -e ".[vision-harness]"
+```
+
+Prompts live in `prompts/` and are referenced by filename without `.txt`:
+
+```text
+prompts/classify_v1.txt
+```
+
+First run, including the reusable baseline:
+
+```bash
+python harness.py \
+  --model outlier-vision-35b-a3b-mlx \
+  --prompt classify_v1 \
+  --batch ~/Desktop/batchImageTest \
+  --codex-model qwen2.5-vl-7b-instruct
+```
+
+Later runs reuse the baseline automatically:
+
+```bash
+python harness.py --model qwen2.5-vl-32b-instruct --prompt classify_v1 --batch ~/Desktop/batchImageTest
+python harness.py --model qwen2.5-vl-32b-instruct --prompt classify_v2 --batch ~/Desktop/batchImageTest
+```
+
+Profiles tune LM Studio load and inference settings for a run. `VISION_HQ` is the default quality-focused profile with a 32k context on the M3 Ultra; `VISION_TURBO` uses a 16k context and shorter generation budget for faster screening:
+
+```bash
+python harness.py --model qwen2.5-vl-32b-instruct --prompt classify_v2 --batch ~/Desktop/batchImageTest --profile VISION_TURBO
+```
+
+The same profile layer also defines `SUMMARIZATION_HQ` and `SUMMARIZATION_TURBO` for text-summary workloads. Those use non-greedy sampling, repetition controls, and longer text contexts; the Vision Web UI keeps its dropdown scoped to the two vision profiles.
+
+Useful read-only commands:
+
+```bash
+python harness.py --list-runs
+python harness.py --report-only
+```
+
+The default LM Studio URL is `http://127.0.0.1:1234`. Use `--base-url` if LM Studio is running on another machine.
+
+To use the local Web UI:
+
+```bash
+python harness_web.py
+```
+
+Then open `http://127.0.0.1:8765`, choose or drag an image folder, refresh LM Studio models, select one or more vision models, choose a profile, and run the test. The Web UI unloads the current LM Studio model before loading the next selected model so each run is isolated.
+
+Use the Vision Test selector when you want a new prompt experiment without mixing results. `Vision Test #1` keeps the original `results.json` and `report.md`; new tests get their own files under `.harness_tests/`, reuse the same uploaded image folder and Codex baseline by default, and start with no model runs recorded.
+
+The selected profile is saved per Vision Test, so each experiment keeps using its chosen profile until you change it.
+
+If a model crashes or LM Studio reports that no model is loaded, the Web UI retries the load once. If the model still cannot answer, the remaining images for that model are marked as errors without sending the same failing request dozens of times.
+
+Codex agreement is shown only when real baseline verdicts exist. Empty baseline placeholders are ignored so the Results tab does not imply that agreement scoring is available when it is not.
+
+If LM Studio returns `401`, paste the LM Studio API token into the Web UI and click Save Token. The token is saved to macOS Keychain under the `Vision Harness` service and is not written to `results.json`, `report.md`, browser storage, or a plain text file. You can also start the Web UI with `LM_STUDIO_API_KEY` or `LM_API_TOKEN` in the environment.
+
 `--audio-quality high` uses FFmpeg's `rubberband` filter when the installed FFmpeg build includes it. The bundled local FFmpeg does not, so the processor automatically falls back to `atempo` instead of failing the batch.
 
 ## Transcription Reliability
