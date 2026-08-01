@@ -1,12 +1,12 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Lecture Processor",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "identifier": "com.aaramos.lectureprocessor",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://127.0.0.1:5173",
-    "beforeBuildCommand": "npm run build",
+    "beforeBuildCommand": "npm run build && npm run prepare:bundle",
     "frontendDist": "../dist"
   },
   "app": {
@@ -27,13 +27,10 @@
   "bundle": {
     "active": true,
     "targets": ["app", "dmg"],
-    "resources": [
-      "../.tools/darwin_arm64/ffmpeg",
-      "../.tools/darwin_arm64/ffprobe",
-      "../pyproject.toml",
-      "../README.md",
-      "../src/**/*"
-    ],
+    "resources": ["bundle-resources/project"],
+    "macOS": {
+      "signingIdentity": "-"
+    },
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

@@ -66,8 +66,8 @@ class BatchConfigTests(unittest.TestCase):
             self.assertIs(config.transcription_quality, TranscriptionQuality.ACCURATE)
             self.assertEqual(config.whisper_model, "medium.en")
             self.assertEqual(config.gemini_max_concurrency, 3)
-            self.assertEqual(config.mlx_text_base_url, "http://192.168.86.101:1234/v1")
-            self.assertEqual(config.mlx_vision_base_url, "http://192.168.86.101:1234/v1")
+            self.assertEqual(config.mlx_text_base_url, "http://192.168.86.22:1234/v1")
+            self.assertEqual(config.mlx_vision_base_url, "http://192.168.86.22:1234/v1")
             self.assertEqual(config.mlx_request_timeout_seconds, 120)
             self.assertEqual(
                 config.ai_model_routing,
@@ -97,6 +97,38 @@ class BatchConfigTests(unittest.TestCase):
             self.assertTrue(config.ai_uses_mlx)
             self.assertEqual(config.ai_step_model("transcript"), "default")
             self.assertEqual(config.ai_step_model("resources"), "off")
+
+    def test_validates_mlx_url_format(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+
+            # Invalid URL scheme
+            config = BatchConfig(
+                input_dir=folder,
+                output_dir=folder / "out",
+                mlx_text_base_url="not-a-url",
+            )
+            with self.assertRaises(LectureProcessorError) as context:
+                config.validate()
+            self.assertIn("Invalid URL for mlx_text_base_url", str(context.exception))
+
+            # Missing netloc
+            config2 = BatchConfig(
+                input_dir=folder,
+                output_dir=folder / "out",
+                mlx_vision_base_url="http:///path/without/host",
+            )
+            with self.assertRaises(LectureProcessorError) as context:
+                config2.validate()
+            self.assertIn("Invalid URL for mlx_vision_base_url", str(context.exception))
+
+            # Valid URL works
+            config3 = BatchConfig(
+                input_dir=folder,
+                output_dir=folder / "out",
+                mlx_text_base_url="https://localhost:1234",
+            )
+            config3.validate()
 
 
 if __name__ == "__main__":

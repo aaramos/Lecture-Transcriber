@@ -4,6 +4,7 @@ from unittest import mock
 from lecture_processor.profiles import (
     FAST_PROFILE_ID,
     QUALITY_PROFILE_ID,
+    PARAKEET_PROFILE_ID,
     TURBO_PROFILE_ID,
     all_profiles,
     detect_performance_core_count,
@@ -13,15 +14,21 @@ from lecture_processor.profiles import (
 
 
 class TranscriptionProfileTests(unittest.TestCase):
-    def test_registry_loads_three_profiles_in_ui_order(self):
+    def test_registry_loads_profiles_in_ui_order(self):
         profiles = list(all_profiles())
 
-        self.assertEqual([profile.id for profile in profiles], [QUALITY_PROFILE_ID, FAST_PROFILE_ID, TURBO_PROFILE_ID])
+        self.assertEqual(
+            [profile.id for profile in profiles],
+            [QUALITY_PROFILE_ID, FAST_PROFILE_ID, TURBO_PROFILE_ID, PARAKEET_PROFILE_ID],
+        )
         self.assertEqual(profiles[0].engine, "faster-whisper")
         self.assertEqual(profiles[0].model, "medium.en")
         self.assertEqual(profiles[1].engine_kwargs["model_options"]["compute_type"], "int8")
         self.assertEqual(profiles[2].engine, "mlx-whisper")
         self.assertTrue(profiles[2].engine_kwargs["transcribe_options"]["word_timestamps"])
+        self.assertEqual(profiles[3].engine, "parakeet-mlx")
+        self.assertEqual(profiles[3].model, "animaslabs/parakeet-tdt-0.6b-v3-mlx")
+        self.assertEqual(profiles[3].engine_kwargs["transcribe_options"]["chunk_duration"], 600.0)
 
     def test_legacy_quality_values_migrate_to_profiles(self):
         self.assertEqual(profile_from_legacy_quality("accurate"), QUALITY_PROFILE_ID)

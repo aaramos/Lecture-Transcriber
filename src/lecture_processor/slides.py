@@ -227,6 +227,8 @@ class SlideExtractor:
             raise ProcessingError(f"Could not open video for slide extraction: {media_path}")
 
         fps = capture.get(cv2.CAP_PROP_FPS) or 30.0
+        if fps <= 0 or fps > 240:
+            fps = 30.0
         sample_stride = max(1, int(round(fps * 2.0)))
         threshold = _threshold_for(self.sensitivity)
         previous_frame = None
@@ -255,7 +257,8 @@ class SlideExtractor:
                     saved += 1
                     filename = f"slide_{saved:04d}_{format_timestamp_for_filename(timestamp)}.png"
                     candidate_path = candidate_dir / filename
-                    cv2.imwrite(str(candidate_path), frame)
+                    if not cv2.imwrite(str(candidate_path), frame):
+                        raise ProcessingError(f"Failed to save slide image: {candidate_path}")
                     candidates.append(FrameCandidate(path=candidate_path, timestamp=timestamp))
                     previous_frame = frame
 

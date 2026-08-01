@@ -3,11 +3,12 @@ from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Optional, Tuple
+import urllib.parse
 
 from .errors import LectureProcessorError
 from .profiles import DEFAULT_PROFILE_ID, normalize_profile_id
 
-DEFAULT_LM_STUDIO_BASE_URL = "http://192.168.86.101:1234/v1"
+DEFAULT_LM_STUDIO_BASE_URL = "http://192.168.86.22:1234/v1"
 
 
 def default_local_text_base_url() -> str:
@@ -54,6 +55,7 @@ class TranscriptionEngine(str, Enum):
     AUTO = "auto"
     WHISPER_CPP = "whisper-cpp"
     FASTER_WHISPER = "faster-whisper"
+    PARAKEET_MLX = "parakeet-mlx"
     OPENAI_WHISPER = "openai-whisper"
     NONE = "none"
 
@@ -164,6 +166,21 @@ class BatchConfig:
             )
         if self.ai_provider is AIProviderName.GEMINI and not self.ai_model:
             object.__setattr__(self, "ai_model", "gemini-2.5-flash")
+        self._validate_mlx_urls()
+
+    def _validate_mlx_urls(self) -> None:
+        for url_field in ("mlx_text_base_url", "mlx_vision_base_url"):
+            url = getattr(self, url_field)
+            if url and not self._is_valid_url(url):
+                raise LectureProcessorError(f"Invalid URL for {url_field}: {url}")
+
+    @staticmethod
+    def _is_valid_url(url: str) -> bool:
+        try:
+            result = urllib.parse.urlparse(url)
+            return all([result.scheme in ("http", "https"), result.netloc])
+        except Exception:
+            return False
 
     def ai_step_provider(self, step: str) -> AIModelProvider:
         return getattr(self, f"ai_{step}_provider")

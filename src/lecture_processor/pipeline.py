@@ -6,6 +6,7 @@ import threading
 import time
 from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Dict, Iterator, List, Optional
 
@@ -119,14 +120,24 @@ class BatchProcessor:
             defer_ai_enrichment = self._should_defer_ai_enrichment()
             self._defer_ai_enrichment = defer_ai_enrichment
             processed_results: List[FileResult] = []
-            with ThreadPoolExecutor(max_workers=self.config.concurrent_files) as executor:
-                futures = [executor.submit(self._process_file, path, output_dirs[path]) for path in process_files]
-                for future in as_completed(futures):
-                    result = future.result()
+            worker_count = self._resolve_worker_count()
+            if worker_count == 1:
+                # MLX can bind GPU streams to the thread that initialized the model.
+                for path in process_files:
+                    result = self._process_file(path, output_dirs[path])
                     results.append(result)
                     processed_results.append(result)
                     if not defer_ai_enrichment:
                         self._emit_file_finished(result, results, len(files))
+            else:
+                with ThreadPoolExecutor(max_workers=worker_count) as executor:
+                    futures = [executor.submit(self._process_file, path, output_dirs[path]) for path in process_files]
+                    for future in as_completed(futures):
+                        result = future.result()
+                        results.append(result)
+                        processed_results.append(result)
+                        if not defer_ai_enrichment:
+                            self._emit_file_finished(result, results, len(files))
 
             if defer_ai_enrichment:
                 results = self._run_deferred_ai_enrichment(results)
@@ -164,6 +175,12 @@ class BatchProcessor:
             )
             return summary
 
+    def _resolve_worker_count(self) -> int:
+        metadata = getattr(self.transcriber, "metadata", {})
+        if metadata.get("resolved_engine") == "parakeet-mlx":
+            return 1
+        return self.config.concurrent_files
+
     def _process_file(self, source: Path, output_dir: Path) -> FileResult:
         if is_transcript_source(source):
             return self._process_transcript_file(source, output_dir)
@@ -183,6 +200,7 @@ class BatchProcessor:
         normalized_duration = None
         media_info = None
         transcript = None
+        slide_count = 0
         lecture_json_path = None
         html_path = None
         enriched = False
@@ -505,7 +523,7 @@ class BatchProcessor:
                 normalized_duration_seconds=normalized_duration,
                 elapsed_seconds=elapsed,
                 word_count=transcript.word_count if transcript else 0,
-                slide_count=len(list((output_dir / "slides").glob("*.png"))) if (output_dir / "slides").exists() else 0,
+                slide_count=slide_count,
                 failure_step=step,
                 message=message,
                 lecture_json_path=lecture_json_path,
@@ -871,16 +889,11 @@ class BatchProcessor:
                     result.output_dir,
                     [f"Enrich     SKIP ERROR: AI enrichment skipped. {skip_reason}"],
                 )
-                html_path = self._render_deferred_html(result)
                 artifact = load_json(result.lecture_json_path)
-                updated[result.output_dir] = _file_result_from_artifact(
-                    source=result.source,
-                    output_dir=result.output_dir,
-                    artifact=artifact,
-                    status=FileStatus.COMPLETED,
+                updated[result.output_dir] = self._complete_deferred_result(
+                    result,
+                    artifact,
                     message=f"AI enrichment skipped. {skip_reason}",
-                    html_path=html_path,
-                    rendered=bool(html_path),
                     elapsed_seconds=result.elapsed_seconds,
                 )
             return _replace_results(results, updated)
@@ -896,28 +909,12 @@ class BatchProcessor:
                 progress_callback=self.progress_callback,
             )
         except Exception as exc:
-            elapsed = time.monotonic() - step_started
-            message = str(exc)
-            for result in eligible:
-                self._append_processing_log_lines(
-                    result.output_dir,
-                    [
-                        f"Enrich     ERROR: {message}",
-                        "AI enrichment failed after non-AI processing completed. Partial output preserved for review.",
-                    ],
-                )
-                self._emit("step_finished", source=result.source.name, step="Enrich", elapsed_seconds=round(elapsed, 1))
-                artifact = load_json(result.lecture_json_path)
-                updated[result.output_dir] = _file_result_from_artifact(
-                    source=result.source,
-                    output_dir=result.output_dir,
-                    artifact=artifact,
-                    status=FileStatus.FAILED,
-                    message=message,
-                    failure_step="Enrich",
-                    elapsed_seconds=result.elapsed_seconds + elapsed,
-                )
-            return _replace_results(results, updated)
+            return self._recover_deferred_ai_individually(
+                results,
+                eligible,
+                staged_error=exc,
+                staged_elapsed=time.monotonic() - step_started,
+            )
 
         elapsed = time.monotonic() - step_started
         for result in eligible:
@@ -929,19 +926,126 @@ class BatchProcessor:
                 [f"Enrich     OK  {elapsed:.1f}s (staged AI)"],
             )
             self._emit("step_finished", source=result.source.name, step="Enrich", elapsed_seconds=round(elapsed, 1))
-            html_path = self._render_deferred_html(result)
-            updated[result.output_dir] = _file_result_from_artifact(
-                source=result.source,
-                output_dir=result.output_dir,
-                artifact=artifact,
-                status=FileStatus.COMPLETED,
+            updated[result.output_dir] = self._complete_deferred_result(
+                result,
+                artifact,
                 message="Complete",
-                html_path=html_path,
-                rendered=bool(html_path),
                 elapsed_seconds=result.elapsed_seconds + elapsed,
             )
 
         return _replace_results(results, updated)
+
+    def _recover_deferred_ai_individually(
+        self,
+        results: List[FileResult],
+        eligible: List[FileResult],
+        *,
+        staged_error: Exception,
+        staged_elapsed: float,
+    ) -> List[FileResult]:
+        updated: Dict[Path, FileResult] = {}
+        staged_message = str(staged_error)
+        for result in eligible:
+            retry_started = time.monotonic()
+            self._append_processing_log_lines(
+                result.output_dir,
+                [
+                    f"Enrich     RETRY: staged batch failed: {staged_message}",
+                    "Retrying AI enrichment for this lecture so other lectures can continue.",
+                ],
+            )
+            try:
+                artifact = load_json(result.lecture_json_path)
+                if not artifact.get("enrichment"):
+                    artifact = enrich_lecture_artifact(
+                        result.lecture_json_path,
+                        self.config,
+                        progress_callback=self.progress_callback,
+                    )
+            except Exception as exc:
+                elapsed = staged_elapsed + (time.monotonic() - retry_started)
+                message = str(exc)
+                self._append_processing_log_lines(
+                    result.output_dir,
+                    [
+                        f"Enrich     ERROR: {message}",
+                        "AI enrichment failed after an individual retry. Non-AI output was preserved.",
+                    ],
+                )
+                self._emit(
+                    "step_finished",
+                    source=result.source.name,
+                    step="Enrich",
+                    elapsed_seconds=round(elapsed, 1),
+                )
+                updated[result.output_dir] = _file_result_from_artifact(
+                    source=result.source,
+                    output_dir=result.output_dir,
+                    artifact=load_json(result.lecture_json_path),
+                    status=FileStatus.FAILED,
+                    message=message,
+                    failure_step="Enrich",
+                    elapsed_seconds=result.elapsed_seconds + elapsed,
+                )
+                continue
+
+            elapsed = staged_elapsed + (time.monotonic() - retry_started)
+            self._append_processing_log_lines(
+                result.output_dir,
+                ["Enrich     OK  recovered with an individual retry"],
+            )
+            self._emit(
+                "step_finished",
+                source=result.source.name,
+                step="Enrich",
+                elapsed_seconds=round(elapsed, 1),
+            )
+            updated[result.output_dir] = self._complete_deferred_result(
+                result,
+                artifact,
+                message="Complete",
+                elapsed_seconds=result.elapsed_seconds + elapsed,
+            )
+        return _replace_results(results, updated)
+
+    def _complete_deferred_result(
+        self,
+        result: FileResult,
+        artifact: Dict,
+        *,
+        message: str,
+        elapsed_seconds: float,
+    ) -> FileResult:
+        try:
+            html_path = self._render_deferred_html(result)
+        except Exception as exc:
+            render_message = str(exc)
+            self._append_processing_log_lines(
+                result.output_dir,
+                [
+                    f"Render     ERROR: {render_message}",
+                    "HTML rendering failed for this lecture. The batch continued and JSON output was preserved.",
+                ],
+            )
+            return _file_result_from_artifact(
+                source=result.source,
+                output_dir=result.output_dir,
+                artifact=artifact,
+                status=FileStatus.FAILED,
+                message=render_message,
+                failure_step="Render",
+                elapsed_seconds=elapsed_seconds,
+            )
+        return _file_result_from_artifact(
+            source=result.source,
+            output_dir=result.output_dir,
+            artifact=artifact,
+            status=FileStatus.COMPLETED,
+            message=message,
+            html_path=html_path,
+            rendered=bool(html_path),
+            elapsed_seconds=elapsed_seconds,
+        )
 
     def _render_deferred_html(self, result: FileResult) -> Optional[Path]:
         if not self.config.render_html or not result.lecture_json_path:
@@ -1067,8 +1171,9 @@ class BatchProcessor:
         event = {"kind": kind, **payload}
         try:
             self.progress_callback(event)
-        except Exception:
-            pass
+        except Exception as exc:
+            import sys
+            print(f"Warning: progress callback failed for {kind}: {exc}", file=sys.stderr)
 
 
 def _slide_count_detail(result: SlideExtractionResult) -> str:
@@ -1116,6 +1221,8 @@ def completed_output_result(source: Path, output_dir: Path) -> Optional[FileResu
     artifact_source = str(artifact.get("source", {}).get("filename") or "")
     if artifact_source and artifact_source != source.name:
         return None
+    if not _completed_artifact_matches_source(artifact, source):
+        return None
     return _file_result_from_artifact(
         source=source,
         output_dir=output_dir,
@@ -1123,6 +1230,40 @@ def completed_output_result(source: Path, output_dir: Path) -> Optional[FileResu
         status=FileStatus.SKIPPED,
         message=ALREADY_PROCESSED_MESSAGE,
     )
+
+
+def _completed_artifact_matches_source(artifact: Dict, source: Path) -> bool:
+    """Reject stale completed output when the input file was replaced or moved."""
+    source_record = artifact.get("source") or {}
+    recorded_path = str(source_record.get("absolute_path") or "").strip()
+    if recorded_path:
+        try:
+            if Path(recorded_path).resolve() != source.resolve():
+                return False
+        except OSError:
+            return False
+
+    try:
+        stat = source.stat()
+    except OSError:
+        return False
+
+    recorded_size = source_record.get("byte_size")
+    if isinstance(recorded_size, int) and recorded_size != stat.st_size:
+        return False
+
+    recorded_modified_at = str(source_record.get("modified_at") or "").strip()
+    if recorded_modified_at:
+        current_modified_at = (
+            datetime.fromtimestamp(stat.st_mtime, timezone.utc)
+            .replace(microsecond=0)
+            .isoformat()
+            .replace("+00:00", "Z")
+        )
+        if recorded_modified_at != current_modified_at:
+            return False
+
+    return True
 
 
 def enrich_processed_batch(
@@ -1265,17 +1406,13 @@ def _enrich_processed_lectures_staged(
                 step="Enrich",
                 elapsed_seconds=round(elapsed, 1),
             )
-            html_path = _render_processed_html(item["source"], item["path"], config, progress_callback)
             results.append(
-                _file_result_from_artifact(
-                    source=item["source"],
-                    output_dir=item["output_dir"],
-                    artifact=artifact,
-                    status=FileStatus.COMPLETED,
+                _complete_processed_enrichment_result(
+                    item,
+                    artifact,
+                    config,
+                    progress_callback,
                     message=f"AI enrichment skipped. {skip_reason}",
-                    html_path=html_path,
-                    rendered=bool(html_path),
-                    elapsed_seconds=time.monotonic() - item["started"],
                 )
             )
         return results
@@ -1287,26 +1424,15 @@ def _enrich_processed_lectures_staged(
             progress_callback=progress_callback,
         )
     except Exception as exc:
-        elapsed = time.monotonic() - step_started
-        for item in eligible:
-            _emit(
+        results.extend(
+            _recover_processed_ai_individually(
+                eligible,
+                config,
                 progress_callback,
-                "step_finished",
-                source=item["source"].name,
-                step="Enrich",
-                elapsed_seconds=round(elapsed, 1),
+                staged_error=exc,
+                staged_elapsed=time.monotonic() - step_started,
             )
-            results.append(
-                _file_result_from_artifact(
-                    source=item["source"],
-                    output_dir=item["output_dir"],
-                    artifact=item["artifact"],
-                    status=FileStatus.FAILED,
-                    message=str(exc),
-                    failure_step="Enrich",
-                    elapsed_seconds=time.monotonic() - item["started"],
-                )
-            )
+        )
         return results
 
     elapsed = time.monotonic() - step_started
@@ -1319,20 +1445,109 @@ def _enrich_processed_lectures_staged(
             step="Enrich",
             elapsed_seconds=round(elapsed, 1),
         )
-        html_path = _render_processed_html(item["source"], item["path"], config, progress_callback)
         results.append(
-            _file_result_from_artifact(
-                source=item["source"],
-                output_dir=item["output_dir"],
-                artifact=artifact,
-                status=FileStatus.COMPLETED,
+            _complete_processed_enrichment_result(
+                item,
+                artifact,
+                config,
+                progress_callback,
                 message="Enhanced",
-                html_path=html_path,
-                rendered=bool(html_path),
-                elapsed_seconds=time.monotonic() - item["started"],
             )
         )
     return results
+
+
+def _recover_processed_ai_individually(
+    eligible: List[Dict],
+    config: BatchConfig,
+    progress_callback: Optional[Callable[[Dict], None]],
+    *,
+    staged_error: Exception,
+    staged_elapsed: float,
+) -> List[FileResult]:
+    recovered: List[FileResult] = []
+    for item in eligible:
+        retry_started = time.monotonic()
+        try:
+            artifact = load_json(item["path"])
+            if not artifact.get("enrichment"):
+                artifact = enrich_lecture_artifact(
+                    item["path"],
+                    config,
+                    progress_callback=progress_callback,
+                )
+        except Exception as exc:
+            elapsed = staged_elapsed + (time.monotonic() - retry_started)
+            _emit(
+                progress_callback,
+                "step_finished",
+                source=item["source"].name,
+                step="Enrich",
+                elapsed_seconds=round(elapsed, 1),
+            )
+            recovered.append(
+                _file_result_from_artifact(
+                    source=item["source"],
+                    output_dir=item["output_dir"],
+                    artifact=load_json(item["path"]),
+                    status=FileStatus.FAILED,
+                    message=f"{exc} (staged batch error: {staged_error})",
+                    failure_step="Enrich",
+                    elapsed_seconds=time.monotonic() - item["started"],
+                )
+            )
+            continue
+
+        elapsed = staged_elapsed + (time.monotonic() - retry_started)
+        _emit(
+            progress_callback,
+            "step_finished",
+            source=item["source"].name,
+            step="Enrich",
+            elapsed_seconds=round(elapsed, 1),
+        )
+        recovered.append(
+            _complete_processed_enrichment_result(
+                item,
+                artifact,
+                config,
+                progress_callback,
+                message="Enhanced after individual retry",
+            )
+        )
+    return recovered
+
+
+def _complete_processed_enrichment_result(
+    item: Dict,
+    artifact: Dict,
+    config: BatchConfig,
+    progress_callback: Optional[Callable[[Dict], None]],
+    *,
+    message: str,
+) -> FileResult:
+    try:
+        html_path = _render_processed_html(item["source"], item["path"], config, progress_callback)
+    except Exception as exc:
+        return _file_result_from_artifact(
+            source=item["source"],
+            output_dir=item["output_dir"],
+            artifact=artifact,
+            status=FileStatus.FAILED,
+            message=str(exc),
+            failure_step="Render",
+            elapsed_seconds=time.monotonic() - item["started"],
+        )
+    return _file_result_from_artifact(
+        source=item["source"],
+        output_dir=item["output_dir"],
+        artifact=artifact,
+        status=FileStatus.COMPLETED,
+        message=message,
+        html_path=html_path,
+        rendered=bool(html_path),
+        elapsed_seconds=time.monotonic() - item["started"],
+    )
 
 
 def _render_processed_html(
@@ -1475,7 +1690,9 @@ def _load_completed_artifact(output_dir: Path) -> Optional[Dict]:
         return None
     try:
         artifact = load_json(path)
-    except Exception:
+    except json.JSONDecodeError as exc:
+        return None
+    except OSError as exc:
         return None
     if artifact.get("processing", {}).get("status") != FileStatus.COMPLETED.value:
         return None
@@ -1666,4 +1883,6 @@ def write_batch_summary(output_dir: Path, summary: BatchSummary) -> None:
 
 
 def _scale_transcript(transcript: TranscriptResult, scale: float) -> TranscriptResult:
+    if transcript is None:
+        return TranscriptResult(text="", segments=[])
     return transcript.scaled(scale)

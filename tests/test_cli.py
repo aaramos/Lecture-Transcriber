@@ -19,6 +19,27 @@ class CliTests(unittest.TestCase):
             self.assertEqual(exit_code, 2)
             self.assertIn("No supported lecture files found", stderr.getvalue())
 
+    def test_empty_folder_accepts_parakeet_profile_argument(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            input_dir = Path(tmp) / "input"
+            input_dir.mkdir()
+            stderr = io.StringIO()
+
+            with redirect_stderr(stderr):
+                exit_code = main(
+                    [
+                        "process",
+                        str(input_dir),
+                        "--transcription-profile",
+                        "parakeet",
+                        "--transcription-engine",
+                        "none",
+                    ]
+                )
+
+            self.assertEqual(exit_code, 2)
+            self.assertIn("No supported lecture files found", stderr.getvalue())
+
     def test_startup_error_writes_run_level_logs(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

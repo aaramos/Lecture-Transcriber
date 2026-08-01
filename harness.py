@@ -21,7 +21,7 @@ PROMPTS_DIR = ROOT / "prompts"
 RESULTS_PATH = ROOT / "results.json"
 REPORT_PATH = ROOT / "report.md"
 
-DEFAULT_BASE_URL = "http://127.0.0.1:1234"
+DEFAULT_BASE_URL = "http://192.168.86.22:1234"
 DEFAULT_TIMEOUT_SECONDS = 120
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png"}
 KNOWN_VERDICTS = {"SLIDE", "NOT SLIDE"}

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "lecture-processor"
-version = "0.6.0"
+version = "0.6.1"
 description = "Local batch processor for lecture recordings."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -30,7 +30,8 @@ apple-silicon = [
   "ane_transformers"
 ]
 mlx = [
-  "mlx-whisper>=0.4.0"
+  "mlx-whisper>=0.4.0",
+  "parakeet-mlx==0.5.1"
 ]
 ai = [
   "google-genai>=1.0.0"

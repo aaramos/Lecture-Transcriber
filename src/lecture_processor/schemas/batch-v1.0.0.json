@@ -19,7 +19,7 @@
         "recording_speed": {"type": "string", "enum": ["1x", "2x"]},
         "audio_quality": {"type": "string", "enum": ["fast", "high"]},
         "audio_enhancement": {"type": "string", "enum": ["none", "hybrid", "strong"]},
-        "transcription_profile": {"type": "string", "enum": ["quality", "fast", "turbo"]},
+        "transcription_profile": {"type": "string", "enum": ["quality", "fast", "turbo", "parakeet"]},
         "transcription_engine": {"type": "string"},
         "transcription_quality": {"type": "string", "enum": ["accurate", "balanced", "fast"]},
         "whisper_model": {"type": "string"},

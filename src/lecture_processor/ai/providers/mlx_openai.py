@@ -998,6 +998,10 @@ class _OpenAICompatibleClient:
         *,
         native_tokens: bool = False,
     ) -> None:
+        if _uses_openai_only_api(self.base_url):
+            body["max_tokens"] = int(max_tokens)
+            body["temperature"] = float(temperature)
+            return
         profile = LM_STUDIO_PROFILES[_normalize_lm_studio_profile(self.profile_name)]
         inference = dict(profile["inference"])
         inference["max_tokens"] = int(max_tokens)
@@ -1119,7 +1123,7 @@ class _OpenAICompatibleClient:
             raise ProviderResponseError(f"{context} returned invalid JSON from LM Studio: {exc}") from exc
 
     def chat_text(self, messages: List[Dict], *, max_tokens: int, temperature: float, context: str) -> Tuple[str, _Usage]:
-        if not _is_ollama_base_url(self.base_url):
+        if _uses_lm_studio_native_api(self.base_url):
             with self._exclusive_lm_studio_request():
                 system_prompt, input_text = _native_prompt_from_messages(messages)
                 body = {
@@ -1247,6 +1251,13 @@ class _OpenAICompatibleClient:
                 f"{context} requires LM Studio's native image API. "
                 "Update the LM Studio server URL in Settings."
             )
+        if _uses_openai_only_api(self.base_url):
+            return self.chat_text_with_openai_images(
+                _openai_image_messages(input_items, system=system),
+                max_tokens=max_tokens,
+                temperature=temperature,
+                context=context,
+            )
         with self._exclusive_lm_studio_request():
             body = {
                 "model": self._chat_model(context),
@@ -1345,6 +1356,19 @@ class _OpenAICompatibleClient:
         return _openai_chat_text_usage(raw, context=context)
 
     def _chat_model(self, context: str) -> str:
+        if not _uses_lm_studio_native_api(self.base_url):
+            if self.model and self.model != DEFAULT_LOCAL_MODEL:
+                return self.model
+            if self._resolved_model:
+                return self._resolved_model
+            models = _model_ids_from_payload(self._models_payload(context))
+            if not models:
+                raise ProviderRequestError(
+                    f"{context} could not find any models at {self.base_url}. "
+                    "Load a model and refresh the model list in Settings."
+                )
+            self._resolved_model = models[0]
+            return self._resolved_model
         if self.model and self.model != DEFAULT_LOCAL_MODEL:
             return self._loaded_chat_model(self.model, context)
         if self._resolved_model:
@@ -1392,7 +1416,7 @@ class _OpenAICompatibleClient:
         return payload
 
     def _loaded_chat_model(self, model: str, context: str, *, known_payload: Optional[Dict] = None) -> str:
-        if _is_ollama_base_url(self.base_url):
+        if not _uses_lm_studio_native_api(self.base_url):
             return model
 
         if known_payload is None:
@@ -2006,7 +2030,7 @@ def _extra_loaded_instances(payload: Dict, keep_model: str) -> List[_LoadedModel
 
 
 def _model_list_url(base_url: str) -> str:
-    if _is_ollama_base_url(base_url):
+    if _is_ollama_base_url(base_url) or _uses_openai_only_api(base_url):
         return f"{_normalize_base_url(base_url)}/models"
     return f"{_lm_studio_native_base_url(base_url)}/models"
 
@@ -2033,6 +2057,21 @@ def _is_reasoning_setting_error(detail: str) -> bool:
         or "does not support" in lowered
         or "invalid" in lowered
     )
+
+
+def _uses_lm_studio_native_api(base_url: str) -> bool:
+    return not _is_ollama_base_url(base_url) and not _uses_openai_only_api(base_url)
+
+
+def _uses_openai_only_api(base_url: str) -> bool:
+    server_kind = str(os.environ.get("LECTURE_LOCAL_AI_SERVER_KIND") or "").strip().lower()
+    if server_kind in {"openai", "openai-compatible", "omlx"}:
+        return True
+    try:
+        parsed = urllib.parse.urlparse(_normalize_base_url(base_url))
+    except Exception:
+        return False
+    return parsed.hostname == "192.168.86.22"
 
 
 def _is_chat_template_kwargs_error(detail: str) -> bool:
@@ -2129,6 +2168,24 @@ def _vision_input_items(request: AnalyzeLectureRequest, slides: List[Dict], prom
             content.append({"type": "text", "content": f"Attached image is slide_id={slide.get('id')} ({path.name})."})
             content.append({"type": "image", "data_url": f"data:{mime_type};base64,{encoded}"})
     return content
+
+
+def _openai_image_messages(input_items: List[Dict], *, system: str) -> List[Dict]:
+    content: List[Dict] = []
+    for item in input_items:
+        item_type = str(item.get("type") or "").strip()
+        if item_type == "image":
+            data_url = str(item.get("data_url") or "").strip()
+            if data_url:
+                content.append({"type": "image_url", "image_url": {"url": data_url}})
+            continue
+        text = str(item.get("content") or item.get("text") or "").strip()
+        if text:
+            content.append({"type": "text", "text": text})
+    return [
+        {"role": "system", "content": _system_prompt_no_think(system)},
+        {"role": "user", "content": content or [{"type": "text", "text": ""}]},
+    ]
 
 
 def _native_chat_text_usage(

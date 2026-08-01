@@ -94,10 +94,10 @@
 
         <div id="aiServerStrip" class="ai-server-strip hidden">
           <div class="ai-server-head">
-            <label>LM Studio Server</label>
+            <label>Local AI Server</label>
             <span id="aiServerStatus" class="mini-pill">Not checked</span>
           </div>
-          <div id="aiServerUrl" class="path-text">http://192.168.86.101:1234/v1</div>
+          <div id="aiServerUrl" class="path-text">http://192.168.86.22:1234/v1</div>
           <div id="aiServerModels" class="ai-server-models"></div>
         </div>
 
@@ -227,6 +227,7 @@
                 <option value="quality" selected>Quality</option>
                 <option value="fast">Fast</option>
                 <option value="turbo">Turbo</option>
+                <option value="parakeet">Parakeet</option>
               </select>
               <span id="transcriptionProfileHelp" class="field-help">
                 Highest accuracy. Best for difficult audio. ~1.5-2x real-time.
@@ -271,7 +272,7 @@
             <div class="wide-field model-routing">
               <div class="model-routing-head">
                 <div>
-                  <span>LM Studio Server</span>
+                  <span>Local AI Server</span>
                   <small id="localModelStatus">Models not checked</small>
                 </div>
                 <button id="refreshLocalModelsButton" class="secondary-button" type="button">Force Refresh Models</button>
@@ -279,9 +280,9 @@
               <div class="model-route-grid">
                 <label class="wide-field">
                   Server URL
-                  <input id="mlxTextUrl" type="text" autocomplete="off" value="http://192.168.86.101:1234/v1" />
+                  <input id="mlxTextUrl" type="text" autocomplete="off" value="http://192.168.86.22:1234/v1" />
                 </label>
-                <input id="mlxVisionUrl" type="hidden" value="http://192.168.86.101:1234/v1" />
+                <input id="mlxVisionUrl" type="hidden" value="http://192.168.86.22:1234/v1" />
                 <label>
                   Timeout Seconds
                   <input id="mlxTimeout" type="number" min="10" max="600" value="120" />
@@ -299,7 +300,7 @@
 
           <div class="key-row">
             <label>
-              LM Studio API Token
+              Local AI Server API Token
               <input id="lmStudioToken" type="password" autocomplete="off" placeholder="Saved in macOS Keychain" />
             </label>
             <button id="saveLmStudioTokenButton" class="secondary-button" type="button">Save Token</button>

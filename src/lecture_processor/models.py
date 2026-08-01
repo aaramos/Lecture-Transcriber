@@ -37,9 +37,11 @@ class TranscriptSegment:
     text: str
 
     def scaled(self, scale: float) -> "TranscriptSegment":
+        new_start = max(0.0, self.start * scale)
+        new_end = max(new_start, self.end * scale)
         return TranscriptSegment(
-            start=self.start * scale,
-            end=self.end * scale,
+            start=new_start,
+            end=new_end,
             text=self.text,
         )
 

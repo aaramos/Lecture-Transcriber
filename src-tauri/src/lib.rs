@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, BufReader, Read, Write};
+use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
@@ -12,6 +13,8 @@ use tauri::{Emitter, Manager};
 use std::os::unix::process::CommandExt;
 
 const EVENT_PREFIX: &str = "__LECTURE_PROCESSOR_EVENT__ ";
+const MAX_CAPTURED_OUTPUT_BYTES: usize = 1024 * 1024;
+const OUTPUT_TRUNCATION_NOTICE: &str = "[earlier processor output omitted]\n";
 const KEYCHAIN_SERVICE: &str = "Lecture Processor";
 const SLIDE_TEMP_PREFIX: &str = "lecture-slides-";
 const DEEP_FILTER_TEMP_PREFIX: &str = "lecture-deepfilter-";
@@ -673,6 +676,7 @@ fn dependency_status(app: tauri::AppHandle) -> Result<DependencyStatus, String> 
 #[tauri::command]
 fn transcription_profile_status(app: tauri::AppHandle) -> Result<ProfileStatusResponse, String> {
     let turbo_reason = turbo_unavailable_reason(&app);
+    let parakeet_reason = parakeet_unavailable_reason(&app);
     Ok(ProfileStatusResponse {
         profiles: vec![
             ProfileStatus {
@@ -699,6 +703,15 @@ fn transcription_profile_status(app: tauri::AppHandle) -> Result<ProfileStatusRe
                         .to_string(),
                 available: turbo_reason.is_none(),
                 unavailable_reason: turbo_reason,
+            },
+            ProfileStatus {
+                id: "parakeet".to_string(),
+                display_name: "Parakeet".to_string(),
+                description:
+                    "Alternative local speech-to-text profile based on parakeet-mlx. Apple Silicon only."
+                        .to_string(),
+                available: parakeet_reason.is_none(),
+                unavailable_reason: parakeet_reason,
             },
         ],
     })
@@ -961,90 +974,6 @@ fn round_one(value: f64) -> f64 {
     (value * 10.0).round() / 10.0
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{
-        parse_accumulated_gpu_times, parse_top_cpu_percent, parse_vm_page_size, parse_vm_pages,
-        processed_lecture_can_be_enriched, source_kind,
-    };
-    use serde_json::json;
-    use std::path::Path;
-
-    #[test]
-    fn parses_vm_stat_values() {
-        let sample = r#"Mach Virtual Memory Statistics: (page size of 16384 bytes)
-Pages active:                                 628839.
-Pages wired down:                             185384.
-Pages occupied by compressor:                  87041.
-"#;
-
-        assert_eq!(parse_vm_page_size(sample), Some(16_384));
-        assert_eq!(parse_vm_pages(sample, "Pages active"), Some(628_839));
-        assert_eq!(parse_vm_pages(sample, "Pages wired down"), Some(185_384));
-        assert_eq!(
-            parse_vm_pages(sample, "Pages occupied by compressor"),
-            Some(87_041)
-        );
-    }
-
-    #[test]
-    fn parses_gpu_accumulated_times() {
-        let sample = r#"
-          "AppUsage" = ({"API"="Metal","accumulatedGPUTime"=1200},{"API"="Metal","accumulatedGPUTime"=3400})
-          "AppUsage" = ({"API"="Metal","lastSubmittedTime"=0,"accumulatedGPUTime"=0})
-        "#;
-
-        assert_eq!(parse_accumulated_gpu_times(sample), vec![1200, 3400, 0]);
-    }
-
-    #[test]
-    fn parses_top_cpu_usage_as_activity_monitor_load() {
-        let sample = r#"
-Processes: 850 total, 4 running, 846 sleeping, 3787 threads
-CPU usage: 71.30% user, 24.79% sys, 3.89% idle
-        "#;
-
-        assert_eq!(parse_top_cpu_percent(sample), Some(96.1));
-    }
-
-    #[test]
-    fn enrichable_processed_lecture_includes_enrich_failures() {
-        let payload = json!({
-            "processing": {
-                "status": "failed",
-                "failure_step": "Enrich"
-            },
-            "transcript": {
-                "text": "ready for retry"
-            },
-            "slides": []
-        });
-
-        assert!(processed_lecture_can_be_enriched(&payload));
-    }
-
-    #[test]
-    fn classifies_supported_source_file_types() {
-        assert_eq!(
-            source_kind(Path::new("lecture.mp4")).as_deref(),
-            Some("video")
-        );
-        assert_eq!(
-            source_kind(Path::new("lecture.mkv")).as_deref(),
-            Some("video")
-        );
-        assert_eq!(
-            source_kind(Path::new("lecture.mp3")).as_deref(),
-            Some("audio")
-        );
-        assert_eq!(
-            source_kind(Path::new("lecture.srt")).as_deref(),
-            Some("transcript")
-        );
-        assert_eq!(source_kind(Path::new("lecture.pdf")), None);
-    }
-}
-
 fn mark_active_process_cancelled(
     active_process: &Arc<Mutex<Option<ActiveProcess>>>,
 ) -> Option<(u32, bool)> {
@@ -1088,9 +1017,7 @@ fn run_process_batch(
             provider.as_str(),
             "mlx-text" | "mlx-vision" | "local-stub" | "off"
         ) {
-            return Err(
-                "Model route providers must be LM Studio, Local Stub, or Off.".to_string(),
-            );
+            return Err("Model route providers must be Local AI, Local Stub, or Off.".to_string());
         }
     }
     if request.mlx_timeout < 10 || request.mlx_timeout > 600 {
@@ -1446,6 +1373,27 @@ fn append_line(buffer: &Arc<Mutex<String>>, line: &str) {
     let mut value = buffer.lock().unwrap_or_else(|error| error.into_inner());
     value.push_str(line);
     value.push('\n');
+    trim_output_tail(&mut value, MAX_CAPTURED_OUTPUT_BYTES);
+}
+
+fn trim_output_tail(value: &mut String, max_bytes: usize) {
+    if value.len() <= max_bytes || max_bytes <= OUTPUT_TRUNCATION_NOTICE.len() {
+        return;
+    }
+    let tail_bytes = max_bytes - OUTPUT_TRUNCATION_NOTICE.len();
+    let target = value.len().saturating_sub(tail_bytes);
+    let mut cut = value
+        .char_indices()
+        .map(|(index, _)| index)
+        .find(|index| *index >= target)
+        .unwrap_or(value.len());
+    if let Some(newline_offset) = value[cut..].find('\n').filter(|offset| *offset <= 8192) {
+        cut += newline_offset + 1;
+    }
+    let tail = value[cut..].to_string();
+    value.clear();
+    value.push_str(OUTPUT_TRUNCATION_NOTICE);
+    value.push_str(&tail);
 }
 
 fn platform_open_command(path: &str) -> Command {
@@ -1783,6 +1731,38 @@ fn turbo_unavailable_reason(app: &tauri::AppHandle) -> Option<String> {
     }
 }
 
+fn parakeet_unavailable_reason(app: &tauri::AppHandle) -> Option<String> {
+    if !is_apple_silicon() {
+        return Some("Requires Apple Silicon.".to_string());
+    }
+    let project_root = match find_project_root(Some(app)) {
+        Ok(path) => path,
+        Err(_) => return Some("Install dependencies to enable Parakeet.".to_string()),
+    };
+    let python = match processor_python_path(app, &project_root) {
+        Ok(path) => path,
+        Err(_) => return Some("Install dependencies to enable Parakeet.".to_string()),
+    };
+    if !python.exists() {
+        return Some("Install dependencies to enable Parakeet.".to_string());
+    }
+    let status = match Command::new(&python)
+        .args(["-c", "import parakeet_mlx"])
+        .env("PATH", tool_path(app, &project_root))
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+    {
+        Ok(status) => status,
+        Err(_) => return Some("Requires Apple Silicon with parakeet-mlx available.".to_string()),
+    };
+    if status.success() {
+        None
+    } else {
+        Some("Requires Apple Silicon with parakeet-mlx available.".to_string())
+    }
+}
+
 fn find_project_root(app: Option<&tauri::AppHandle>) -> Result<PathBuf, String> {
     if let Ok(value) = env::var("LECTURE_PROCESSOR_ROOT") {
         let path = PathBuf::from(value);
@@ -1800,6 +1780,7 @@ fn find_project_root(app: Option<&tauri::AppHandle>) -> Result<PathBuf, String> 
     }
     if let Some(app) = app {
         if let Ok(resource_dir) = app.path().resource_dir() {
+            starts.push(resource_dir.join("project"));
             starts.push(resource_dir.join("_up_"));
             starts.push(resource_dir);
         }
@@ -1917,13 +1898,33 @@ fn update_control_file(path: &Path, skip: &[&str], stop: &[&str]) -> Result<(), 
 }
 
 fn fetch_lm_studio_models(base_url: &str, api_token: Option<&str>) -> Result<Vec<String>, String> {
-    let api_models = lm_studio_api_url(base_url, "/api/v1/models")?;
-    let payload = http_get_json(&api_models, api_token)?;
-    let models = native_lm_studio_model_ids(&payload);
-    if models.is_empty() {
-        return Err("LM Studio returned no LLM models.".to_string());
+    let urls = local_ai_model_urls(base_url)?;
+    let mut last_error = String::new();
+    for api_models in urls {
+        match http_get_json(&api_models, api_token) {
+            Ok(payload) => {
+                let mut models = native_lm_studio_model_ids(&payload);
+                models.extend(openai_model_ids(&payload));
+                models.sort();
+                models.dedup();
+                if !models.is_empty() {
+                    return Ok(models);
+                }
+                last_error = "Local AI Server returned no models.".to_string();
+            }
+            Err(error) => {
+                if error.contains("valid API token") {
+                    return Err(error);
+                }
+                last_error = error;
+            }
+        }
     }
-    Ok(models)
+    Err(if last_error.is_empty() {
+        "Local AI Server returned no models.".to_string()
+    } else {
+        last_error
+    })
 }
 
 fn native_lm_studio_model_ids(payload: &serde_json::Value) -> Vec<String> {
@@ -1935,7 +1936,10 @@ fn native_lm_studio_model_ids(payload: &serde_json::Value) -> Vec<String> {
         if model.get("type").and_then(|value| value.as_str()) != Some("llm") {
             continue;
         }
-        if let Some(instances) = model.get("loaded_instances").and_then(|value| value.as_array()) {
+        if let Some(instances) = model
+            .get("loaded_instances")
+            .and_then(|value| value.as_array())
+        {
             for instance in instances {
                 if let Some(id) = instance.get("id").and_then(|value| value.as_str()) {
                     push_unique_model_id(&mut ids, id);
@@ -1956,19 +1960,53 @@ fn push_unique_model_id(ids: &mut Vec<String>, value: &str) {
     }
 }
 
-fn lm_studio_api_url(base_url: &str, path: &str) -> Result<String, String> {
+fn openai_model_ids(payload: &serde_json::Value) -> Vec<String> {
+    let mut ids = Vec::new();
+    let Some(models) = payload.get("data").and_then(|value| value.as_array()) else {
+        return ids;
+    };
+    for model in models {
+        if let Some(id) = model.get("id").and_then(|value| value.as_str()) {
+            push_unique_model_id(&mut ids, id);
+        }
+    }
+    ids
+}
+
+fn local_ai_model_urls(base_url: &str) -> Result<Vec<String>, String> {
+    if is_openai_only_local_ai_url(base_url) {
+        Ok(vec![local_ai_api_url(base_url, "/v1/models")?])
+    } else {
+        Ok(vec![
+            local_ai_api_url(base_url, "/api/v1/models")?,
+            local_ai_api_url(base_url, "/v1/models")?,
+        ])
+    }
+}
+
+fn is_openai_only_local_ai_url(base_url: &str) -> bool {
+    if std::env::var("LECTURE_LOCAL_AI_SERVER_KIND")
+        .map(|value| {
+            let normalized = value.trim().to_ascii_lowercase();
+            normalized == "openai" || normalized == "openai-compatible" || normalized == "omlx"
+        })
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    parse_http_url(base_url)
+        .map(|(host, _, _)| host == "192.168.86.22")
+        .unwrap_or(false)
+}
+
+fn local_ai_api_url(base_url: &str, path: &str) -> Result<String, String> {
     let (host, port, _base_path) = parse_http_url(base_url)?;
     Ok(format!("http://{host}:{port}{path}"))
 }
 
 fn http_get_json(url: &str, api_token: Option<&str>) -> Result<serde_json::Value, String> {
     let (host, port, path) = parse_http_url(url)?;
-    let address = format!("{host}:{port}");
-    let socket: std::net::SocketAddr = address
-        .parse()
-        .map_err(|error| format!("Invalid server address {address}: {error}"))?;
-    let mut stream = std::net::TcpStream::connect_timeout(&socket, Duration::from_secs(5))
-        .map_err(|error| format!("Could not connect to {address}: {error}"))?;
+    let mut stream = connect_http_stream(&host, port, Duration::from_secs(5))?;
     stream
         .set_read_timeout(Some(Duration::from_secs(5)))
         .map_err(|error| format!("Could not set read timeout: {error}"))?;
@@ -1990,7 +2028,7 @@ fn http_get_json(url: &str, api_token: Option<&str>) -> Result<serde_json::Value
         .map_err(|error| format!("Could not read response: {error}"))?;
     let (headers, body) = raw
         .split_once("\r\n\r\n")
-        .ok_or_else(|| "LM Studio returned an invalid HTTP response.".to_string())?;
+        .ok_or_else(|| "Local AI Server returned an invalid HTTP response.".to_string())?;
     let status = headers.lines().next().unwrap_or_default();
     if !status.contains(" 200 ") {
         if status.contains(" 401 ")
@@ -1998,30 +2036,58 @@ fn http_get_json(url: &str, api_token: Option<&str>) -> Result<serde_json::Value
             || body.contains("invalid_api_key")
             || body.contains("API token is required")
         {
-            return Err("LM Studio needs a valid API token saved in Settings.".to_string());
+            return Err("Local AI Server needs a valid API token saved in Settings.".to_string());
         }
-        return Err(format!("LM Studio returned {status}"));
+        return Err(format!("Local AI Server returned {status}"));
     }
     serde_json::from_str(body.trim())
-        .map_err(|error| format!("LM Studio returned invalid JSON: {error}"))
+        .map_err(|error| format!("Local AI Server returned invalid JSON: {error}"))
+}
+
+fn connect_http_stream(host: &str, port: u16, timeout: Duration) -> Result<TcpStream, String> {
+    let addresses = resolve_server_addresses(host, port)?;
+    let mut last_error = None;
+    for socket in addresses {
+        match TcpStream::connect_timeout(&socket, timeout) {
+            Ok(stream) => return Ok(stream),
+            Err(error) => last_error = Some(error),
+        }
+    }
+    let address = format!("{host}:{port}");
+    Err(match last_error {
+        Some(error) => format!("Could not connect to {address}: {error}"),
+        None => format!("Could not resolve server address {address}."),
+    })
+}
+
+fn resolve_server_addresses(host: &str, port: u16) -> Result<Vec<SocketAddr>, String> {
+    let address = format!("{host}:{port}");
+    let addresses = (host, port)
+        .to_socket_addrs()
+        .map_err(|error| format!("Could not resolve server address {address}: {error}"))?
+        .collect::<Vec<_>>();
+    if addresses.is_empty() {
+        return Err(format!("Could not resolve server address {address}."));
+    }
+    Ok(addresses)
 }
 
 fn parse_http_url(raw: &str) -> Result<(String, u16, String), String> {
     let url = raw.trim().trim_end_matches('/');
     let Some(rest) = url.strip_prefix("http://") else {
-        return Err("Only http:// LM Studio URLs are supported.".to_string());
+        return Err("Only http:// Local AI Server URLs are supported.".to_string());
     };
     let (host_port, path) = rest.split_once('/').unwrap_or((rest, ""));
     let (host, port) = if let Some((host, port_text)) = host_port.rsplit_once(':') {
         let parsed_port = port_text
             .parse::<u16>()
-            .map_err(|error| format!("Invalid LM Studio port {port_text}: {error}"))?;
+            .map_err(|error| format!("Invalid Local AI Server port {port_text}: {error}"))?;
         (host.to_string(), parsed_port)
     } else {
         (host_port.to_string(), 80)
     };
     if host.is_empty() {
-        return Err("LM Studio URL is missing a host.".to_string());
+        return Err("Local AI Server URL is missing a host.".to_string());
     }
     Ok((host, port, format!("/{}", path.trim_start_matches('/'))))
 }
@@ -2213,4 +2279,112 @@ pub fn run() {
                 terminate_active_process_for_shutdown(&app_exit_active_process);
             }
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        parse_accumulated_gpu_times, parse_http_url, parse_top_cpu_percent, parse_vm_page_size,
+        parse_vm_pages, processed_lecture_can_be_enriched, resolve_server_addresses, source_kind,
+        trim_output_tail, OUTPUT_TRUNCATION_NOTICE,
+    };
+    use serde_json::json;
+    use std::path::Path;
+
+    #[test]
+    fn parses_vm_stat_values() {
+        let sample = r#"Mach Virtual Memory Statistics: (page size of 16384 bytes)
+Pages active:                                 628839.
+Pages wired down:                             185384.
+Pages occupied by compressor:                  87041.
+"#;
+
+        assert_eq!(parse_vm_page_size(sample), Some(16_384));
+        assert_eq!(parse_vm_pages(sample, "Pages active"), Some(628_839));
+        assert_eq!(parse_vm_pages(sample, "Pages wired down"), Some(185_384));
+        assert_eq!(
+            parse_vm_pages(sample, "Pages occupied by compressor"),
+            Some(87_041)
+        );
+    }
+
+    #[test]
+    fn parses_gpu_accumulated_times() {
+        let sample = r#"
+          "AppUsage" = ({"API"="Metal","accumulatedGPUTime"=1200},{"API"="Metal","accumulatedGPUTime"=3400})
+          "AppUsage" = ({"API"="Metal","lastSubmittedTime"=0,"accumulatedGPUTime"=0})
+        "#;
+
+        assert_eq!(parse_accumulated_gpu_times(sample), vec![1200, 3400, 0]);
+    }
+
+    #[test]
+    fn parses_top_cpu_usage_as_activity_monitor_load() {
+        let sample = r#"
+Processes: 850 total, 4 running, 846 sleeping, 3787 threads
+CPU usage: 71.30% user, 24.79% sys, 3.89% idle
+        "#;
+
+        assert_eq!(parse_top_cpu_percent(sample), Some(96.1));
+    }
+
+    #[test]
+    fn enrichable_processed_lecture_includes_enrich_failures() {
+        let payload = json!({
+            "processing": {
+                "status": "failed",
+                "failure_step": "Enrich"
+            },
+            "transcript": {
+                "text": "ready for retry"
+            },
+            "slides": []
+        });
+
+        assert!(processed_lecture_can_be_enriched(&payload));
+    }
+
+    #[test]
+    fn classifies_supported_source_file_types() {
+        assert_eq!(
+            source_kind(Path::new("lecture.mp4")).as_deref(),
+            Some("video")
+        );
+        assert_eq!(
+            source_kind(Path::new("lecture.mkv")).as_deref(),
+            Some("video")
+        );
+        assert_eq!(
+            source_kind(Path::new("lecture.mp3")).as_deref(),
+            Some("audio")
+        );
+        assert_eq!(
+            source_kind(Path::new("lecture.srt")).as_deref(),
+            Some("transcript")
+        );
+        assert_eq!(source_kind(Path::new("lecture.pdf")), None);
+    }
+
+    #[test]
+    fn local_ai_urls_accept_hostnames() {
+        let parsed = parse_http_url("http://localhost:1234/v1").unwrap();
+        assert_eq!(parsed, ("localhost".to_string(), 1234, "/v1".to_string()));
+        assert!(!resolve_server_addresses("localhost", 1234)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn processor_output_keeps_a_bounded_tail() {
+        let mut output = (0..40)
+            .map(|index| format!("line {index:02}\n"))
+            .collect::<String>();
+
+        trim_output_tail(&mut output, 96);
+
+        assert!(output.len() <= 96);
+        assert!(output.starts_with(OUTPUT_TRUNCATION_NOTICE));
+        assert!(output.contains("line 39"));
+        assert!(!output.contains("line 00"));
+    }
 }

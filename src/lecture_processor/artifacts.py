@@ -96,7 +96,7 @@ def build_lecture_artifact(
         "lecture_id": output_dir.name,
         "source": {
             "filename": source.name,
-            "absolute_path": str(source),
+            "absolute_path": str(source.resolve()),
             "byte_size": source_stat["byte_size"],
             "sha256": _sha256_file(source),
             "modified_at": source_stat["modified_at"],

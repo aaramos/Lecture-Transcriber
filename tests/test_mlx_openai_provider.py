@@ -386,6 +386,120 @@ class MLXOpenAIProviderTests(unittest.TestCase):
         self.assertNotIn("reasoning", captured["body"])
         self.assertNotIn("messages", captured["body"])
 
+    def test_omlx_text_chat_uses_openai_compatible_api(self):
+        captured = {}
+
+        class FakeResponse:
+            def __init__(self, payload):
+                self.payload = payload
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self):
+                return json.dumps(self.payload).encode("utf-8")
+
+        def fake_urlopen(request, timeout):
+            captured.setdefault("urls", []).append(request.full_url)
+            if request.full_url.endswith("/models"):
+                return FakeResponse({"data": [{"id": "omlx-model"}]})
+            captured["body"] = json.loads(request.data.decode("utf-8"))
+            return FakeResponse(
+                {
+                    "choices": [{"message": {"content": "{\"ok\": true}"}}],
+                    "usage": {"prompt_tokens": 3, "completion_tokens": 2},
+                }
+            )
+
+        client = _OpenAICompatibleClient("http://192.168.86.22:1234/v1", "default", 30)
+        with mock.patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            payload, usage = client.chat_json(
+                [{"role": "user", "content": "Reply with JSON."}],
+                max_tokens=32,
+                temperature=0.0,
+                context="oMLX text",
+            )
+
+        self.assertEqual({"ok": True}, payload)
+        self.assertEqual(3, usage.input_tokens)
+        self.assertEqual(2, usage.output_tokens)
+        self.assertEqual(
+            [
+                "http://192.168.86.22:1234/v1/models",
+                "http://192.168.86.22:1234/v1/chat/completions",
+            ],
+            captured["urls"],
+        )
+        self.assertEqual("omlx-model", captured["body"]["model"])
+        self.assertIn("messages", captured["body"])
+        self.assertNotIn("input", captured["body"])
+        self.assertNotIn("top_k", captured["body"])
+
+    def test_omlx_image_chat_uses_openai_image_url_shape(self):
+        captured = {}
+
+        class FakeResponse:
+            def __init__(self, payload):
+                self.payload = payload
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self):
+                return json.dumps(self.payload).encode("utf-8")
+
+        def fake_urlopen(request, timeout):
+            captured.setdefault("urls", []).append(request.full_url)
+            if request.full_url.endswith("/models"):
+                return FakeResponse({"data": [{"id": "omlx-vision"}]})
+            captured["body"] = json.loads(request.data.decode("utf-8"))
+            return FakeResponse(
+                {
+                    "choices": [{"message": {"content": "{\"ok\": true}"}}],
+                    "usage": {"prompt_tokens": 4, "completion_tokens": 3},
+                }
+            )
+
+        client = _OpenAICompatibleClient("http://192.168.86.22:1234/v1", "default", 30)
+        with mock.patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            payload, usage = client.chat_json_with_lm_studio_images(
+                [
+                    {"type": "text", "content": "Describe slide 1."},
+                    {"type": "image", "data_url": "data:image/png;base64,aW1hZ2U="},
+                ],
+                system="Return JSON.",
+                max_tokens=32,
+                temperature=0.0,
+                context="oMLX vision",
+            )
+
+        self.assertEqual({"ok": True}, payload)
+        self.assertEqual(4, usage.input_tokens)
+        self.assertEqual(3, usage.output_tokens)
+        self.assertEqual(
+            [
+                "http://192.168.86.22:1234/v1/models",
+                "http://192.168.86.22:1234/v1/chat/completions",
+            ],
+            captured["urls"],
+        )
+        self.assertEqual("omlx-vision", captured["body"]["model"])
+        user_message = captured["body"]["messages"][1]
+        self.assertEqual("user", user_message["role"])
+        self.assertEqual({"type": "text", "text": "Describe slide 1."}, user_message["content"][0])
+        self.assertEqual(
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,aW1hZ2U="}},
+            user_message["content"][1],
+        )
+        self.assertNotIn("input", captured["body"])
+        self.assertNotIn("top_k", captured["body"])
+
     def test_ollama_requests_disable_thinking(self):
         captured = {}
 

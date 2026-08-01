@@ -1,12 +1,13 @@
 {
   "name": "lecture-processor-desktop",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "private": true,
   "type": "module",
   "scripts": {
     "dev": "node scripts/dev-server.mjs",
     "build": "node scripts/build-frontend.mjs",
     "lint": "node scripts/lint.mjs",
+    "prepare:bundle": "node scripts/prepare-bundle-resources.mjs",
     "test": "node scripts/test-token-metrics.mjs",
     "tauri": "node scripts/tauri.mjs"
   }

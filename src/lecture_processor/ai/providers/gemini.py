@@ -861,7 +861,8 @@ def _slide_signature(path: Path) -> Optional[Dict]:
             grayscale = image.convert("L")
             resampling = getattr(getattr(image_module, "Resampling", image_module), "LANCZOS")
             sampled = grayscale.resize((SLIDE_PHASH_SAMPLE_SIZE, SLIDE_PHASH_SAMPLE_SIZE), resampling)
-            pixels = list(sampled.getdata())
+            get_pixels = getattr(sampled, "get_flattened_data", sampled.getdata)
+            pixels = list(get_pixels())
             entropy = _image_entropy(pixels)
             phash = _perceptual_hash(pixels, SLIDE_PHASH_SAMPLE_SIZE)
             return {"entropy": entropy, "phash": phash}

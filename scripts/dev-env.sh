@@ -4,51 +4,60 @@
 # . ./scripts/dev-env.sh
 
 PROJECT_ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+SYSTEM_NODE="$(command -v node 2>/dev/null || true)"
+
+if [ -n "${LECTURE_PROCESSOR_NODE:-}" ] && [ -x "$LECTURE_PROCESSOR_NODE" ]; then
+  NODE_BINARY="$LECTURE_PROCESSOR_NODE"
+elif [ -x "/Applications/Codex.app/Contents/Resources/node" ]; then
+  NODE_BINARY="/Applications/Codex.app/Contents/Resources/node"
+elif [ -n "$SYSTEM_NODE" ] && [ -x "$SYSTEM_NODE" ]; then
+  NODE_BINARY="$SYSTEM_NODE"
+else
+  NODE_BINARY=""
+fi
 
 export VIRTUAL_ENV="$PROJECT_ROOT/.venv"
 export RUSTUP_HOME="$PROJECT_ROOT/.tools/rustup"
 export CARGO_HOME="$PROJECT_ROOT/.tools/cargo"
 export PATH="$PROJECT_ROOT/.venv/bin:$PROJECT_ROOT/.tools/bin:$PROJECT_ROOT/.tools/darwin_arm64:$PROJECT_ROOT/.tools/cargo/bin:$PATH"
 
-if [ -x "/Applications/Codex.app/Contents/Resources/node" ]; then
+if [ -n "$NODE_BINARY" ]; then
   mkdir -p "$PROJECT_ROOT/.tools/bin"
 
-  if [ ! -x "$PROJECT_ROOT/.tools/bin/node" ]; then
-    cat > "$PROJECT_ROOT/.tools/bin/node" <<'EOF'
+  # Recreate these wrappers on every load so a moved or upgraded Node runtime
+  # cannot leave the documented build commands pointing at a stale binary.
+  cat > "$PROJECT_ROOT/.tools/bin/node" <<EOF
 #!/usr/bin/env sh
-exec /Applications/Codex.app/Contents/Resources/node "$@"
+exec "$NODE_BINARY" "\$@"
 EOF
-    chmod +x "$PROJECT_ROOT/.tools/bin/node"
-  fi
+  chmod +x "$PROJECT_ROOT/.tools/bin/node"
 
-  if [ -f "$PROJECT_ROOT/.tools/npm/bin/npm-cli.js" ] && [ ! -x "$PROJECT_ROOT/.tools/bin/npm" ]; then
-    cat > "$PROJECT_ROOT/.tools/bin/npm" <<'EOF'
+  if [ -f "$PROJECT_ROOT/.tools/npm/bin/npm-cli.js" ]; then
+    cat > "$PROJECT_ROOT/.tools/bin/npm" <<EOF
 #!/usr/bin/env sh
-PROJECT_ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
-exec /Applications/Codex.app/Contents/Resources/node "$PROJECT_ROOT/.tools/npm/bin/npm-cli.js" "$@"
+exec "$NODE_BINARY" "$PROJECT_ROOT/.tools/npm/bin/npm-cli.js" "\$@"
 EOF
     chmod +x "$PROJECT_ROOT/.tools/bin/npm"
   fi
 
-  if [ -f "$PROJECT_ROOT/.tools/npm/bin/npx-cli.js" ] && [ ! -x "$PROJECT_ROOT/.tools/bin/npx" ]; then
-    cat > "$PROJECT_ROOT/.tools/bin/npx" <<'EOF'
+  if [ -f "$PROJECT_ROOT/.tools/npm/bin/npx-cli.js" ]; then
+    cat > "$PROJECT_ROOT/.tools/bin/npx" <<EOF
 #!/usr/bin/env sh
-PROJECT_ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
-exec /Applications/Codex.app/Contents/Resources/node "$PROJECT_ROOT/.tools/npm/bin/npx-cli.js" "$@"
+exec "$NODE_BINARY" "$PROJECT_ROOT/.tools/npm/bin/npx-cli.js" "\$@"
 EOF
     chmod +x "$PROJECT_ROOT/.tools/bin/npx"
   fi
 
   node() {
-    /Applications/Codex.app/Contents/Resources/node "$@"
+    "$NODE_BINARY" "$@"
   }
 
   npm() {
-    /Applications/Codex.app/Contents/Resources/node "$PROJECT_ROOT/.tools/npm/bin/npm-cli.js" "$@"
+    "$NODE_BINARY" "$PROJECT_ROOT/.tools/npm/bin/npm-cli.js" "$@"
   }
 
   npx() {
-    /Applications/Codex.app/Contents/Resources/node "$PROJECT_ROOT/.tools/npm/bin/npx-cli.js" "$@"
+    "$NODE_BINARY" "$PROJECT_ROOT/.tools/npm/bin/npx-cli.js" "$@"
   }
 fi
 

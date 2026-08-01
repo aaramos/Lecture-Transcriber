@@ -7,6 +7,7 @@ from typing import Any, Dict, Iterable, Optional
 QUALITY_PROFILE_ID = "quality"
 FAST_PROFILE_ID = "fast"
 TURBO_PROFILE_ID = "turbo"
+PARAKEET_PROFILE_ID = "parakeet"
 DEFAULT_PROFILE_ID = QUALITY_PROFILE_ID
 
 
@@ -20,7 +21,12 @@ class TranscriptionProfile:
     description: str
 
 
-_PROFILE_ORDER = (QUALITY_PROFILE_ID, FAST_PROFILE_ID, TURBO_PROFILE_ID)
+_PROFILE_ORDER = (
+    QUALITY_PROFILE_ID,
+    FAST_PROFILE_ID,
+    TURBO_PROFILE_ID,
+    PARAKEET_PROFILE_ID,
+)
 
 _LEGACY_PROFILE_ALIASES = {
     "": DEFAULT_PROFILE_ID,
@@ -30,6 +36,9 @@ _LEGACY_PROFILE_ALIASES = {
     "faster-whisper": QUALITY_PROFILE_ID,
     "fast": FAST_PROFILE_ID,
     "mlx-whisper": TURBO_PROFILE_ID,
+    "parakeet": PARAKEET_PROFILE_ID,
+    "parakeet-mlx": PARAKEET_PROFILE_ID,
+    "senstella/parakeet-mlx": PARAKEET_PROFILE_ID,
     "quality": QUALITY_PROFILE_ID,
     "turbo": TURBO_PROFILE_ID,
 }
@@ -126,6 +135,28 @@ def get_profile(profile_id: Optional[str]) -> TranscriptionProfile:
                 "quality": "fast",
             },
             description="Recommended for most lectures. Minimal accuracy loss vs Quality, ~2-3x faster.",
+        )
+    if profile_id == PARAKEET_PROFILE_ID:
+        return TranscriptionProfile(
+            id=PARAKEET_PROFILE_ID,
+            display_name="Parakeet",
+            engine="parakeet-mlx",
+            model="animaslabs/parakeet-tdt-0.6b-v3-mlx",
+            engine_kwargs={
+                "transcribe_options": {
+                    "dtype": "bfloat16",
+                    # Bound the model's mel/inference working set for long lectures.
+                    "chunk_duration": 600.0,
+                    "overlap_duration": 15.0,
+                    "decoding_config": None,
+                },
+                "quality": "accurate",
+                "vad_filter": True,
+            },
+            description=(
+                "Parakeet is a lightweight MLX speech model for Apple Silicon. It can be a good option "
+                "for fast transcriptions on longer audio when dependencies are available."
+            ),
         )
     return TranscriptionProfile(
         id=TURBO_PROFILE_ID,

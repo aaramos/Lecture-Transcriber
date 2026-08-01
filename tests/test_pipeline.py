@@ -4,6 +4,7 @@ import threading
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from lecture_processor.config import (
     AIModelProvider,
@@ -122,6 +123,29 @@ class FakeTranscriber:
                 TranscriptSegment(start=10.0, end=20.0, text="hello lecture"),
             ],
         )
+
+
+class FakeParakeetTranscriber:
+    metadata = {"resolved_engine": "parakeet-mlx"}
+
+    def transcribe(self, media_path):
+        return TranscriptResult(
+            text="hello lecture",
+            segments=[TranscriptSegment(start=10.0, end=20.0, text="hello lecture")],
+        )
+
+
+class ThreadBoundParakeetTranscriber(FakeParakeetTranscriber):
+    def __init__(self):
+        self.created_thread_id = threading.get_ident()
+        self.transcribe_thread_ids = []
+
+    def transcribe(self, media_path):
+        current_thread_id = threading.get_ident()
+        self.transcribe_thread_ids.append(current_thread_id)
+        if current_thread_id != self.created_thread_id:
+            raise RuntimeError("Parakeet transcribe moved to a different thread")
+        return super().transcribe(media_path)
 
 
 class FakeSlideExtractor:
@@ -322,6 +346,38 @@ class BatchProcessorTests(unittest.TestCase):
             self.assertEqual(summary.skipped, 1)
             self.assertEqual(summary.results[0].message, "Already processed")
             self.assertTrue((lecture_dir / "lecture.json").exists())
+
+    def test_changed_source_is_reprocessed_instead_of_using_stale_output(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "lecture.mov"
+            source.write_text("original", encoding="utf-8")
+            output = root / "out"
+            config = BatchConfig(input_dir=root, output_dir=output, concurrent_files=1)
+
+            first = BatchProcessor(
+                config=config,
+                inspector=FakeInspector({"lecture.mov": 120.0}),
+                normalizer=FakeNormalizer(),
+                audio_extractor=FakeAudioExtractor(),
+                transcriber=FakeTranscriber(),
+                slide_extractor=FakeSlideExtractor(),
+            ).run()
+            source.write_text("replacement with a different size", encoding="utf-8")
+            second = BatchProcessor(
+                config=config,
+                inspector=FakeInspector({"lecture.mov": 120.0}),
+                normalizer=FakeNormalizer(),
+                audio_extractor=FakeAudioExtractor(),
+                transcriber=FakeTranscriber(),
+                slide_extractor=FakeSlideExtractor(),
+            ).run()
+
+            self.assertEqual(first.completed, 1)
+            self.assertEqual(second.completed, 1)
+            self.assertEqual(second.skipped, 0)
+            artifact = json.loads((output / "lecture" / "lecture.json").read_text(encoding="utf-8"))
+            self.assertEqual(artifact["source"]["byte_size"], source.stat().st_size)
 
     def test_audio_file_uses_transcription_without_slide_extraction(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -922,6 +978,145 @@ class BatchProcessorTests(unittest.TestCase):
             self.assertEqual(enrichment_snapshots[0], ["alpha", "beta"])
             self.assertTrue(all(event["enriched"] for event in file_finished_events))
 
+    def test_staged_ai_failure_retries_each_lecture_and_continues(self):
+        from lecture_processor.ai.enrichment import enrich_lecture_artifact as real_enrich
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for name in ["alpha.mov", "beta.mov"]:
+                (root / name).write_text("video", encoding="utf-8")
+            output = root / "out"
+            config = BatchConfig(
+                input_dir=root,
+                output_dir=output,
+                ai_provider=AIProviderName.MOCK,
+                concurrent_files=2,
+            )
+
+            def individual_enrich(path, *args, **kwargs):
+                if path.parent.name == "alpha":
+                    raise RuntimeError("alpha AI failed")
+                return real_enrich(path, *args, **kwargs)
+
+            with mock.patch(
+                "lecture_processor.pipeline.enrich_lecture_artifacts_staged",
+                side_effect=RuntimeError("staged request failed"),
+            ), mock.patch(
+                "lecture_processor.pipeline.enrich_lecture_artifact",
+                side_effect=individual_enrich,
+            ):
+                summary = BatchProcessor(
+                    config=config,
+                    inspector=FakeInspector({"alpha.mov": 120.0, "beta.mov": 120.0}),
+                    normalizer=FakeNormalizer(),
+                    audio_extractor=FakeAudioExtractor(),
+                    transcriber=FakeTranscriber(),
+                    slide_extractor=FakeSlideExtractor(),
+                ).run()
+
+            self.assertEqual(summary.completed, 1)
+            self.assertEqual(summary.failed, 1)
+            self.assertEqual(
+                {result.source.name: result.status for result in summary.results},
+                {"alpha.mov": FileStatus.FAILED, "beta.mov": FileStatus.COMPLETED},
+            )
+            beta_log = (output / "beta" / "processing_log.txt").read_text(encoding="utf-8")
+            self.assertIn("recovered with an individual retry", beta_log)
+
+    def test_deferred_render_failure_isolated_to_one_lecture(self):
+        from lecture_processor.html_renderer import render_lecture_page as real_render
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for name in ["alpha.mov", "beta.mov"]:
+                (root / name).write_text("video", encoding="utf-8")
+            output = root / "out"
+            config = BatchConfig(
+                input_dir=root,
+                output_dir=output,
+                ai_provider=AIProviderName.MOCK,
+                concurrent_files=2,
+            )
+
+            def render_one(path):
+                if path.parent.name == "alpha":
+                    raise RuntimeError("alpha HTML failed")
+                return real_render(path)
+
+            with mock.patch("lecture_processor.pipeline.render_lecture_page", side_effect=render_one):
+                summary = BatchProcessor(
+                    config=config,
+                    inspector=FakeInspector({"alpha.mov": 120.0, "beta.mov": 120.0}),
+                    normalizer=FakeNormalizer(),
+                    audio_extractor=FakeAudioExtractor(),
+                    transcriber=FakeTranscriber(),
+                    slide_extractor=FakeSlideExtractor(),
+                ).run()
+
+            self.assertEqual(summary.completed, 1)
+            self.assertEqual(summary.failed, 1)
+            self.assertTrue((output / "batch.json").exists())
+            self.assertTrue((output / "beta" / "html" / "index.html").exists())
+
+    def test_parakeet_engine_forces_single_worker(self):
+        config = BatchConfig(
+            input_dir=Path("/tmp"),
+            output_dir=Path("/tmp/out"),
+            concurrent_files=4,
+        )
+        processor = BatchProcessor(
+            config=config,
+            inspector=FakeInspector({"lecture.mov": 120.0}),
+            normalizer=FakeNormalizer(),
+            audio_extractor=FakeAudioExtractor(),
+            transcriber=FakeParakeetTranscriber(),
+            slide_extractor=FakeSlideExtractor(),
+        )
+
+        self.assertEqual(processor._resolve_worker_count(), 1)
+
+    def test_parakeet_single_worker_runs_on_current_thread(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "lecture.wav"
+            source.write_text("audio", encoding="utf-8")
+            output = root / "out"
+            transcriber = ThreadBoundParakeetTranscriber()
+            config = BatchConfig(
+                input_dir=root,
+                output_dir=output,
+                concurrent_files=4,
+            )
+
+            summary = BatchProcessor(
+                config=config,
+                inspector=FakeInspector({"lecture.wav": {"duration": 120.0, "has_audio": True, "has_video": False}}),
+                normalizer=FakeNormalizer(),
+                audio_extractor=FakeAudioExtractor(),
+                transcriber=transcriber,
+                slide_extractor=FakeSlideExtractor(),
+            ).run()
+
+            self.assertEqual(summary.completed, 1)
+            self.assertEqual(transcriber.transcribe_thread_ids, [transcriber.created_thread_id])
+
+    def test_non_parakeet_respects_configured_workers(self):
+        config = BatchConfig(
+            input_dir=Path("/tmp"),
+            output_dir=Path("/tmp/out"),
+            concurrent_files=3,
+        )
+        processor = BatchProcessor(
+            config=config,
+            inspector=FakeInspector({"lecture.mov": 120.0}),
+            normalizer=FakeNormalizer(),
+            audio_extractor=FakeAudioExtractor(),
+            transcriber=FakeTranscriber(),
+            slide_extractor=FakeSlideExtractor(),
+        )
+
+        self.assertEqual(processor._resolve_worker_count(), 3)
+
     def test_unavailable_local_model_skips_ai_but_completes_non_ai_work(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1088,6 +1283,51 @@ class BatchProcessorTests(unittest.TestCase):
                 ],
                 progress,
             )
+
+    def test_processed_batch_staged_failure_recovers_each_lecture(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for name in ("first", "second"):
+                lecture_dir = root / name
+                lecture_dir.mkdir()
+                (lecture_dir / "lecture.json").write_text(
+                    json.dumps(
+                        {
+                            "lecture_id": name,
+                            "source": {"filename": f"{name}.mov"},
+                            "media": {"duration_seconds": 120},
+                            "transcript": {
+                                "text": f"{name} transcript",
+                                "word_count": 2,
+                                "segments": [],
+                            },
+                            "slides": [],
+                            "processing": {"status": "completed"},
+                            "enrichment": None,
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+            config = BatchConfig(
+                input_dir=root,
+                output_dir=root,
+                transcription_engine=TranscriptionEngine.NONE,
+                ai_provider=AIProviderName.GEMINI,
+                ai_overview_provider=AIModelProvider.LOCAL_STUB,
+                ai_transcript_provider=AIModelProvider.LOCAL_STUB,
+                ai_slides_provider=AIModelProvider.LOCAL_STUB,
+                ai_resources_provider=AIModelProvider.LOCAL_STUB,
+            )
+
+            with mock.patch(
+                "lecture_processor.pipeline.enrich_lecture_artifacts_staged",
+                side_effect=RuntimeError("staged request failed"),
+            ):
+                summary = enrich_processed_batch(config)
+
+            self.assertEqual(summary.completed, 2)
+            self.assertEqual(summary.failed, 0)
+            self.assertTrue(all(result.enriched for result in summary.results))
 
 
 if __name__ == "__main__":

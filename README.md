@@ -4,13 +4,15 @@ Local app for processing lecture recording folders.
 
 The implementation has two layers: a Python processing core and a Tauri desktop shell. The desktop app is the main user path; the CLI remains available for automation and debugging.
 
+Version 0.6.1 adds Parakeet MLX transcription and hardens long-running batches: staged AI and HTML failures are isolated per lecture, desktop log retention is bounded, changed source files are reprocessed, and Parakeet uses bounded inference chunks. See the [0.6.1 code review](doc/code-review-2026-07-31.md) for findings, fixes, verification, and remaining operational limits.
+
 ## What It Does
 
 - Scans a supported lecture file or folder. Video files get the full transcript, slides, and study-page flow; audio and transcript files get transcript-first study pages without slide extraction.
 - Skips files shorter than 60 seconds.
 - Optionally normalizes 2x recordings to 1x playback with FFmpeg.
 - Extracts a temporary clean 16 kHz mono WAV for transcription, then deletes it after use.
-- Runs transcription through one controlled Whisper lane.
+- Runs transcription through a local speech-to-text profile.
 - Extracts slide images from visual scene changes.
 - Writes per-file output folders, transcripts, SRT files, slides, and processing logs.
 - Writes structured `lecture.json` and `batch.json` artifacts for study-page rendering.
@@ -50,7 +52,7 @@ Apple Silicon acceleration adds one more optional setup step:
 scripts/setup-whisper-cpp-coreml.sh large-v3
 ```
 
-The CoreML setup script builds `pywhispercpp` with CoreML support, downloads the matching `ggml-*.bin` model, and generates the matching `*-encoder.mlmodelc` encoder bundle. Keep the `.bin` file and `.mlmodelc` folder together in the same model directory. `faster-whisper` is the default transcription engine because it has been more stable in local testing. whisper.cpp remains available as an explicit experimental backend, and the app disables whisper.cpp flash attention by default because that path can crash inside Metal on Apple Silicon.
+The CoreML setup script builds `pywhispercpp` with CoreML support, downloads the matching `ggml-*.bin` model, and generates the matching `*-encoder.mlmodelc` encoder bundle. Keep the `.bin` file and `*-encoder.mlmodelc` folder together in the same model directory. `faster-whisper` is the default transcription engine for compatibility, and the new optional `Parakeet MLX` profile is available in the transcription profile dropdown for Apple Silicon setups.
 
 FFmpeg is installed locally in `.tools/darwin_arm64`; the app auto-discovers that path when system `ffmpeg` and `ffprobe` are not available.
 
@@ -151,7 +153,7 @@ lecture-processor process /path/to/lectures \
   --ai-provider mock
 ```
 
-To use LM Studio enrichment from the CLI, start the LM Studio local server and pick the same models you use in the desktop app:
+To use oMLX / LM Studio enrichment from the CLI, start the local server and pick the same models you use in the desktop app:
 
 ```bash
 lecture-processor process /path/to/lectures \
@@ -160,11 +162,11 @@ lecture-processor process /path/to/lectures \
   --ai-transcript-model your-text-model \
   --ai-slides-model your-vision-model \
   --ai-resources-model your-resource-model \
-  --mlx-text-url http://192.168.86.101:1234/v1 \
-  --mlx-vision-url http://192.168.86.101:1234/v1
+  --mlx-text-url http://192.168.86.22:1234/v1 \
+  --mlx-vision-url http://192.168.86.22:1234/v1
 ```
 
-The desktop app uses one LM Studio server URL for text, vision, and resources. If your LM Studio server requires a token, Settings stores it in macOS Keychain and passes it only to the processor process.
+The desktop app uses one oMLX / LM Studio server URL for text, vision, and resources. If your server requires a token, Settings stores it in macOS Keychain and passes it only to the processor process.
 
 ## Vision Model Test Harness
 
@@ -214,7 +216,7 @@ python harness.py --list-runs
 python harness.py --report-only
 ```
 
-The default LM Studio URL is `http://127.0.0.1:1234`. Use `--base-url` if LM Studio is running on another machine.
+The default oMLX / LM Studio URL is `http://192.168.86.22:1234`. Use `--base-url` if the server moves.
 
 To use the local Web UI:
 

@@ -101,7 +101,7 @@ const LAST_OUTPUT_STORAGE_KEY = "lectureProcessor.lastOutputDir.v1";
 const LOCAL_MODELS_STORAGE_KEY = "lectureProcessor.lmStudioModels.v2";
 const MODEL_SELECTION_VERSION = 1;
 const UI_SETTINGS_VERSION = 1;
-const LM_STUDIO_OPENAI_URL = "http://192.168.86.101:1234/v1";
+const LM_STUDIO_OPENAI_URL = "http://192.168.86.22:1234/v1";
 const LEGACY_GEMINI_RESOURCES_MODEL_VALUE = "__gemini_resources__";
 const LEGACY_GEMINI_RESOURCE_PREFIX = "gemini:";
 const LEGACY_LOCAL_MODEL_IDS = new Set(["gemma4:26b", "llama3", "qwen3", "gemma3"]);
@@ -110,6 +110,7 @@ const LEGACY_LOCAL_OPENAI_URLS = new Set([
   "http://localhost:1234/v1",
   "http://localhost:8000/v1",
   "http://localhost:8001/v1",
+  "http://192.168.86.101:1234/v1",
 ]);
 const DEFAULT_SETTINGS = Object.freeze({
   recordingSpeed: "1x",
@@ -133,16 +134,18 @@ const DEFAULT_SETTINGS = Object.freeze({
   concurrentFiles: 2,
   saveNormalized: true,
 });
-const PROFILE_ORDER = ["quality", "fast", "turbo"];
+const PROFILE_ORDER = ["quality", "fast", "turbo", "parakeet"];
 const PROFILE_DESCRIPTIONS = Object.freeze({
   quality: "Highest accuracy. Best for difficult audio. ~1.5-2x real-time.",
   fast: "Recommended for most lectures. Minimal accuracy loss vs Quality, ~2-3x faster.",
   turbo: "Maximum speed using Apple Silicon acceleration. Excellent accuracy. Requires M-series Mac.",
+  parakeet: "Parakeet MLX uses an Apple Silicon model for speech-to-text. Use when you want a different local transcription tradeoff.",
 });
 const PROFILE_LABELS = Object.freeze({
   quality: "Quality",
   fast: "Fast",
   turbo: "Turbo",
+  parakeet: "Parakeet",
 });
 const LEGACY_DEFAULT_MIGRATIONS = Object.freeze({
   audioQuality: ["fast", DEFAULT_SETTINGS.audioQuality],
@@ -2308,7 +2311,7 @@ async function aiSkipReasonForUnavailableModels() {
   if (!needsAiEnhancement()) return "";
   syncAiRouteProvidersFromModelChoices();
 
-  // The Python pipeline now probes LM Studio once before staged AI starts and
+  // The Python pipeline now probes the local AI server before staged AI starts and
   // skips only the unavailable role. Keep this refresh for user feedback/cache,
   // but do not turn one missing model into a whole-run AI skip here.
   await refreshLocalModels({ quiet: true, force: true });
@@ -2359,7 +2362,7 @@ async function refreshLocalModels(options = {}) {
       const errors = Object.values(errorsByBaseUrl);
       elements.runMeta.textContent = errors.length
         ? errors.join("; ")
-        : "LM Studio is reachable, but no models are loaded.";
+        : "Local AI Server is reachable, but no models are loaded.";
     }
     return state.localModels;
   } catch (error) {
@@ -2368,12 +2371,12 @@ async function refreshLocalModels(options = {}) {
     state.localModelErrorsByBaseUrl = {};
     state.localModelsLoadedFromCache = false;
     renderLocalModelOptions();
-    setLocalModelStatus("LM Studio unavailable");
+    setLocalModelStatus("Local AI Server unavailable");
     if (!quiet) {
       const message = String(error || "");
       elements.runMeta.textContent = message.includes("API token")
         ? message
-        : `Could not reach LM Studio at ${baseUrls.join(" and ")}.`;
+        : `Could not reach Local AI Server at ${baseUrls.join(" and ")}.`;
     }
     return [];
   } finally {
@@ -2413,7 +2416,7 @@ function renderModelSelect(select, selectedValue, options = {}) {
   const selected = String(selectedValue || "").trim();
   select.innerHTML = "";
 
-  select.appendChild(new Option("Choose LM Studio model", ""));
+  select.appendChild(new Option("Choose Local AI model", ""));
   modelOptions.forEach((model) => {
     select.appendChild(new Option(model, model));
   });
@@ -2951,7 +2954,7 @@ function selectedAudioEnhancementLabel() {
 function selectedAiRouteLabel() {
   const providers = aiRouteProviders();
   if (providers.every((provider) => provider === "off")) return "AI off";
-  return "LM Studio";
+  return "Local AI";
 }
 
 function startElapsedTimer() {

@@ -1,8 +1,10 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
-from lecture_processor.slides import ClassifiedFrame, select_best_unique_slides
+from lecture_processor.errors import ProcessingError
+from lecture_processor.slides import ClassifiedFrame, SlideBackend, SlideExtractor, select_best_unique_slides
 
 
 class SlideSelectionTests(unittest.TestCase):
@@ -88,6 +90,50 @@ class SlideSelectionTests(unittest.TestCase):
             selected = select_best_unique_slides(frames)
 
         self.assertEqual([16.0], [frame.timestamp for frame in selected])
+
+
+class SlideExtractorTests(unittest.TestCase):
+    def test_opencv_fps_range_validation_clamps(self):
+        mock_cv2 = MagicMock()
+        mock_capture = MagicMock()
+        mock_capture.isOpened.return_value = True
+        mock_capture.read.return_value = (False, None)
+        mock_cv2.VideoCapture.return_value = mock_capture
+
+        # Test with FPS = 0
+        mock_capture.get.return_value = 0.0
+        extractor = SlideExtractor(backend=SlideBackend.OPENCV)
+
+        with patch("importlib.import_module", return_value=mock_cv2), tempfile.TemporaryDirectory() as tmp:
+            extractor.extract(Path("video.mp4"), Path(tmp))
+            # Verify CAP_PROP_FPS was read
+            mock_capture.get.assert_any_call(mock_cv2.CAP_PROP_FPS)
+
+        # Test with FPS = 300 (exceeds 240)
+        mock_capture.get.return_value = 300.0
+        extractor = SlideExtractor(backend=SlideBackend.OPENCV)
+
+        with patch("importlib.import_module", return_value=mock_cv2), tempfile.TemporaryDirectory() as tmp:
+            extractor.extract(Path("video.mp4"), Path(tmp))
+            mock_capture.get.assert_any_call(mock_cv2.CAP_PROP_FPS)
+
+    def test_opencv_imwrite_failure_raises_processing_error(self):
+        mock_cv2 = MagicMock()
+        mock_capture = MagicMock()
+        mock_capture.isOpened.return_value = True
+        # First read succeeds, second fails to terminate loop
+        mock_capture.read.side_effect = [(True, "fake_frame"), (False, None)]
+        mock_capture.get.return_value = 30.0
+        mock_cv2.VideoCapture.return_value = mock_capture
+        # imwrite fails
+        mock_cv2.imwrite.return_value = False
+
+        extractor = SlideExtractor(backend=SlideBackend.OPENCV)
+
+        with patch("importlib.import_module", return_value=mock_cv2), tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(ProcessingError) as context:
+                extractor.extract(Path("video.mp4"), Path(tmp))
+            self.assertIn("Failed to save slide image", str(context.exception))
 
 
 if __name__ == "__main__":
