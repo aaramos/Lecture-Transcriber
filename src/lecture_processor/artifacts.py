@@ -261,6 +261,8 @@ def build_batch_artifact(
             "mlx_request_timeout_seconds": config.mlx_request_timeout_seconds,
             "mlx_disable_thinking": config.mlx_disable_thinking,
             "render_html": config.render_html,
+            "export_notebook": config.export_notebook,
+            "notebook_course": config.notebook_course or None,
         },
         "lectures": lectures,
         "summary": {
@@ -276,8 +278,6 @@ def build_batch_artifact(
 
 
 def load_json(path: Path) -> Dict:
-    import json
-
     return json.loads(path.read_text(encoding="utf-8"))
 
 

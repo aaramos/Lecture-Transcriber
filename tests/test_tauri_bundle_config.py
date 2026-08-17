@@ -8,12 +8,14 @@ class TauriBundleConfigTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[1]
         config_path = root / "src-tauri" / "tauri.conf.json"
         config = json.loads(config_path.read_text(encoding="utf-8"))
-        resources = set(config["bundle"]["resources"])
+        resources = config["bundle"]["resources"]
         preparation_script = (root / "scripts" / "prepare-bundle-resources.mjs").read_text(
             encoding="utf-8"
         )
 
-        self.assertEqual({"bundle-resources/project"}, resources)
+        self.assertEqual(1, len(resources))
+        self.assertTrue("bundle-resources/project/" in resources)
+        self.assertEqual("project/", resources["bundle-resources/project/"])
         self.assertEqual("-", config["bundle"]["macOS"]["signingIdentity"])
         self.assertIn('"git", ["ls-files", "src/lecture_processor/**"]', preparation_script)
         self.assertIn('".tools/darwin_arm64/ffmpeg"', preparation_script)

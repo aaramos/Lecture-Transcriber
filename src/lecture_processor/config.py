@@ -134,6 +134,8 @@ class BatchConfig:
     skip_ai_enrichment_reason: str = ""
     gemini_max_concurrency: int = 3
     render_html: bool = True
+    export_notebook: bool = False
+    notebook_course: str = ""
     skip_files: Tuple[str, ...] = ()
     control_file: Optional[Path] = None
 

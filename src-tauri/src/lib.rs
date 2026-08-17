@@ -1781,6 +1781,8 @@ fn find_project_root(app: Option<&tauri::AppHandle>) -> Result<PathBuf, String> 
     if let Some(app) = app {
         if let Ok(resource_dir) = app.path().resource_dir() {
             starts.push(resource_dir.join("project"));
+            starts.push(resource_dir.join("bundle-resources").join("project"));
+            starts.push(resource_dir.join("bundle-resources"));
             starts.push(resource_dir.join("_up_"));
             starts.push(resource_dir);
         }

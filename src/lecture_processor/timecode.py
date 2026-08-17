@@ -22,6 +22,23 @@ def format_srt_timestamp(seconds: float) -> str:
     return f"{hours:02d}:{minutes:02d}:{secs:02d},{millis:03d}"
 
 
+def format_timecode(seconds: float) -> str:
+    total = max(0, int(round(seconds)))
+    hours = total // 3600
+    minutes = (total % 3600) // 60
+    secs = total % 60
+    if hours > 0:
+        return f"{hours:d}:{minutes:02d}:{secs:02d}"
+    return f"{minutes:d}:{secs:02d}"
+
+
+def format_timecode_range(start: float, end: float) -> str:
+    start_tc = format_timecode(start)
+    if end <= start:
+        return f"({start_tc})"
+    return f"({start_tc}\u2013{format_timecode(end)})"
+
+
 def segments_to_srt(segments: Iterable[TranscriptSegment]) -> str:
     blocks = []
     for index, segment in enumerate(segments, start=1):

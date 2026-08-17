@@ -1,0 +1,39 @@
+# Changelog
+
+All notable changes to Lecture Processor are documented here.
+
+## [0.7.0] - 2026-08-16
+
+### Fixed
+
+- **Critical:** Packaged app failed at startup with "Could not locate the Lecture
+  Processor project root" and wrote a `batch_error.txt` instead of running any
+  batch. The Tauri bundle placed project files under
+  `Contents/Resources/bundle-resources/project/...`, but the Rust project-root
+  resolver only checked `Contents/Resources/project/...`, so it could never
+  find `pyproject.toml` + `src/lecture_processor`. Dev builds worked because the
+  current directory / executable path resolved to the repo root, which masked
+  the bug. The bundle config now targets `Contents/Resources/project/` directly,
+  and the resolver was hardened to also check the legacy nested path so future
+  config drift cannot silently reintroduce the failure.
+- Supersedes the broken **v0.6.1** release; users on v0.6.1 should upgrade.
+
+### Added
+
+- **Notebook export** (`--export-notebook`): renders a markdown notebook
+  (per-slide instructor transcript links, headings matched to slide count) from
+  the lecture JSON, gated behind a `config.export_notebook` flag with an
+  optional `notebook_course` override.
+
+### Removed
+
+- Dropped the orphaned `saga.py` async saga orchestrator and its tests. The
+  module was never imported by the application or CLI (only by its own test
+  suite), so it shipped as dead code. Removing it keeps the bundle lean.
+
+## [0.6.1] - 2026-07-31
+
+### Known Issues
+
+- **Broken release.** Packaged app cannot locate the project root and fails
+  every batch with `batch_error.txt`. Superseded by v0.7.0; do not use.

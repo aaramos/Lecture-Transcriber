@@ -26,6 +26,7 @@ from .config import (
 from .ai.enrichment import enrich_lecture_artifact
 from .errors import LectureProcessorError
 from .html_renderer import render_lecture_page
+from .notebook_export import export_notebook_markdown
 from .media import ensure_media_tools, resolve_media_tool
 from .models import BatchSummary, FileStatus
 from .pipeline import BatchProcessor, discover_mov_files, enrich_processed_batch
@@ -110,6 +111,8 @@ def build_parser() -> argparse.ArgumentParser:
     process.add_argument("--mlx-timeout", type=int, default=120)
     process.add_argument("--skip-ai-reason", default="", help=argparse.SUPPRESS)
     process.add_argument("--no-render-html", action="store_true")
+    process.add_argument("--export-notebook", action="store_true")
+    process.add_argument("--course", default="")
     process.add_argument("--skip-file", action="append", default=[], help=argparse.SUPPRESS)
     process.add_argument("--control-file", type=Path, default=None, help=argparse.SUPPRESS)
     process.add_argument("--ffmpeg", default="ffmpeg")
@@ -134,6 +137,8 @@ def build_parser() -> argparse.ArgumentParser:
     enrich.add_argument("--mlx-timeout", type=int, default=120)
     enrich.add_argument("--skip-ai-reason", default="", help=argparse.SUPPRESS)
     enrich.add_argument("--render-html", action="store_true")
+    enrich.add_argument("--export-notebook", action="store_true")
+    enrich.add_argument("--course", default="")
 
     enrich_batch = subparsers.add_parser("enrich-batch", help="Enhance an existing processed batch folder")
     enrich_batch.add_argument("processed_dir", type=Path)
@@ -154,10 +159,14 @@ def build_parser() -> argparse.ArgumentParser:
     enrich_batch.add_argument("--skip-ai-reason", default="", help=argparse.SUPPRESS)
     enrich_batch.add_argument("--skip-file", action="append", default=[], help=argparse.SUPPRESS)
     enrich_batch.add_argument("--no-render-html", action="store_true")
+    enrich_batch.add_argument("--export-notebook", action="store_true")
+    enrich_batch.add_argument("--course", default="")
     enrich_batch.add_argument("--json-events", action="store_true", help=argparse.SUPPRESS)
 
     render = subparsers.add_parser("render", help="Render an existing lecture.json artifact")
     render.add_argument("lecture_json", type=Path)
+    render.add_argument("--export-notebook", action="store_true")
+    render.add_argument("--course", default="")
 
     return parser
 
@@ -222,6 +231,8 @@ def _run_process(args) -> int:
         mlx_request_timeout_seconds=args.mlx_timeout,
         skip_ai_enrichment_reason=args.skip_ai_reason,
         render_html=not args.no_render_html,
+        export_notebook=args.export_notebook,
+        notebook_course=args.course,
         skip_files=tuple(args.skip_file or ()),
         control_file=args.control_file,
     )
@@ -325,6 +336,8 @@ def _run_enrich(args) -> int:
         mlx_vision_base_url=args.mlx_vision_url or default_local_vision_base_url(),
         mlx_request_timeout_seconds=args.mlx_timeout,
         skip_ai_enrichment_reason=args.skip_ai_reason,
+        export_notebook=args.export_notebook,
+        notebook_course=args.course,
     )
     config.validate()
     try:
@@ -332,6 +345,10 @@ def _run_enrich(args) -> int:
         if args.render_html:
             html_path = render_lecture_page(lecture_json)
             print(f"Rendered: {html_path}")
+        if args.export_notebook:
+            notebook_path = export_notebook_markdown(lecture_json, course=args.course)
+            if notebook_path:
+                print(f"Notebook: {notebook_path}")
         print(f"Enriched: {artifact.get('enrichment', {}).get('title', lecture_json.name)}")
         return 0
     except Exception as exc:
@@ -363,6 +380,8 @@ def _run_enrich_batch(args) -> int:
         mlx_request_timeout_seconds=args.mlx_timeout,
         skip_ai_enrichment_reason=args.skip_ai_reason,
         render_html=not args.no_render_html,
+        export_notebook=args.export_notebook,
+        notebook_course=args.course,
         skip_files=tuple(args.skip_file or ()),
     )
     config.validate()
@@ -390,6 +409,14 @@ def _run_render(args) -> int:
         print(f"Error: lecture artifact not found: {lecture_json}", file=sys.stderr)
         return 2
     try:
+        if args.export_notebook:
+            notebook_path = export_notebook_markdown(lecture_json, course=args.course)
+            if notebook_path:
+                print(f"Notebook: {notebook_path}")
+            else:
+                print("Skipped notebook export (lecture failed processing)", file=sys.stderr)
+                return 1
+            return 0
         html_path = render_lecture_page(lecture_json)
     except Exception as exc:
         print(f"Error: {exc}", file=sys.stderr)

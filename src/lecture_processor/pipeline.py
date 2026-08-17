@@ -18,6 +18,7 @@ from .control import ProcessingControl, default_control_file
 from .errors import LectureProcessorError
 from .errors import ProcessingStopped
 from .html_renderer import render_batch_index, render_lecture_page
+from .notebook_export import export_notebook_markdown
 from .media import CleanAudioExtractor, DeepFilterAudioEnhancer, MediaInspector, MediaNormalizer
 from .models import BatchSummary, FileResult, FileStatus, MediaInfo, TranscriptResult
 from .slide_classifier import LmStudioSlideClassifier
@@ -442,6 +443,16 @@ class BatchProcessor:
                 )
                 rendered = True
 
+            if self.config.export_notebook and not self._defer_ai_enrichment:
+                self._time_step(
+                    "Notebook",
+                    source,
+                    log_lines,
+                    step_state,
+                    stage_timings,
+                    lambda: export_notebook_markdown(lecture_json_path, course=self.config.notebook_course),
+                )
+
             elapsed = time.monotonic() - started
             log_lines.append(f"Complete in {elapsed:.1f}s")
             write_processing_log(output_dir, log_lines)
@@ -640,6 +651,16 @@ class BatchProcessor:
                     lambda: render_lecture_page(lecture_json_path),
                 )
                 rendered = True
+
+            if self.config.export_notebook and not self._defer_ai_enrichment:
+                self._time_step(
+                    "Notebook",
+                    source,
+                    log_lines,
+                    step_state,
+                    stage_timings,
+                    lambda: export_notebook_markdown(lecture_json_path, course=self.config.notebook_course),
+                )
 
             elapsed = time.monotonic() - started
             log_lines.append(f"Complete in {elapsed:.1f}s")
@@ -1018,6 +1039,7 @@ class BatchProcessor:
     ) -> FileResult:
         try:
             html_path = self._render_deferred_html(result)
+            self._render_deferred_notebook(result)
         except Exception as exc:
             render_message = str(exc)
             self._append_processing_log_lines(
@@ -1057,6 +1079,20 @@ class BatchProcessor:
         self._append_processing_log_lines(result.output_dir, [f"Render     OK  {elapsed:.1f}s"])
         self._emit("step_finished", source=result.source.name, step="Render", elapsed_seconds=round(elapsed, 1))
         return html_path
+
+    def _render_deferred_notebook(self, result: FileResult) -> Optional[Path]:
+        if not self.config.export_notebook or not result.lecture_json_path:
+            return None
+        self._emit("step_started", source=result.source.name, step="Notebook")
+        started = time.monotonic()
+        notebook_path = export_notebook_markdown(result.lecture_json_path, course=self.config.notebook_course)
+        elapsed = time.monotonic() - started
+        if notebook_path:
+            self._append_processing_log_lines(result.output_dir, [f"Notebook   OK  {elapsed:.1f}s"])
+        else:
+            self._append_processing_log_lines(result.output_dir, ["Notebook   SKIP (failed lecture)"])
+        self._emit("step_finished", source=result.source.name, step="Notebook", elapsed_seconds=round(elapsed, 1))
+        return notebook_path
 
     def _append_processing_log_lines(self, output_dir: Path, lines: List[str]) -> None:
         log_path = output_dir / "processing_log.txt"
@@ -1528,6 +1564,7 @@ def _complete_processed_enrichment_result(
 ) -> FileResult:
     try:
         html_path = _render_processed_html(item["source"], item["path"], config, progress_callback)
+        _render_processed_notebook(item["source"], item["path"], config, progress_callback)
     except Exception as exc:
         return _file_result_from_artifact(
             source=item["source"],
@@ -1569,6 +1606,27 @@ def _render_processed_html(
         elapsed_seconds=round(time.monotonic() - started, 1),
     )
     return html_path
+
+
+def _render_processed_notebook(
+    source: Path,
+    lecture_json_path: Path,
+    config: BatchConfig,
+    progress_callback: Optional[Callable[[Dict], None]],
+) -> Optional[Path]:
+    if not config.export_notebook:
+        return None
+    _emit(progress_callback, "step_started", source=source.name, step="Notebook")
+    started = time.monotonic()
+    notebook_path = export_notebook_markdown(lecture_json_path, course=config.notebook_course)
+    _emit(
+        progress_callback,
+        "step_finished",
+        source=source.name,
+        step="Notebook",
+        elapsed_seconds=round(time.monotonic() - started, 1),
+    )
+    return notebook_path
 
 
 def _enrich_processed_lecture(
@@ -1639,6 +1697,17 @@ def _enrich_processed_lecture(
                 "step_finished",
                 source=source.name,
                 step="Render",
+                elapsed_seconds=round(time.monotonic() - step_started, 1),
+            )
+        if config.export_notebook:
+            _emit(progress_callback, "step_started", source=source.name, step="Notebook")
+            step_started = time.monotonic()
+            export_notebook_markdown(lecture_json_path, course=config.notebook_course)
+            _emit(
+                progress_callback,
+                "step_finished",
+                source=source.name,
+                step="Notebook",
                 elapsed_seconds=round(time.monotonic() - step_started, 1),
             )
         return _file_result_from_artifact(
