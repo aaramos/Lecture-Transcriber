@@ -1,6 +1,6 @@
 [package]
 name = "lecture-processor-app"
-version = "0.7.1"
+version = "0.7.2"
 description = "Desktop wrapper for Lecture Processor"
 authors = ["aaramos <aaramos78@gmail.com>"]
 edition = "2021"

@@ -220,6 +220,11 @@ const elements = {
   confirmDialog: document.querySelector("#confirmDialog"),
   confirmCheckbox: document.querySelector("#confirmCheckbox"),
   confirmContinue: document.querySelector("#confirmContinue"),
+  updateDialog: document.querySelector("#updateDialog"),
+  updateDialogTitle: document.querySelector("#updateDialogTitle"),
+  updateVersionLine: document.querySelector("#updateVersionLine"),
+  updateNotes: document.querySelector("#updateNotes"),
+  updateNowButton: document.querySelector("#updateNowButton"),
   folderTitle: document.querySelector("#folderTitle"),
   folderSub: document.querySelector("#folderSub"),
   folderError: document.querySelector("#folderError"),
@@ -305,8 +310,11 @@ refreshTranscriptionProfileStatus();
 refreshLmStudioTokenStatus();
 refreshOllamaCloudTokenStatus();
 cleanupTempFilesAtLaunch();
+checkForUpdatesAtStartup();
 setupDragAndDrop();
 startSystemMetrics();
+
+window.__TAURI__?.event?.listen?.("menu-check-updates", () => checkForUpdatesManually());
 
 document.addEventListener("keydown", (event) => {
   const key = event.key.toLowerCase();
@@ -3204,6 +3212,87 @@ function setupDragAndDrop() {
 function showDialog(dialog) {
   if (!dialog.open) dialog.showModal();
 }
+
+// ---------------------------------------------------------------------------
+// Update checker
+// ---------------------------------------------------------------------------
+
+let updateCheckResult = null;
+
+async function fetchUpdateInfo() {
+  try {
+    const result = await invoke("check_for_updates");
+    updateCheckResult = result;
+    return result;
+  } catch (error) {
+    console.error("Update check failed:", error);
+    return null;
+  }
+}
+
+function renderUpdateDialog(info, isManual) {
+  if (!info) {
+    elements.updateDialogTitle.textContent = "Update Check Failed";
+    elements.updateVersionLine.textContent = "Could not reach GitHub to check for updates. Try again later.";
+    elements.updateNotes.textContent = "";
+    elements.updateNowButton.disabled = true;
+    showDialog(elements.updateDialog);
+    return;
+  }
+
+  if (!info.has_update) {
+    elements.updateDialogTitle.textContent = "Up to Date";
+    elements.updateVersionLine.innerHTML = `You're running <strong>v${info.current_version}</strong> — that's the latest release.`;
+    elements.updateNotes.textContent = "";
+    elements.updateNowButton.disabled = true;
+    showDialog(elements.updateDialog);
+    return;
+  }
+
+  elements.updateDialogTitle.textContent = "Update Available";
+  elements.updateVersionLine.innerHTML =
+    `A new version is available: <strong>v${info.latest_version}</strong> (you have v${info.current_version}).`;
+
+  // Render release notes (GitHub markdown body — displayed as preformatted text).
+  elements.updateNotes.textContent = info.release_notes || "No release notes available.";
+
+  // Only enable "Update Now" if the release is valid and DMG is downloadable.
+  if (info.is_valid && info.dmg_download_url) {
+    elements.updateNowButton.disabled = false;
+    elements.updateNowButton.textContent = "Update Now";
+  } else if (info.dmg_download_url) {
+    // DMG exists but couldn't be verified — still offer, with a softer label.
+    elements.updateNowButton.disabled = false;
+    elements.updateNowButton.textContent = "Open Release Page";
+  } else {
+    elements.updateNowButton.disabled = true;
+    elements.updateNowButton.textContent = "Update Now";
+  }
+
+  showDialog(elements.updateDialog);
+}
+
+async function checkForUpdatesAtStartup() {
+  const info = await fetchUpdateInfo();
+  if (info && info.has_update) {
+    renderUpdateDialog(info, false);
+  }
+}
+
+async function checkForUpdatesManually() {
+  const info = await fetchUpdateInfo();
+  renderUpdateDialog(info, true);
+}
+
+// Handle "Update Now" click — open the release page in the browser.
+elements.updateDialog.addEventListener("close", () => {
+  if (elements.updateDialog.returnValue === "update" && updateCheckResult) {
+    const url = updateCheckResult.release_url || "";
+    invoke("open_release_page", { url }).catch((error) => {
+      console.error("Could not open release page:", error);
+    });
+  }
+});
 
 function runDescription() {
   const speed = state.recordingSpeed === "2x" ? "2x to 1x" : "1x";

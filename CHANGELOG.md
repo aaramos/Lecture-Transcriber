@@ -2,6 +2,24 @@
 
 All notable changes to Lecture Processor are documented here.
 
+## [0.7.2] - 2026-08-17
+
+### Added
+
+- **In-app update checker** — on startup the app checks the latest GitHub
+  release (`aaramos/Lecture-Transcriber`), compares it against the running
+  version with semver, and prompts the user when an update is available. A
+  macOS menu-bar **"Check for Updates…"** command and an **"Update Now"** prompt
+  open the release page for download. Includes release-integrity/DMG
+  verification (HEAD checksum) before the packaged app is trusted.
+
+### Security
+
+- **Secret-hygiene hardening** — `.gitignore` now carries explicit credential
+  exclusions (`.env` / `*.pem` / `*.key` patterns) as defense-in-depth. API keys
+  continue to be read exclusively from the macOS Keychain with an env-var
+  fallback — no secrets are committed or pushed.
+
 ## [0.7.1] - 2026-08-17
 
 ### Added

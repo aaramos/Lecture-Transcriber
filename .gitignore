@@ -28,3 +28,18 @@ src-tauri/target/
 src-tauri/bundle-resources/
 *.egg-info/
 *_processed/
+
+# Credentials / secrets — never commit API keys, tokens, or private keys
+.env
+.env.*
+*.env
+*.pem
+*.key
+*.p12
+*.pfx
+.netrc
+credentials
+credentials.*
+*secret*
+*token_file*
+*.keystore

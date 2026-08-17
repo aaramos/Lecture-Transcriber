@@ -7,7 +7,10 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 use std::{env, fs};
-use tauri::{Emitter, Manager};
+use tauri::{
+    menu::{Menu, MenuItem, PredefinedMenuItem, Submenu, IsMenuItem},
+    Emitter, Manager,
+};
 
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
@@ -2328,6 +2331,182 @@ fn pid_is_running(_pid: u32) -> bool {
     false
 }
 
+// ---------------------------------------------------------------------------
+// Update checker
+// ---------------------------------------------------------------------------
+
+const GITHUB_LATEST_RELEASE_URL: &str =
+    "https://api.github.com/repos/aaramos/Lecture-Transcriber/releases/latest";
+const GITHUB_RELEASES_PAGE: &str =
+    "https://github.com/aaramos/Lecture-Transcriber/releases/latest";
+const MENU_EVENT_CHECK_UPDATES: &str = "menu-check-updates";
+
+#[derive(Serialize)]
+struct UpdateCheckResponse {
+    has_update: bool,
+    current_version: String,
+    latest_version: String,
+    release_notes: String,
+    dmg_download_url: Option<String>,
+    release_url: String,
+    is_valid: bool,
+}
+
+/// Parse a version string like "v0.7.1" or "0.7.1" into (major, minor, patch).
+fn parse_semver(version: &str) -> Option<(u32, u32, u32)> {
+    let trimmed = version.trim().trim_start_matches('v');
+    let parts: Vec<&str> = trimmed.split('.').collect();
+    if parts.len() != 3 {
+        return None;
+    }
+    Some((
+        parts[0].parse::<u32>().ok()?,
+        parts[1].parse::<u32>().ok()?,
+        parts[2].parse::<u32>().ok()?,
+    ))
+}
+
+/// Returns true if `latest` is strictly newer than `current`.
+fn is_version_newer(current: &str, latest: &str) -> bool {
+    match (parse_semver(current), parse_semver(latest)) {
+        (Some(c), Some(l)) => l > c,
+        _ => false,
+    }
+}
+
+/// Extract the DMG asset's browser_download_url from a GitHub release JSON payload.
+fn extract_dmg_url(payload: &serde_json::Value) -> Option<String> {
+    payload
+        .get("assets")?
+        .as_array()?
+        .iter()
+        .find_map(|asset| {
+            let name = asset.get("name")?.as_str()?;
+            if name.ends_with(".dmg") {
+                asset
+                    .get("browser_download_url")
+                    .and_then(|url| url.as_str())
+                    .map(|s| s.to_string())
+            } else {
+                None
+            }
+        })
+}
+
+/// Fetch the latest release info from the GitHub API via curl.
+/// Returns (tag_name, release_notes, dmg_download_url, html_url).
+fn fetch_latest_release() -> Result<(String, String, Option<String>, String), String> {
+    let output = Command::new("curl")
+        .args([
+            "-sS",
+            "--max-time",
+            "15",
+            "-H",
+            "Accept: application/vnd.github+json",
+            "-H",
+            "User-Agent: Lecture-Processor-App",
+            GITHUB_LATEST_RELEASE_URL,
+        ])
+        .output()
+        .map_err(|error| format!("Could not run curl to fetch latest release: {error}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if stderr.is_empty() {
+            "GitHub release lookup failed.".to_string()
+        } else {
+            stderr
+        });
+    }
+
+    let payload: serde_json::Value =
+        serde_json::from_slice(&output.stdout)
+            .map_err(|error| format!("GitHub returned invalid JSON: {error}"))?;
+
+    let tag_name = payload
+        .get("tag_name")
+        .and_then(|v| v.as_str())
+        .ok_or("GitHub response missing tag_name")?
+        .to_string();
+    let release_notes = payload
+        .get("body")
+        .and_then(|v| v.as_str())
+        .unwrap_or("No release notes available.")
+        .to_string();
+    let dmg_url = extract_dmg_url(&payload);
+    let html_url = payload
+        .get("html_url")
+        .and_then(|v| v.as_str())
+        .unwrap_or(GITHUB_RELEASES_PAGE)
+        .to_string();
+
+    Ok((tag_name, release_notes, dmg_url, html_url))
+}
+
+/// Verify a download URL is reachable (HTTP HEAD via curl, accepts 2xx/3xx).
+fn verify_downloadable(url: &str) -> bool {
+    let output = Command::new("curl")
+        .args([
+            "-sS",
+            "-o",
+            "/dev/null",
+            "-w",
+            "%{http_code}",
+            "-I",
+            "-L",
+            "--max-time",
+            "15",
+            url,
+        ])
+        .output();
+    match output {
+        Ok(out) if out.status.success() => {
+            let code = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            code.starts_with('2') || code.starts_with('3')
+        }
+        _ => false,
+    }
+}
+
+#[tauri::command]
+fn check_for_updates() -> Result<UpdateCheckResponse, String> {
+    let current_version = env!("CARGO_PKG_VERSION").to_string();
+    let (tag_name, release_notes, dmg_url, release_url) = fetch_latest_release()?;
+
+    let has_update = is_version_newer(&current_version, &tag_name);
+
+    // Release integrity: DMG asset present and downloadable.
+    let (dmg_download_url, is_valid) = match &dmg_url {
+        Some(url) if verify_downloadable(url) => (Some(url.clone()), true),
+        Some(url) if has_update => {
+            // DMG exists but HEAD check failed — still offer it, mark as
+            // not-yet-verified so the frontend can show a softer prompt.
+            (Some(url.clone()), false)
+        }
+        _ => (None, false),
+    };
+
+    Ok(UpdateCheckResponse {
+        has_update,
+        current_version,
+        latest_version: tag_name,
+        release_notes,
+        dmg_download_url,
+        release_url,
+        is_valid,
+    })
+}
+
+#[tauri::command]
+fn open_release_page(url: String) -> Result<(), String> {
+    let target = if url.is_empty() {
+        GITHUB_RELEASES_PAGE.to_string()
+    } else {
+        url
+    };
+    open_path_impl(Path::new(&target), "release page")
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let state = AppState::default();
@@ -2344,9 +2523,61 @@ pub fn run() {
                 terminate_active_process_for_shutdown(&window_close_active_process);
             }
         })
-        .setup(|_app| {
+        .setup(|app| {
             let _ = cleanup_temp_files_impl(None);
+
+            // Build the macOS menu bar with a "Check for Updates…" item.
+            let about = MenuItem::new(app, "About Lecture Processor", true, None::<&str>)?;
+            let check_updates = MenuItem::with_id(
+                app,
+                "menu-check-updates",
+                "Check for Updates…",
+                true,
+                None::<&str>,
+            )?;
+            let hide = MenuItem::new(app, "Hide Lecture Processor", true, None::<&str>)?;
+            let quit = MenuItem::new(app, "Quit Lecture Processor", true, Some("Cmd+Q"))?;
+
+            let sep1 = PredefinedMenuItem::separator(app)?;
+            let sep2 = PredefinedMenuItem::separator(app)?;
+            let sep3 = PredefinedMenuItem::separator(app)?;
+
+            let app_items: [&dyn IsMenuItem<_>; 7] = [
+                &about, &sep1, &check_updates, &sep2, &hide, &sep3, &quit,
+            ];
+            let app_menu = Submenu::with_items(app, "App", true, &app_items)?;
+
+            let undo = MenuItem::new(app, "Undo", true, Some("Cmd+Z"))?;
+            let redo = MenuItem::new(app, "Redo", true, Some("Cmd+Shift+Z"))?;
+            let cut = MenuItem::new(app, "Cut", true, Some("Cmd+X"))?;
+            let copy = MenuItem::new(app, "Copy", true, Some("Cmd+C"))?;
+            let paste = MenuItem::new(app, "Paste", true, Some("Cmd+V"))?;
+            let select_all = MenuItem::new(app, "Select All", true, Some("Cmd+A"))?;
+            let edit_sep = PredefinedMenuItem::separator(app)?;
+
+            let edit_items: [&dyn IsMenuItem<_>; 7] = [
+                &undo, &redo, &edit_sep, &cut, &copy, &paste, &select_all,
+            ];
+            let edit_menu = Submenu::with_items(app, "Edit", true, &edit_items)?;
+
+            let minimize = MenuItem::new(app, "Minimize", true, Some("Cmd+M"))?;
+            let zoom = MenuItem::new(app, "Zoom", true, None::<&str>)?;
+            let win_sep = PredefinedMenuItem::separator(app)?;
+
+            let win_items: [&dyn IsMenuItem<_>; 3] = [&minimize, &win_sep, &zoom];
+            let window_menu = Submenu::with_items(app, "Window", true, &win_items)?;
+
+            let menu_items: [&dyn IsMenuItem<_>; 3] = [&app_menu, &edit_menu, &window_menu];
+            let menu = Menu::with_items(app, &menu_items)?;
+
+            app.set_menu(menu)?;
+
             Ok(())
+        })
+        .on_menu_event(move |app, event| {
+            if event.id().as_ref() == MENU_EVENT_CHECK_UPDATES {
+                let _ = app.emit("menu-check-updates", ());
+            }
         })
         .invoke_handler(tauri::generate_handler![
             choose_folder,
@@ -2365,7 +2596,9 @@ pub fn run() {
             lm_studio_models,
             ollama_cloud_models,
             cancel_batch,
-            update_file_control
+            update_file_control,
+            check_for_updates,
+            open_release_page
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
@@ -2382,9 +2615,10 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_accumulated_gpu_times, parse_http_url, parse_top_cpu_percent, parse_vm_page_size,
-        parse_vm_pages, processed_lecture_can_be_enriched, resolve_server_addresses,
-        source_kind, trim_output_tail, validate_route_provider, OUTPUT_TRUNCATION_NOTICE,
+        extract_dmg_url, is_version_newer, parse_accumulated_gpu_times, parse_http_url,
+        parse_semver, parse_top_cpu_percent, parse_vm_page_size, parse_vm_pages,
+        processed_lecture_can_be_enriched, resolve_server_addresses, source_kind, trim_output_tail,
+        validate_route_provider, OUTPUT_TRUNCATION_NOTICE,
     };
     use serde_json::json;
     use std::path::Path;
@@ -2505,5 +2739,67 @@ CPU usage: 71.30% user, 24.79% sys, 3.89% idle
     fn route_provider_rejects_unknown() {
         assert!(validate_route_provider("openai").is_err());
         assert!(validate_route_provider("").is_err());
+    }
+
+    #[test]
+    fn semver_parses_with_and_without_v_prefix() {
+        assert_eq!(parse_semver("0.7.1"), Some((0, 7, 1)));
+        assert_eq!(parse_semver("v0.7.1"), Some((0, 7, 1)));
+        assert_eq!(parse_semver("1.0.0"), Some((1, 0, 0)));
+        assert_eq!(parse_semver("v1.2.3"), Some((1, 2, 3)));
+        assert_eq!(parse_semver("not-a-version"), None);
+        assert_eq!(parse_semver("1.2"), None);
+    }
+
+    #[test]
+    fn version_newer_detects_higher_release() {
+        assert!(is_version_newer("0.7.1", "0.7.2"));
+        assert!(is_version_newer("0.7.1", "0.8.0"));
+        assert!(is_version_newer("0.7.1", "1.0.0"));
+        assert!(is_version_newer("v0.7.1", "v0.7.2"));
+    }
+
+    #[test]
+    fn version_newer_rejects_equal_or_lower() {
+        assert!(!is_version_newer("0.7.1", "0.7.1"));
+        assert!(!is_version_newer("0.7.2", "0.7.1"));
+        assert!(!is_version_newer("1.0.0", "0.9.9"));
+    }
+
+    #[test]
+    fn dmg_url_extracted_from_release_payload() {
+        let payload = json!({
+            "tag_name": "v0.7.2",
+            "body": "Bug fixes",
+            "assets": [
+                {
+                    "name": "Lecture-Processor_0.7.2.dmg",
+                    "browser_download_url": "https://github.com/aaramos/Lecture-Transcriber/releases/download/v0.7.2/Lecture-Processor_0.7.2.dmg"
+                },
+                {
+                    "name": "checksums.txt",
+                    "browser_download_url": "https://example.com/checksums.txt"
+                }
+            ]
+        });
+        let url = extract_dmg_url(&payload);
+        assert_eq!(
+            url.as_deref(),
+            Some("https://github.com/aaramos/Lecture-Transcriber/releases/download/v0.7.2/Lecture-Processor_0.7.2.dmg")
+        );
+    }
+
+    #[test]
+    fn dmg_url_absent_when_no_dmg_asset() {
+        let payload = json!({
+            "tag_name": "v0.7.2",
+            "assets": [
+                {
+                    "name": "checksums.txt",
+                    "browser_download_url": "https://example.com/checksums.txt"
+                }
+            ]
+        });
+        assert!(extract_dmg_url(&payload).is_none());
     }
 }

@@ -393,6 +393,25 @@
           </div>
         </form>
       </dialog>
+
+      <dialog id="updateDialog" class="update-dialog">
+        <form method="dialog">
+          <div class="dialog-head">
+            <h2 id="updateDialogTitle">Update Available</h2>
+            <button class="icon-button" value="cancel" title="Close" aria-label="Close">×</button>
+          </div>
+
+          <div id="updateBody">
+            <p id="updateVersionLine" class="update-version-line"></p>
+            <div id="updateNotes" class="update-notes"></div>
+          </div>
+
+          <div class="dialog-actions">
+            <button class="secondary-button" value="cancel">Later</button>
+            <button id="updateNowButton" class="primary-button" value="update" disabled>Update Now</button>
+          </div>
+        </form>
+      </dialog>
     </main>
 
     <script type="module" src="src/main.js"></script>
