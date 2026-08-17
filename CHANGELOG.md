@@ -2,6 +2,32 @@
 
 All notable changes to Lecture Processor are documented here.
 
+## [0.7.1] - 2026-08-17
+
+### Added
+
+- **Configurable minimum file length** — the short-file skip threshold is now a
+  config setting instead of a hardcoded 60s. Default changed to **30 seconds**.
+  Wired through `BatchConfig.min_duration_seconds`, CLI `--min-duration`, a new
+  GUI spinbox, the web `minDuration` setting, and the Rust/Tauri boundary
+  (serde default 30s). Files shorter than the threshold are skipped + logged as
+  before.
+- **Ollama Cloud model option** — Lecture Transcriber now supports cloud models
+  served by Ollama (`https://ollama.com/v1`) alongside the existing oMLX-served
+  models. Users can enter an Ollama API key (stored in the macOS Keychain, never
+  plaintext) and pick oMLX or Ollama cloud models for the overview/transcript/
+  slides/resources AI steps. Includes cloud model refresh and URL config.
+
+### Fixed
+
+- `minDuration` setting was not persisted in `saveCurrentSettings`, so the
+  threshold reset to 30s on every app restart. Now saved and restored.
+- **Ollama Cloud route provider rejected** — the Rust `run_process_batch`
+  validator rejected `ollama-cloud` as a model route provider (it only allowed
+  `mlx-text`/`mlx-vision`/`local-stub`/`off`), so cloud batches errored at
+  launch. Validation is extracted into `validate_route_provider()` which now
+  accepts `ollama-cloud`, with new unit tests covering accept/reject cases.
+
 ## [0.7.0] - 2026-08-16
 
 ### Fixed

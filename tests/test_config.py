@@ -69,6 +69,7 @@ class BatchConfigTests(unittest.TestCase):
             self.assertEqual(config.mlx_text_base_url, "http://192.168.86.22:1234/v1")
             self.assertEqual(config.mlx_vision_base_url, "http://192.168.86.22:1234/v1")
             self.assertEqual(config.mlx_request_timeout_seconds, 120)
+            self.assertEqual(config.min_duration_seconds, 30.0)
             self.assertEqual(
                 config.ai_model_routing,
                 {
@@ -97,6 +98,66 @@ class BatchConfigTests(unittest.TestCase):
             self.assertTrue(config.ai_uses_mlx)
             self.assertEqual(config.ai_step_model("transcript"), "default")
             self.assertEqual(config.ai_step_model("resources"), "off")
+
+    def test_min_duration_defaults_to_30_and_is_overrideable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            config = BatchConfig(input_dir=folder, output_dir=folder / "out")
+            self.assertEqual(config.min_duration_seconds, 30.0)
+            config.validate()
+
+            custom = BatchConfig(
+                input_dir=folder,
+                output_dir=folder / "out",
+                min_duration_seconds=45.5,
+            )
+            custom.validate()
+            self.assertEqual(custom.min_duration_seconds, 45.5)
+
+    def test_ollama_cloud_default_url_and_validation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            config = BatchConfig(input_dir=folder, output_dir=folder / "out")
+            self.assertEqual(config.ollama_cloud_base_url, "https://ollama.com/v1")
+            config.validate()
+
+            # Invalid URL is rejected
+            bad = BatchConfig(
+                input_dir=folder,
+                output_dir=folder / "out",
+                ollama_cloud_base_url="not-a-url",
+            )
+            with self.assertRaises(LectureProcessorError) as context:
+                bad.validate()
+            self.assertIn("Invalid URL for ollama_cloud_base_url", str(context.exception))
+
+            # Valid override works
+            custom = BatchConfig(
+                input_dir=folder,
+                output_dir=folder / "out",
+                ollama_cloud_base_url="https://ollama.com/v1/custom",
+            )
+            custom.validate()
+            self.assertEqual(custom.ollama_cloud_base_url, "https://ollama.com/v1/custom")
+
+    def test_ollama_cloud_route_helpers_and_default_model(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            config = BatchConfig(
+                input_dir=folder,
+                output_dir=folder / "out",
+                ai_provider=AIProviderName.GEMINI,
+                ai_overview_provider=AIModelProvider.OLLAMA_CLOUD,
+                ai_transcript_provider=AIModelProvider.OFF,
+                ai_slides_provider=AIModelProvider.OFF,
+                ai_resources_provider=AIModelProvider.OFF,
+            )
+            config.validate()
+
+            self.assertTrue(config.ai_uses_ollama_cloud)
+            self.assertFalse(config.ai_uses_mlx)
+            self.assertEqual(config.ai_step_model("overview"), "llama3.3:70b")
+            self.assertEqual(config.ai_step_model("transcript"), "off")
 
     def test_validates_mlx_url_format(self):
         with tempfile.TemporaryDirectory() as tmp:

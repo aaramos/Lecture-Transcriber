@@ -22,6 +22,7 @@ from .config import (
     TranscriptionQuality,
     default_local_text_base_url,
     default_local_vision_base_url,
+    default_ollama_cloud_base_url,
 )
 from .ai.enrichment import enrich_lecture_artifact
 from .errors import LectureProcessorError
@@ -55,6 +56,7 @@ ENRICH_AI_PROVIDER_CHOICES = [
 AI_ROUTE_PROVIDER_CHOICES = [
     AIModelProvider.MLX_TEXT.value,
     AIModelProvider.MLX_VISION.value,
+    AIModelProvider.OLLAMA_CLOUD.value,
     AIModelProvider.LOCAL_STUB.value,
     AIModelProvider.OFF.value,
 ]
@@ -70,7 +72,7 @@ def build_parser() -> argparse.ArgumentParser:
     process.add_argument("--recording-speed", choices=[item.value for item in RecordingSpeed], default="1x")
     process.add_argument("--confirm-normalization", action="store_true")
     process.add_argument("--concurrent", type=int, default=4)
-    process.add_argument("--min-duration", type=float, default=60.0)
+    process.add_argument("--min-duration", type=float, default=30.0, help="Minimum file length in seconds. Files shorter than this are skipped. Defaults to 30s.")
     process.add_argument("--no-save-normalized-video", action="store_true")
     process.add_argument("--audio-quality", choices=[item.value for item in AudioQuality], default="high")
     process.add_argument("--audio-enhancement", choices=[item.value for item in AudioEnhancementMode], default="none")
@@ -108,6 +110,7 @@ def build_parser() -> argparse.ArgumentParser:
     process.add_argument("--ai-resources-model", default="")
     process.add_argument("--mlx-text-url", default="")
     process.add_argument("--mlx-vision-url", default="")
+    process.add_argument("--ollama-cloud-url", default="")
     process.add_argument("--mlx-timeout", type=int, default=120)
     process.add_argument("--skip-ai-reason", default="", help=argparse.SUPPRESS)
     process.add_argument("--no-render-html", action="store_true")
@@ -134,6 +137,7 @@ def build_parser() -> argparse.ArgumentParser:
     enrich.add_argument("--ai-resources-model", default="")
     enrich.add_argument("--mlx-text-url", default="")
     enrich.add_argument("--mlx-vision-url", default="")
+    enrich.add_argument("--ollama-cloud-url", default="")
     enrich.add_argument("--mlx-timeout", type=int, default=120)
     enrich.add_argument("--skip-ai-reason", default="", help=argparse.SUPPRESS)
     enrich.add_argument("--render-html", action="store_true")
@@ -155,6 +159,7 @@ def build_parser() -> argparse.ArgumentParser:
     enrich_batch.add_argument("--concurrent", type=int, default=1)
     enrich_batch.add_argument("--mlx-text-url", default="")
     enrich_batch.add_argument("--mlx-vision-url", default="")
+    enrich_batch.add_argument("--ollama-cloud-url", default="")
     enrich_batch.add_argument("--mlx-timeout", type=int, default=120)
     enrich_batch.add_argument("--skip-ai-reason", default="", help=argparse.SUPPRESS)
     enrich_batch.add_argument("--skip-file", action="append", default=[], help=argparse.SUPPRESS)
@@ -228,6 +233,7 @@ def _run_process(args) -> int:
         ai_resources_model=args.ai_resources_model,
         mlx_text_base_url=args.mlx_text_url or default_local_text_base_url(),
         mlx_vision_base_url=args.mlx_vision_url or default_local_vision_base_url(),
+        ollama_cloud_base_url=args.ollama_cloud_url or default_ollama_cloud_base_url(),
         mlx_request_timeout_seconds=args.mlx_timeout,
         skip_ai_enrichment_reason=args.skip_ai_reason,
         render_html=not args.no_render_html,
@@ -334,6 +340,7 @@ def _run_enrich(args) -> int:
         ai_resources_model=args.ai_resources_model,
         mlx_text_base_url=args.mlx_text_url or default_local_text_base_url(),
         mlx_vision_base_url=args.mlx_vision_url or default_local_vision_base_url(),
+        ollama_cloud_base_url=args.ollama_cloud_url or default_ollama_cloud_base_url(),
         mlx_request_timeout_seconds=args.mlx_timeout,
         skip_ai_enrichment_reason=args.skip_ai_reason,
         export_notebook=args.export_notebook,
@@ -377,6 +384,7 @@ def _run_enrich_batch(args) -> int:
         ai_resources_model=args.ai_resources_model,
         mlx_text_base_url=args.mlx_text_url or default_local_text_base_url(),
         mlx_vision_base_url=args.mlx_vision_url or default_local_vision_base_url(),
+        ollama_cloud_base_url=args.ollama_cloud_url or default_ollama_cloud_base_url(),
         mlx_request_timeout_seconds=args.mlx_timeout,
         skip_ai_enrichment_reason=args.skip_ai_reason,
         render_html=not args.no_render_html,

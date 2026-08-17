@@ -108,6 +108,43 @@ class ModelRoutingTests(unittest.TestCase):
         self.assertEqual(response.title, "MLX title")
         self.assertEqual(response.formatted_transcript, "Gemini transcript")
 
+    def test_ollama_cloud_routes_to_mlx_providers_with_cloud_base_url(self):
+        request = AnalyzeLectureRequest(
+            lecture_id="lecture",
+            transcript_text="hello lecture",
+            segments=[{"id": 1, "text": "hello lecture"}],
+            slides=[{"id": 1, "linked_segment_ids": [1]}],
+            duration_minutes=2.0,
+        )
+        config = BatchConfig(
+            input_dir=Path("."),
+            output_dir=Path("."),
+            ai_provider=AIProviderName.GEMINI,
+            ai_overview_provider=AIModelProvider.OLLAMA_CLOUD,
+            ai_transcript_provider=AIModelProvider.OLLAMA_CLOUD,
+            ai_slides_provider=AIModelProvider.OLLAMA_CLOUD,
+            ai_resources_provider=AIModelProvider.OFF,
+            ollama_cloud_base_url="https://ollama.com/v1",
+        )
+        provider = FakeGeminiProvider()
+
+        with mock.patch(
+            "lecture_processor.ai.model_routing.MLXTextProvider",
+            return_value=RecordingTextProvider([], model="llama3.3:70b"),
+        ) as text_provider, mock.patch(
+            "lecture_processor.ai.model_routing.MLXVisionProvider",
+            return_value=RecordingVisionProvider([], model="llama3.3:70b"),
+        ) as vision_provider:
+            response = routed_analyze_lecture(request, config, gemini_provider=provider)
+
+        self.assertTrue(uses_experimental_routing(config))
+        self.assertEqual(response.title, "lecture title")
+        self.assertEqual(response.formatted_transcript, "hello lecture")
+        # Text steps use MLXTextProvider with the cloud base URL
+        self.assertEqual(text_provider.call_args.kwargs["base_url"], "https://ollama.com/v1")
+        # Slides step uses MLXVisionProvider with the cloud base URL
+        self.assertEqual(vision_provider.call_args.kwargs["base_url"], "https://ollama.com/v1")
+
     def test_probe_resolves_defaults_and_marks_missing_role(self):
         config = BatchConfig(
             input_dir=Path("."),

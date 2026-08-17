@@ -18,10 +18,13 @@ from lecture_processor.ai.providers.mlx_openai import (
     _OpenAICompatibleClient,
     _Usage,
     _configured_slide_batch_size,
+    _is_ollama_base_url,
+    _is_ollama_cloud_base_url,
     _lm_studio_native_base_url,
     _lm_studio_openai_base_url,
     _loaded_model_instances_from_payload,
     _model_ids_from_payload,
+    _request_headers,
     _resources_from_gathered_context,
     _slide_batch_max_tokens,
     _slide_batches,
@@ -767,6 +770,57 @@ class MLXOpenAIProviderTests(unittest.TestCase):
 
         self.assertEqual("Bearer secret-token", captured["headers"]["Authorization"])
         self.assertEqual("gemma-live", captured["body"]["model"])
+
+    def test_ollama_cloud_base_url_detection(self):
+        self.assertTrue(_is_ollama_cloud_base_url("https://ollama.com/v1"))
+        self.assertTrue(_is_ollama_cloud_base_url("https://ollama.com/v1/"))
+        self.assertTrue(_is_ollama_cloud_base_url("https://ollama.com"))
+        self.assertFalse(_is_ollama_cloud_base_url("http://localhost:11434/v1"))
+        self.assertFalse(_is_ollama_cloud_base_url("http://192.168.86.22:1234/v1"))
+        self.assertFalse(_is_ollama_cloud_base_url(""))
+
+    def test_local_ollama_base_url_detection(self):
+        self.assertTrue(_is_ollama_base_url("http://localhost:11434/v1"))
+        self.assertTrue(_is_ollama_base_url("http://127.0.0.1:11434"))
+        self.assertFalse(_is_ollama_base_url("https://ollama.com/v1"))
+        self.assertFalse(_is_ollama_base_url("http://192.168.86.22:1234/v1"))
+
+    def test_request_headers_select_ollama_cloud_bearer_token(self):
+        with mock.patch.dict(
+            "os.environ",
+            {"OLLAMA_CLOUD_API_KEY": "cloud-secret", "OLLAMA_API_KEY": "", "LM_STUDIO_API_KEY": "lm-secret"},
+            clear=False,
+        ):
+            headers = _request_headers(base_url="https://ollama.com/v1", content_type="application/json")
+        self.assertEqual("Bearer cloud-secret", headers["Authorization"])
+        self.assertEqual("application/json", headers["Content-Type"])
+
+    def test_request_headers_fall_back_to_ollama_api_key(self):
+        with mock.patch.dict(
+            "os.environ",
+            {"OLLAMA_CLOUD_API_KEY": "", "OLLAMA_API_KEY": "fallback-secret", "LM_STUDIO_API_KEY": "lm-secret"},
+            clear=False,
+        ):
+            headers = _request_headers(base_url="https://ollama.com/v1")
+        self.assertEqual("Bearer fallback-secret", headers["Authorization"])
+
+    def test_request_headers_local_ollama_sends_no_auth(self):
+        with mock.patch.dict(
+            "os.environ",
+            {"OLLAMA_CLOUD_API_KEY": "cloud-secret", "LM_STUDIO_API_KEY": "lm-secret"},
+            clear=False,
+        ):
+            headers = _request_headers(base_url="http://localhost:11434/v1")
+        self.assertNotIn("Authorization", headers)
+
+    def test_request_headers_lm_studio_uses_lm_studio_token(self):
+        with mock.patch.dict(
+            "os.environ",
+            {"OLLAMA_CLOUD_API_KEY": "cloud-secret", "LM_STUDIO_API_KEY": "lm-secret"},
+            clear=False,
+        ):
+            headers = _request_headers(base_url="http://192.168.86.22:1234/v1")
+        self.assertEqual("Bearer lm-secret", headers["Authorization"])
 
     def test_tool_chat_uses_lm_studio_native_api_and_integrations(self):
         captured = {}

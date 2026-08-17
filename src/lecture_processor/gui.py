@@ -38,6 +38,7 @@ class LectureProcessorApp(tk.Tk):
         self.whisper_model = tk.StringVar(value="medium.en")
         self.slide_sensitivity = tk.StringVar(value=SlideSensitivity.MEDIUM.value)
         self.concurrent_files = tk.IntVar(value=4)
+        self.min_duration = tk.DoubleVar(value=30.0)
 
         self._build_ui()
 
@@ -106,11 +107,16 @@ class LectureProcessorApp(tk.Tk):
             row=3, column=1, sticky="w"
         )
 
+        ttk.Label(settings, text="Min file length (s)").grid(row=2, column=2, sticky="w", pady=(10, 2))
+        ttk.Spinbox(settings, from_=0, to=3600, increment=5, textvariable=self.min_duration, width=6).grid(
+            row=3, column=2, sticky="w"
+        )
+
         ttk.Checkbutton(
             settings,
             text="Save normalized video",
             variable=self.save_normalized,
-        ).grid(row=3, column=2, sticky="w")
+        ).grid(row=3, column=3, sticky="w")
 
         action_row = ttk.Frame(self, padding=(18, 0, 18, 10))
         action_row.grid(row=3, column=0, sticky="ew")
@@ -186,6 +192,7 @@ class LectureProcessorApp(tk.Tk):
             recording_speed=RecordingSpeed(self.recording_speed.get()),
             confirm_normalization=False,
             concurrent_files=int(self.concurrent_files.get()),
+            min_duration_seconds=float(self.min_duration.get()),
             save_normalized_video=bool(self.save_normalized.get()),
             audio_quality=AudioQuality(self.audio_quality.get()),
             slide_sensitivity=SlideSensitivity(self.slide_sensitivity.get()),

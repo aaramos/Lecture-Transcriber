@@ -6,7 +6,13 @@ import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
-from lecture_processor.cli import EVENT_PREFIX, _build_event_printer, _prepend_tool_parent_to_path, main
+from lecture_processor.cli import (
+    EVENT_PREFIX,
+    _build_event_printer,
+    _prepend_tool_parent_to_path,
+    build_parser,
+    main,
+)
 
 
 class CliTests(unittest.TestCase):
@@ -77,6 +83,19 @@ class CliTests(unittest.TestCase):
         payload = json.loads(line.removeprefix(EVENT_PREFIX))
         self.assertEqual(payload["kind"], "batch_started")
         self.assertEqual(payload["attempted"], 2)
+
+    def test_ollama_cloud_url_flag_parses_for_all_subcommands(self):
+        parser = build_parser()
+        for subcommand in ("process", "enrich", "enrich-batch"):
+            args = parser.parse_args(
+                [subcommand, "/tmp/input", "--ollama-cloud-url", "https://ollama.com/v1/custom"]
+            )
+            self.assertEqual(args.ollama_cloud_url, "https://ollama.com/v1/custom")
+
+    def test_ollama_cloud_url_flag_defaults_to_empty(self):
+        parser = build_parser()
+        args = parser.parse_args(["process", "/tmp/input"])
+        self.assertEqual(args.ollama_cloud_url, "")
 
     def test_prepend_tool_parent_to_path_supports_internal_ffmpeg_users(self):
         with tempfile.TemporaryDirectory() as tmp:

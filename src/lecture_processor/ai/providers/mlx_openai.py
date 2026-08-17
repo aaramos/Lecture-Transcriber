@@ -1936,6 +1936,11 @@ def _is_ollama_base_url(base_url: str) -> bool:
     )
 
 
+def _is_ollama_cloud_base_url(base_url: str) -> bool:
+    normalized = str(base_url or "").lower().rstrip("/")
+    return "ollama.com/v1" in normalized or "ollama.com" in normalized
+
+
 def _model_ids_from_payload(payload: Dict) -> List[str]:
     data = payload.get("data") if isinstance(payload, dict) else []
     if not isinstance(data, list):
@@ -2036,7 +2041,12 @@ def _model_list_url(base_url: str) -> str:
 
 
 def _request_headers(*, base_url: str = "", content_type: Optional[str] = None) -> Dict[str, str]:
-    token = "" if _is_ollama_base_url(base_url) else _lm_studio_api_token()
+    if _is_ollama_cloud_base_url(base_url):
+        token = _ollama_cloud_api_token()
+    elif _is_ollama_base_url(base_url):
+        token = ""
+    else:
+        token = _lm_studio_api_token()
     headers: Dict[str, str] = {}
     if token:
         headers["Authorization"] = f"Bearer {token}"
@@ -2047,6 +2057,10 @@ def _request_headers(*, base_url: str = "", content_type: Optional[str] = None) 
 
 def _lm_studio_api_token() -> str:
     return str(os.environ.get("LM_STUDIO_API_KEY") or os.environ.get("LM_API_TOKEN") or "").strip()
+
+
+def _ollama_cloud_api_token() -> str:
+    return str(os.environ.get("OLLAMA_CLOUD_API_KEY") or os.environ.get("OLLAMA_API_KEY") or "").strip()
 
 
 def _is_reasoning_setting_error(detail: str) -> bool:
@@ -2071,6 +2085,8 @@ def _uses_openai_only_api(base_url: str) -> bool:
         parsed = urllib.parse.urlparse(_normalize_base_url(base_url))
     except Exception:
         return False
+    if _is_ollama_cloud_base_url(base_url):
+        return True
     return parsed.hostname == "192.168.86.22"
 
 

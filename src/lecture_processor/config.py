@@ -9,6 +9,14 @@ from .errors import LectureProcessorError
 from .profiles import DEFAULT_PROFILE_ID, normalize_profile_id
 
 DEFAULT_LM_STUDIO_BASE_URL = "http://192.168.86.22:1234/v1"
+DEFAULT_OLLAMA_CLOUD_BASE_URL = "https://ollama.com/v1"
+
+
+def default_ollama_cloud_base_url() -> str:
+    return (
+        os.environ.get("OLLAMA_CLOUD_BASE_URL")
+        or DEFAULT_OLLAMA_CLOUD_BASE_URL
+    )
 
 
 def default_local_text_base_url() -> str:
@@ -89,6 +97,7 @@ class AIModelProvider(str, Enum):
     GEMINI = "gemini"
     MLX_TEXT = "mlx-text"
     MLX_VISION = "mlx-vision"
+    OLLAMA_CLOUD = "ollama-cloud"
     LOCAL_STUB = "local-stub"
     OFF = "off"
 
@@ -100,7 +109,7 @@ class BatchConfig:
     recording_speed: RecordingSpeed = RecordingSpeed.NORMAL
     confirm_normalization: bool = False
     concurrent_files: int = 4
-    min_duration_seconds: float = 60.0
+    min_duration_seconds: float = 30.0
     save_normalized_video: bool = True
     audio_quality: AudioQuality = AudioQuality.HIGH
     audio_enhancement: AudioEnhancementMode = AudioEnhancementMode.NONE
@@ -129,6 +138,7 @@ class BatchConfig:
     ai_resources_model: str = ""
     mlx_text_base_url: str = field(default_factory=default_local_text_base_url)
     mlx_vision_base_url: str = field(default_factory=default_local_vision_base_url)
+    ollama_cloud_base_url: str = field(default_factory=default_ollama_cloud_base_url)
     mlx_request_timeout_seconds: int = 120
     mlx_disable_thinking: bool = False
     skip_ai_enrichment_reason: str = ""
@@ -171,7 +181,7 @@ class BatchConfig:
         self._validate_mlx_urls()
 
     def _validate_mlx_urls(self) -> None:
-        for url_field in ("mlx_text_base_url", "mlx_vision_base_url"):
+        for url_field in ("mlx_text_base_url", "mlx_vision_base_url", "ollama_cloud_base_url"):
             url = getattr(self, url_field)
             if url and not self._is_valid_url(url):
                 raise LectureProcessorError(f"Invalid URL for {url_field}: {url}")
@@ -196,6 +206,8 @@ class BatchConfig:
             return self.ai_model or "gemini-2.5-flash"
         if provider in (AIModelProvider.MLX_TEXT, AIModelProvider.MLX_VISION):
             return "default"
+        if provider is AIModelProvider.OLLAMA_CLOUD:
+            return "llama3.3:70b"
         if provider is AIModelProvider.LOCAL_STUB:
             return "local-stub-v0"
         return "off"
@@ -220,6 +232,13 @@ class BatchConfig:
     def ai_uses_mlx(self) -> bool:
         return any(
             self.ai_step_provider(step) in (AIModelProvider.MLX_TEXT, AIModelProvider.MLX_VISION)
+            for step in ("overview", "transcript", "slides", "resources")
+        )
+
+    @property
+    def ai_uses_ollama_cloud(self) -> bool:
+        return any(
+            self.ai_step_provider(step) is AIModelProvider.OLLAMA_CLOUD
             for step in ("overview", "transcript", "slides", "resources")
         )
 

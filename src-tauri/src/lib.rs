@@ -123,10 +123,13 @@ struct ProcessRequest {
     mlx_text_url: String,
     #[serde(default = "default_mlx_vision_url")]
     mlx_vision_url: String,
+    #[serde(default = "default_ollama_cloud_url")]
+    ollama_cloud_url: String,
     #[serde(default = "default_mlx_timeout")]
     mlx_timeout: u16,
     #[serde(default)]
     skip_ai_reason: String,
+    #[serde(default = "default_min_duration")]
     min_duration: f64,
     skipped_files: Vec<String>,
 }
@@ -203,6 +206,12 @@ struct LmStudioModelsResponse {
     models: Vec<String>,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OllamaCloudModelsResponse {
+    models: Vec<String>,
+}
+
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct DependencyEvent {
@@ -257,12 +266,20 @@ fn default_mlx_vision_url() -> String {
     "http://192.168.86.101:1234/v1".to_string()
 }
 
+fn default_ollama_cloud_url() -> String {
+    "https://ollama.com/v1".to_string()
+}
+
 fn default_mlx_timeout() -> u16 {
     120
 }
 
 fn default_audio_enhancement() -> String {
     "none".to_string()
+}
+
+fn default_min_duration() -> f64 {
+    30.0
 }
 
 #[tauri::command]
@@ -764,6 +781,53 @@ fn lm_studio_models(base_urls: Vec<String>) -> Result<LmStudioModelsResponse, St
 }
 
 #[tauri::command]
+fn ollama_cloud_models(base_url: String) -> Result<OllamaCloudModelsResponse, String> {
+    let api_token = read_ollama_cloud_api_token()?;
+    let Some(token) = api_token else {
+        return Err("No Ollama Cloud API key saved. Save one in Settings first.".to_string());
+    };
+    let models = fetch_ollama_cloud_models(&base_url, &token)?;
+    Ok(OllamaCloudModelsResponse { models })
+}
+
+fn fetch_ollama_cloud_models(base_url: &str, api_token: &str) -> Result<Vec<String>, String> {
+    let base = base_url.trim().trim_end_matches('/');
+    let models_url = if base.ends_with("/v1") {
+        format!("{base}/models")
+    } else {
+        format!("{base}/v1/models")
+    };
+    let output = Command::new("curl")
+        .args([
+            "-sS",
+            "--max-time",
+            "15",
+            "-H",
+            &format!("Authorization: Bearer {api_token}"),
+            &models_url,
+        ])
+        .output()
+        .map_err(|error| format!("Could not run curl to fetch Ollama Cloud models: {error}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if stderr.is_empty() {
+            "Ollama Cloud model fetch failed.".to_string()
+        } else {
+            stderr
+        });
+    }
+    let payload: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .map_err(|error| format!("Ollama Cloud returned invalid JSON: {error}"))?;
+    let mut models = openai_model_ids(&payload);
+    models.sort();
+    models.dedup();
+    if models.is_empty() {
+        return Err("Ollama Cloud returned no models.".to_string());
+    }
+    Ok(models)
+}
+
+#[tauri::command]
 fn cancel_batch(state: tauri::State<'_, AppState>) -> Result<CancelResponse, String> {
     let process_to_cancel = mark_active_process_cancelled(&state.active_process);
 
@@ -995,6 +1059,19 @@ fn terminate_active_process_for_shutdown(active_process: &Arc<Mutex<Option<Activ
     }
 }
 
+fn validate_route_provider(provider: &str) -> Result<(), String> {
+    if !matches!(
+        provider,
+        "mlx-text" | "mlx-vision" | "ollama-cloud" | "local-stub" | "off"
+    ) {
+        return Err(
+            "Model route providers must be Local AI, Ollama Cloud, Local Stub, or Off."
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
 fn run_process_batch(
     app: tauri::AppHandle,
     active_process: Arc<Mutex<Option<ActiveProcess>>>,
@@ -1013,12 +1090,7 @@ fn run_process_batch(
         &request.ai_slides_provider,
         &request.ai_resources_provider,
     ] {
-        if !matches!(
-            provider.as_str(),
-            "mlx-text" | "mlx-vision" | "local-stub" | "off"
-        ) {
-            return Err("Model route providers must be Local AI, Local Stub, or Off.".to_string());
-        }
+        validate_route_provider(provider)?;
     }
     if request.mlx_timeout < 10 || request.mlx_timeout > 600 {
         return Err("MLX timeout must be between 10 and 600 seconds.".to_string());
@@ -1033,6 +1105,7 @@ fn run_process_batch(
         return Err("Choose an output folder before starting.".to_string());
     }
     let lm_studio_api_token = read_lm_studio_api_token()?;
+    let ollama_cloud_api_token = read_ollama_cloud_api_token()?;
     if active_process
         .lock()
         .unwrap_or_else(|error| error.into_inner())
@@ -1080,6 +1153,8 @@ fn run_process_batch(
             request.mlx_text_url.clone(),
             "--mlx-vision-url".to_string(),
             request.mlx_vision_url.clone(),
+            "--ollama-cloud-url".to_string(),
+            request.ollama_cloud_url.clone(),
             "--mlx-timeout".to_string(),
             request.mlx_timeout.to_string(),
             "--skip-ai-reason".to_string(),
@@ -1138,6 +1213,8 @@ fn run_process_batch(
             request.mlx_text_url.clone(),
             "--mlx-vision-url".to_string(),
             request.mlx_vision_url.clone(),
+            "--ollama-cloud-url".to_string(),
+            request.ollama_cloud_url.clone(),
             "--mlx-timeout".to_string(),
             request.mlx_timeout.to_string(),
             "--skip-ai-reason".to_string(),
@@ -1210,6 +1287,10 @@ fn run_process_batch(
     if let Some(token) = lm_studio_api_token {
         command.env("LM_STUDIO_API_KEY", &token);
         command.env("LM_API_TOKEN", token);
+    }
+    if let Some(token) = ollama_cloud_api_token {
+        command.env("OLLAMA_CLOUD_API_KEY", &token);
+        command.env("OLLAMA_API_KEY", token);
     }
 
     #[cfg(unix)]
@@ -1422,6 +1503,9 @@ fn platform_open_command(path: &str) -> Command {
 fn keychain_account(provider: &str) -> Result<String, String> {
     match provider {
         "lm-studio" | "lmstudio" | "lm_studio" => Ok("lm_studio_api_token".to_string()),
+        "ollama-cloud" | "ollama_cloud" | "ollamacloud" => {
+            Ok("ollama_cloud_api_token".to_string())
+        }
         _ => Err(format!("Unsupported API key provider: {provider}")),
     }
 }
@@ -1433,6 +1517,17 @@ fn read_lm_studio_api_token() -> Result<Option<String>, String> {
     Ok(env::var("LM_STUDIO_API_KEY")
         .ok()
         .or_else(|| env::var("LM_API_TOKEN").ok())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty()))
+}
+
+fn read_ollama_cloud_api_token() -> Result<Option<String>, String> {
+    if let Some(token) = read_api_key("ollama-cloud")? {
+        return Ok(Some(token));
+    }
+    Ok(env::var("OLLAMA_CLOUD_API_KEY")
+        .ok()
+        .or_else(|| env::var("OLLAMA_API_KEY").ok())
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty()))
 }
@@ -2268,6 +2363,7 @@ pub fn run() {
             setup_dependencies,
             process_batch,
             lm_studio_models,
+            ollama_cloud_models,
             cancel_batch,
             update_file_control
         ])
@@ -2287,8 +2383,8 @@ pub fn run() {
 mod tests {
     use super::{
         parse_accumulated_gpu_times, parse_http_url, parse_top_cpu_percent, parse_vm_page_size,
-        parse_vm_pages, processed_lecture_can_be_enriched, resolve_server_addresses, source_kind,
-        trim_output_tail, OUTPUT_TRUNCATION_NOTICE,
+        parse_vm_pages, processed_lecture_can_be_enriched, resolve_server_addresses,
+        source_kind, trim_output_tail, validate_route_provider, OUTPUT_TRUNCATION_NOTICE,
     };
     use serde_json::json;
     use std::path::Path;
@@ -2388,5 +2484,26 @@ CPU usage: 71.30% user, 24.79% sys, 3.89% idle
         assert!(output.starts_with(OUTPUT_TRUNCATION_NOTICE));
         assert!(output.contains("line 39"));
         assert!(!output.contains("line 00"));
+    }
+
+    #[test]
+    fn route_provider_accepts_ollama_cloud() {
+        assert!(validate_route_provider("ollama-cloud").is_ok());
+    }
+
+    #[test]
+    fn route_provider_accepts_known_providers() {
+        for provider in ["mlx-text", "mlx-vision", "local-stub", "off"] {
+            assert!(
+                validate_route_provider(provider).is_ok(),
+                "{provider} should be accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn route_provider_rejects_unknown() {
+        assert!(validate_route_provider("openai").is_err());
+        assert!(validate_route_provider("").is_err());
     }
 }

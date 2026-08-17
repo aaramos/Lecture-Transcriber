@@ -255,12 +255,33 @@
                 <input id="aiSlidesProvider" type="hidden" value="mlx-vision" />
                 <input id="aiResourcesProvider" type="hidden" value="mlx-text" />
                 <label>
+                  Text Provider
+                  <select id="aiOverviewProviderSelect">
+                    <option value="mlx-text">Local AI (MLX)</option>
+                    <option value="ollama-cloud">Ollama Cloud</option>
+                  </select>
+                </label>
+                <label>
                   Text Model
                   <select id="aiOverviewModel"></select>
                 </label>
                 <label>
+                  Vision Provider
+                  <select id="aiSlidesProviderSelect">
+                    <option value="mlx-vision">Local AI (MLX)</option>
+                    <option value="ollama-cloud">Ollama Cloud</option>
+                  </select>
+                </label>
+                <label>
                   Vision Model
                   <select id="aiSlidesModel"></select>
+                </label>
+                <label>
+                  Resource Provider
+                  <select id="aiResourcesProviderSelect">
+                    <option value="mlx-text">Local AI (MLX)</option>
+                    <option value="ollama-cloud">Ollama Cloud</option>
+                  </select>
                 </label>
                 <label>
                   Resource Model
@@ -290,10 +311,45 @@
               </div>
             </div>
 
+            <div class="wide-field model-routing">
+              <div class="model-routing-head">
+                <div>
+                  <span>Ollama Cloud</span>
+                  <small id="ollamaCloudModelStatus">Models not checked</small>
+                </div>
+                <button id="refreshOllamaCloudModelsButton" class="secondary-button" type="button">Refresh Cloud Models</button>
+              </div>
+              <div class="model-route-grid">
+                <label class="wide-field">
+                  Cloud URL
+                  <input id="ollamaCloudUrl" type="text" autocomplete="off" value="https://ollama.com/v1" />
+                </label>
+                <label>
+                  Cloud Model
+                  <select id="ollamaCloudModel"></select>
+                </label>
+              </div>
+            </div>
+
+            <div class="key-row">
+              <label>
+                Ollama Cloud API Key
+                <input id="ollamaCloudToken" type="password" autocomplete="off" placeholder="Saved in macOS Keychain" />
+              </label>
+              <button id="saveOllamaCloudTokenButton" class="secondary-button" type="button">Save Key</button>
+              <span id="ollamaCloudTokenStatus">No key saved</span>
+            </div>
+
             <label>
               Concurrent Files
               <input id="concurrentFiles" type="number" min="1" max="3" value="2" />
               <span class="field-help">Use 2 by default. Use 3 only on stronger Macs.</span>
+            </label>
+
+            <label>
+              Min File Length (Seconds)
+              <input id="minDuration" type="number" min="0" max="3600" step="5" value="30" />
+              <span class="field-help">Files shorter than this are skipped. Default 30s.</span>
             </label>
 
           </div>

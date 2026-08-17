@@ -44,7 +44,11 @@ AI_ROLE_BY_STEP = {
     for role, steps in AI_PHASES
     for step in steps
 }
-MLX_PROVIDERS = (AIModelProvider.MLX_TEXT, AIModelProvider.MLX_VISION)
+MLX_PROVIDERS = (
+    AIModelProvider.MLX_TEXT,
+    AIModelProvider.MLX_VISION,
+    AIModelProvider.OLLAMA_CLOUD,
+)
 AI_ROLE_MODEL_CONFIG = {
     role: {"max_tokens": max_tokens}
     for role, max_tokens in DEFAULT_ROLE_MAX_TOKENS.items()
@@ -564,9 +568,11 @@ def _mlx_provider(
         },
         "disable_thinking": config.mlx_disable_thinking,
     }
-    if provider is AIModelProvider.MLX_VISION:
-        return MLXVisionProvider(base_url=config.mlx_text_base_url, **kwargs)
-    return MLXTextProvider(base_url=config.mlx_text_base_url, **kwargs)
+    if provider is AIModelProvider.MLX_VISION or (
+        provider is AIModelProvider.OLLAMA_CLOUD and step == "slides"
+    ):
+        return MLXVisionProvider(base_url=_base_url_for_provider(provider, config), **kwargs)
+    return MLXTextProvider(base_url=_base_url_for_provider(provider, config), **kwargs)
 
 
 def _disabled_payload_for_step(step: str, request: AnalyzeLectureRequest, reason: str) -> Dict:
@@ -679,8 +685,10 @@ def _step_outcome_entry(step: str, payload: Dict) -> Dict[str, str]:
 
 
 def _base_url_for_provider(provider: AIModelProvider, config: BatchConfig) -> str:
+    if provider is AIModelProvider.OLLAMA_CLOUD:
+        return config.ollama_cloud_base_url
     if provider is AIModelProvider.MLX_VISION:
-        return config.mlx_text_base_url
+        return config.mlx_vision_base_url
     return config.mlx_text_base_url
 
 

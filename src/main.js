@@ -102,6 +102,7 @@ const LOCAL_MODELS_STORAGE_KEY = "lectureProcessor.lmStudioModels.v2";
 const MODEL_SELECTION_VERSION = 1;
 const UI_SETTINGS_VERSION = 1;
 const LM_STUDIO_OPENAI_URL = "http://192.168.86.22:1234/v1";
+const OLLAMA_CLOUD_DEFAULT_URL = "https://ollama.com/v1";
 const LEGACY_GEMINI_RESOURCES_MODEL_VALUE = "__gemini_resources__";
 const LEGACY_GEMINI_RESOURCE_PREFIX = "gemini:";
 const LEGACY_LOCAL_MODEL_IDS = new Set(["gemma4:26b", "llama3", "qwen3", "gemma3"]);
@@ -129,9 +130,12 @@ const DEFAULT_SETTINGS = Object.freeze({
   aiResourcesModel: "",
   mlxTextUrl: LM_STUDIO_OPENAI_URL,
   mlxVisionUrl: LM_STUDIO_OPENAI_URL,
+  ollamaCloudUrl: OLLAMA_CLOUD_DEFAULT_URL,
+  ollamaCloudModel: "",
   mlxTimeout: 120,
   aiEnhance: false,
   concurrentFiles: 2,
+  minDuration: 30,
   saveNormalized: true,
 });
 const PROFILE_ORDER = ["quality", "fast", "turbo", "parakeet"];
@@ -175,6 +179,10 @@ const state = {
   tokenUsageBySource: new Map(),
   stepTokenUsageBySource: new Map(),
   lmStudioTokenSaved: false,
+  ollamaCloudTokenSaved: false,
+  cloudModels: [],
+  cloudModelsLoading: false,
+  cloudModelsLoadedFromCache: false,
   aiEnhancePreference: DEFAULT_SETTINGS.aiEnhance,
   dependencyReady: false,
   dependencySetupRunning: false,
@@ -266,10 +274,21 @@ const elements = {
   mlxTextUrl: document.querySelector("#mlxTextUrl"),
   mlxVisionUrl: document.querySelector("#mlxVisionUrl"),
   mlxTimeout: document.querySelector("#mlxTimeout"),
+  ollamaCloudUrl: document.querySelector("#ollamaCloudUrl"),
+  ollamaCloudModel: document.querySelector("#ollamaCloudModel"),
+  ollamaCloudModelStatus: document.querySelector("#ollamaCloudModelStatus"),
+  refreshOllamaCloudModelsButton: document.querySelector("#refreshOllamaCloudModelsButton"),
+  ollamaCloudToken: document.querySelector("#ollamaCloudToken"),
+  saveOllamaCloudTokenButton: document.querySelector("#saveOllamaCloudTokenButton"),
+  ollamaCloudTokenStatus: document.querySelector("#ollamaCloudTokenStatus"),
+  aiOverviewProviderSelect: document.querySelector("#aiOverviewProviderSelect"),
+  aiSlidesProviderSelect: document.querySelector("#aiSlidesProviderSelect"),
+  aiResourcesProviderSelect: document.querySelector("#aiResourcesProviderSelect"),
   lmStudioToken: document.querySelector("#lmStudioToken"),
   saveLmStudioTokenButton: document.querySelector("#saveLmStudioTokenButton"),
   lmStudioTokenStatus: document.querySelector("#lmStudioTokenStatus"),
   concurrentFiles: document.querySelector("#concurrentFiles"),
+  minDuration: document.querySelector("#minDuration"),
   refreshLocalModelsButton: document.querySelector("#refreshLocalModelsButton"),
   localModelStatus: document.querySelector("#localModelStatus"),
   restoreDefaultsButton: document.querySelector("#restoreDefaultsButton"),
@@ -280,9 +299,11 @@ window.__TAURI__?.event?.listen?.("processor-event", (event) => handleProcessorE
 window.__TAURI__?.event?.listen?.("dependency-event", (event) => handleDependencyEvent(event.payload));
 loadPersistedSettings();
 loadLocalModelChoicesAtLaunch();
+loadCloudModelChoicesAtLaunch();
 refreshDependencyStatus();
 refreshTranscriptionProfileStatus();
 refreshLmStudioTokenStatus();
+refreshOllamaCloudTokenStatus();
 cleanupTempFilesAtLaunch();
 setupDragAndDrop();
 startSystemMetrics();
@@ -321,8 +342,23 @@ elements.cancelRunButton.addEventListener("click", cancelBatch);
 elements.openOutputButton.addEventListener("click", openOutput);
 elements.settingsButton.addEventListener("click", () => showDialog(elements.settingsDialog));
 elements.refreshLocalModelsButton.addEventListener("click", () => refreshLocalModels({ force: true }));
+elements.refreshOllamaCloudModelsButton.addEventListener("click", () => refreshCloudModels({ force: true }));
 elements.restoreDefaultsButton.addEventListener("click", restoreDefaultSettings);
 elements.saveLmStudioTokenButton.addEventListener("click", () => saveLmStudioToken());
+elements.saveOllamaCloudTokenButton.addEventListener("click", () => saveOllamaCloudToken());
+[
+  elements.aiOverviewProviderSelect,
+  elements.aiSlidesProviderSelect,
+  elements.aiResourcesProviderSelect,
+].filter(Boolean).forEach((select) => {
+  select.addEventListener("change", () => {
+    syncAiRouteProvidersFromModelChoices();
+    renderLocalModelOptions();
+    saveCurrentSettings();
+    renderAiControls();
+    render();
+  });
+});
 elements.activeVideos.addEventListener("click", (event) => {
   const button = event.target.closest("[data-video-action]");
   if (!button) return;
@@ -336,6 +372,10 @@ elements.concurrentFiles.addEventListener("input", () => {
   saveCurrentSettings();
 });
 elements.mlxTimeout.addEventListener("input", () => {
+  validateSettings({ showDialogOnError: false });
+  saveCurrentSettings();
+});
+elements.minDuration.addEventListener("input", () => {
   validateSettings({ showDialogOnError: false });
   saveCurrentSettings();
 });
@@ -373,6 +413,29 @@ elements.mlxTimeout.addEventListener("input", () => {
     markLocalModelsStale();
   });
 });
+
+[
+  elements.ollamaCloudUrl,
+].filter(Boolean).forEach((element) => {
+  element.addEventListener("input", () => {
+    saveCurrentSettings();
+    markCloudModelsStale();
+  });
+});
+
+if (elements.ollamaCloudModel) {
+  elements.ollamaCloudModel.addEventListener("change", () => {
+    const cloudModel = String(elements.ollamaCloudModel.value || "").trim();
+    aiRouteControls().forEach((route) => {
+      if (isOllamaCloudProvider(route.providerInput.value)) {
+        route.modelInput.value = cloudModel;
+      }
+    });
+    saveCurrentSettings();
+    renderAiControls();
+    render();
+  });
+}
 
 elements.speedSegments.forEach((button) => {
   button.addEventListener("click", () => {
@@ -523,9 +586,10 @@ async function startBatch() {
     aiResourcesModel: routeModelValue("resources"),
     mlxTextUrl: sharedLmStudioUrl,
     mlxVisionUrl: sharedLmStudioUrl,
+    ollamaCloudUrl: normalizeOllamaCloudUrl(elements.ollamaCloudUrl.value),
     mlxTimeout: validMlxTimeout(elements.mlxTimeout.value),
     skipAiReason,
-    minDuration: 60,
+    minDuration: validMinDuration(elements.minDuration.value),
     skippedFiles: manualSkippedFiles(),
   };
   rememberOutputDir(request.outputDir);
@@ -2245,22 +2309,32 @@ function aiRouteControls() {
   ];
 }
 
+function isLocalOpenAiProvider(provider) {
+  return provider === "mlx-text" || provider === "mlx-vision";
+}
+
+function isOllamaCloudProvider(provider) {
+  return provider === "ollama-cloud";
+}
+
 function selectedLocalRoutes() {
   syncAiRouteProvidersFromModelChoices();
   if (!needsAiEnhancement()) return [];
   return aiRouteControls().filter((route) => isLocalOpenAiProvider(route.providerInput.value));
 }
 
-function isLocalOpenAiProvider(provider) {
-  return provider === "mlx-text" || provider === "mlx-vision";
+function selectedCloudRoutes() {
+  syncAiRouteProvidersFromModelChoices();
+  if (!needsAiEnhancement()) return [];
+  return aiRouteControls().filter((route) => isOllamaCloudProvider(route.providerInput.value));
 }
 
 function syncAiRouteProvidersFromModelChoices() {
-  elements.aiOverviewProvider.value = "mlx-text";
-  elements.aiTranscriptProvider.value = "mlx-text";
+  elements.aiOverviewProvider.value = elements.aiOverviewProviderSelect?.value || "mlx-text";
+  elements.aiTranscriptProvider.value = elements.aiOverviewProviderSelect?.value || "mlx-text";
   elements.aiTranscriptModel.value = routeModelValue("overview");
-  elements.aiSlidesProvider.value = "mlx-vision";
-  elements.aiResourcesProvider.value = "mlx-text";
+  elements.aiSlidesProvider.value = elements.aiSlidesProviderSelect?.value || "mlx-vision";
+  elements.aiResourcesProvider.value = elements.aiResourcesProviderSelect?.value || "mlx-text";
   elements.aiModel.value = "";
 }
 
@@ -2407,7 +2481,23 @@ function renderLocalModelOptions() {
   renderModelSelect(elements.aiResourcesModel, storedRouteModelValue("resources"), {
     models: modelsForRoute("resources"),
   });
+  renderCloudModelSelect();
   syncAiRouteProvidersFromModelChoices();
+}
+
+function renderCloudModelSelect() {
+  if (!elements.ollamaCloudModel) return;
+  const selected = String(elements.ollamaCloudModel.value || "").trim();
+  const models = uniqueStrings(state.cloudModels).sort((left, right) => left.localeCompare(right));
+  elements.ollamaCloudModel.innerHTML = "";
+  elements.ollamaCloudModel.appendChild(new Option("Choose Ollama Cloud model", ""));
+  models.forEach((model) => {
+    elements.ollamaCloudModel.appendChild(new Option(model, model));
+  });
+  if (selected && !models.includes(selected)) {
+    elements.ollamaCloudModel.appendChild(new Option(`${selected} (unavailable)`, selected));
+  }
+  elements.ollamaCloudModel.value = selected;
 }
 
 function renderModelSelect(select, selectedValue, options = {}) {
@@ -2492,6 +2582,10 @@ function setLocalModelStatus(message) {
 }
 
 function modelsForRoute(step) {
+  const route = aiRouteControls().find((candidate) => candidate.step === step);
+  if (route && isOllamaCloudProvider(route.providerInput.value)) {
+    return state.cloudModels;
+  }
   return modelsForBaseUrl(sharedLmStudioBaseUrl());
 }
 
@@ -2510,6 +2604,132 @@ function serverModelStatus(baseUrl) {
   const models = modelsForBaseUrl(baseUrl);
   if (state.localModelErrorsByBaseUrl[normalizeOpenAiBaseUrl(baseUrl)]) return "unavailable";
   return `${models.length} model${models.length === 1 ? "" : "s"}`;
+}
+
+function normalizeOllamaCloudUrl(value) {
+  const raw = String(value || OLLAMA_CLOUD_DEFAULT_URL).trim() || OLLAMA_CLOUD_DEFAULT_URL;
+  try {
+    const url = new URL(raw);
+    const path = url.pathname.replace(/\/+$/, "");
+    url.pathname = path && path !== "/" ? path : "/v1";
+    url.search = "";
+    url.hash = "";
+    return url.toString().replace(/\/+$/, "");
+  } catch {
+    return raw.replace(/\/+$/, "");
+  }
+}
+
+function cloudModelBaseUrl() {
+  return normalizeOllamaCloudUrl(elements.ollamaCloudUrl.value);
+}
+
+function setCloudModelStatus(message) {
+  if (elements.ollamaCloudModelStatus) {
+    elements.ollamaCloudModelStatus.textContent = message;
+  }
+}
+
+function markCloudModelsStale() {
+  state.cloudModels = [];
+  state.cloudModelsLoadedFromCache = false;
+  renderCloudModelSelect();
+  setCloudModelStatus("Models not checked");
+}
+
+async function refreshCloudModels(options = {}) {
+  const { quiet = false, force = false } = options;
+  if (state.cloudModelsLoading) return state.cloudModels;
+  if (!force && state.cloudModelsLoadedFromCache) return state.cloudModels;
+  if (elements.ollamaCloudToken.value.trim()) {
+    const saved = await saveOllamaCloudToken({ quiet: true });
+    if (!saved) return state.cloudModels;
+  }
+  await refreshOllamaCloudTokenStatus();
+  if (!state.ollamaCloudTokenSaved) {
+    if (!quiet) {
+      setCloudModelStatus("No API key saved");
+    }
+    return state.cloudModels;
+  }
+
+  state.cloudModelsLoading = true;
+  renderAiControls();
+  setCloudModelStatus("Checking models...");
+
+  try {
+    const models = uniqueStrings(await fetchCloudModels(cloudModelBaseUrl())).sort((left, right) => left.localeCompare(right));
+    state.cloudModels = models;
+    state.cloudModelsLoadedFromCache = false;
+    cacheCloudModels();
+    renderCloudModelSelect();
+    setCloudModelStatus(cloudModelStatusSummary());
+    if (!models.length && !quiet) {
+      elements.runMeta.textContent = "Ollama Cloud returned no models.";
+    }
+    return state.cloudModels;
+  } catch (error) {
+    state.cloudModels = [];
+    state.cloudModelsLoadedFromCache = false;
+    renderCloudModelSelect();
+    setCloudModelStatus("Ollama Cloud unavailable");
+    if (!quiet) {
+      elements.runMeta.textContent = String(error || "Could not reach Ollama Cloud.");
+    }
+    return [];
+  } finally {
+    state.cloudModelsLoading = false;
+    renderAiControls();
+  }
+}
+
+async function fetchCloudModels(baseUrl) {
+  const result = await invoke("ollama_cloud_models", { baseUrl });
+  return uniqueStrings(result?.models || []);
+}
+
+function loadCloudModelChoicesAtLaunch() {
+  if (loadCachedCloudModels()) {
+    renderCloudModelSelect();
+    setCloudModelStatus(cloudModelStatusSummary({ cached: true }));
+    saveCurrentSettings();
+    return;
+  }
+  refreshCloudModels({ quiet: true, force: true }).then(() => saveCurrentSettings());
+}
+
+function loadCachedCloudModels() {
+  try {
+    const cached = JSON.parse(window.localStorage.getItem("lectureProcessor.ollamaCloudModels.v1") || "{}");
+    if (cached.baseUrl !== cloudModelBaseUrl()) return false;
+    if (!Array.isArray(cached.models)) return false;
+    state.cloudModels = uniqueStrings(cached.models);
+    state.cloudModelsLoadedFromCache = true;
+    return state.cloudModels.length > 0;
+  } catch {
+    return false;
+  }
+}
+
+function cacheCloudModels() {
+  try {
+    window.localStorage.setItem(
+      "lectureProcessor.ollamaCloudModels.v1",
+      JSON.stringify({
+        baseUrl: cloudModelBaseUrl(),
+        models: state.cloudModels,
+        updatedAt: new Date().toISOString(),
+      })
+    );
+  } catch {
+    // Model cache only improves startup; live refresh still works without it.
+  }
+}
+
+function cloudModelStatusSummary(options = {}) {
+  const { cached = false } = options;
+  const prefix = cached ? "Cached: " : "";
+  return `${prefix}${state.cloudModels.length} model${state.cloudModels.length === 1 ? "" : "s"}`;
 }
 
 function sharedLmStudioBaseUrl() {
@@ -2589,11 +2809,18 @@ function applySettings(settings) {
   elements.mlxTextUrl.value = settings.mlxTextUrl || DEFAULT_SETTINGS.mlxTextUrl;
   mirrorSharedLmStudioUrl();
   elements.mlxTimeout.value = String(validMlxTimeout(settings.mlxTimeout));
+  elements.ollamaCloudUrl.value = settings.ollamaCloudUrl || DEFAULT_SETTINGS.ollamaCloudUrl;
+  if (elements.ollamaCloudModel) {
+    elements.ollamaCloudModel.value = String(settings.ollamaCloudModel || "").trim();
+  }
   const resourceChoice = resourceModelChoiceFromSettings(settings);
-  elements.aiOverviewProvider.value = "mlx-text";
-  elements.aiTranscriptProvider.value = "mlx-text";
-  elements.aiSlidesProvider.value = "mlx-vision";
-  elements.aiResourcesProvider.value = "mlx-text";
+  setSelectValue(elements.aiOverviewProviderSelect, settings.aiOverviewProvider, DEFAULT_SETTINGS.aiOverviewProvider);
+  setSelectValue(elements.aiSlidesProviderSelect, settings.aiSlidesProvider, DEFAULT_SETTINGS.aiSlidesProvider);
+  setSelectValue(elements.aiResourcesProviderSelect, settings.aiResourcesProvider, DEFAULT_SETTINGS.aiResourcesProvider);
+  elements.aiOverviewProvider.value = elements.aiOverviewProviderSelect?.value || "mlx-text";
+  elements.aiTranscriptProvider.value = elements.aiOverviewProviderSelect?.value || "mlx-text";
+  elements.aiSlidesProvider.value = elements.aiSlidesProviderSelect?.value || "mlx-vision";
+  elements.aiResourcesProvider.value = elements.aiResourcesProviderSelect?.value || "mlx-text";
   renderLocalModelOptions();
   renderModelSelect(elements.aiOverviewModel, settings.aiOverviewModel || DEFAULT_SETTINGS.aiOverviewModel, {
     models: modelsForRoute("overview"),
@@ -2609,6 +2836,7 @@ function applySettings(settings) {
   state.aiEnhancePreference = Boolean(settings.aiEnhance ?? settings.enhanceWithGemini);
   elements.aiEnhance.checked = state.aiEnhancePreference;
   elements.concurrentFiles.value = String(validConcurrentFiles(settings.concurrentFiles));
+  elements.minDuration.value = String(validMinDuration(settings.minDuration));
   syncSpeedSegments();
   renderTranscriptionProfileOptions();
   renderAiControls();
@@ -2692,8 +2920,11 @@ function saveCurrentSettings() {
     aiResourcesModel: storedRouteModelValue("resources"),
     mlxTextUrl: sharedLmStudioBaseUrl(),
     mlxVisionUrl: sharedLmStudioBaseUrl(),
+    ollamaCloudUrl: cloudModelBaseUrl(),
+    ollamaCloudModel: String(elements.ollamaCloudModel?.value || "").trim(),
     mlxTimeout,
     concurrentFiles,
+    minDuration: validMinDuration(elements.minDuration.value),
     saveNormalized: true,
   };
 
@@ -2743,9 +2974,50 @@ async function refreshLmStudioTokenStatus() {
   renderAiControls();
 }
 
+async function saveOllamaCloudToken(options = {}) {
+  const { quiet = false } = options;
+  const token = elements.ollamaCloudToken.value.trim();
+  if (!token) {
+    if (!quiet) {
+      elements.ollamaCloudTokenStatus.textContent = "Paste a key first";
+    }
+    return false;
+  }
+
+  elements.saveOllamaCloudTokenButton.disabled = true;
+  try {
+    await invoke("save_api_key", { provider: "ollama-cloud", apiKey: token });
+    elements.ollamaCloudToken.value = "";
+    state.ollamaCloudTokenSaved = true;
+    elements.ollamaCloudTokenStatus.textContent = "Key saved";
+    return true;
+  } catch (error) {
+    state.ollamaCloudTokenSaved = false;
+    elements.ollamaCloudTokenStatus.textContent = `Could not save key: ${error}`;
+    return false;
+  } finally {
+    elements.saveOllamaCloudTokenButton.disabled = false;
+    renderAiControls();
+  }
+}
+
+async function refreshOllamaCloudTokenStatus() {
+  try {
+    const result = await invoke("has_api_key", { provider: "ollama-cloud" });
+    state.ollamaCloudTokenSaved = Boolean(result?.saved);
+    elements.ollamaCloudTokenStatus.textContent = state.ollamaCloudTokenSaved ? "Key saved" : "No key saved";
+  } catch {
+    state.ollamaCloudTokenSaved = false;
+    elements.ollamaCloudTokenStatus.textContent = "Key status unavailable";
+  }
+  renderAiControls();
+}
+
 function renderAiControls() {
   elements.lmStudioToken.disabled = state.running;
   elements.saveLmStudioTokenButton.disabled = state.running;
+  elements.ollamaCloudToken.disabled = state.running;
+  elements.saveOllamaCloudTokenButton.disabled = state.running;
   [
     elements.aiOverviewProvider,
     elements.aiOverviewModel,
@@ -2759,11 +3031,16 @@ function renderAiControls() {
     elements.mlxVisionUrl,
     elements.mlxTimeout,
     elements.refreshLocalModelsButton,
+    elements.ollamaCloudUrl,
+    elements.ollamaCloudModel,
+    elements.refreshOllamaCloudModelsButton,
   ].forEach((element) => {
     const waitsForLocalModels = element === elements.refreshLocalModelsButton;
-    element.disabled = state.running || (waitsForLocalModels && state.localModelsLoading);
+    const waitsForCloudModels = element === elements.refreshOllamaCloudModelsButton;
+    element.disabled = state.running || (waitsForLocalModels && state.localModelsLoading) || (waitsForCloudModels && state.cloudModelsLoading);
   });
   elements.refreshLocalModelsButton.textContent = state.localModelsLoading ? "Checking..." : "Force Refresh Models";
+  elements.refreshOllamaCloudModelsButton.textContent = state.cloudModelsLoading ? "Checking..." : "Refresh Cloud Models";
   elements.modelRoutingStatus.textContent = missingRequiredModelSelections().length ? "Needs selections" : "Ready";
   renderPrimaryAiServer();
 }
@@ -2886,6 +3163,11 @@ function validConcurrentFiles(value) {
 function validMlxTimeout(value) {
   const parsed = Number.parseInt(value, 10);
   return Number.isInteger(parsed) && parsed >= 10 && parsed <= 600 ? parsed : DEFAULT_SETTINGS.mlxTimeout;
+}
+
+function validMinDuration(value) {
+  const parsed = Number.parseFloat(value, 10);
+  return Number.isFinite(parsed) && parsed >= 0 && parsed <= 3600 ? parsed : DEFAULT_SETTINGS.minDuration;
 }
 
 function setupDragAndDrop() {
