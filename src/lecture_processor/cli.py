@@ -417,19 +417,21 @@ def _run_render(args) -> int:
         print(f"Error: lecture artifact not found: {lecture_json}", file=sys.stderr)
         return 2
     try:
-        if args.export_notebook:
-            notebook_path = export_notebook_markdown(lecture_json, course=args.course)
-            if notebook_path:
-                print(f"Notebook: {notebook_path}")
-            else:
-                print("Skipped notebook export (lecture failed processing)", file=sys.stderr)
-                return 1
-            return 0
         html_path = render_lecture_page(lecture_json)
     except Exception as exc:
-        print(f"Error: {exc}", file=sys.stderr)
+        print(f"Error: HTML rendering failed: {exc}", file=sys.stderr)
         return 1
     print(f"Rendered: {html_path}")
+    if args.export_notebook:
+        try:
+            notebook_path = export_notebook_markdown(lecture_json, course=args.course)
+        except Exception as exc:
+            print(f"Error: Notebook export failed: {exc}", file=sys.stderr)
+            return 1
+        if notebook_path:
+            print(f"Notebook: {notebook_path}")
+        else:
+            print("Skipped notebook export (lecture failed processing)", file=sys.stderr)
     return 0
 
 

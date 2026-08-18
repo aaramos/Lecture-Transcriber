@@ -1037,9 +1037,9 @@ class BatchProcessor:
         message: str,
         elapsed_seconds: float,
     ) -> FileResult:
+        html_path = None
         try:
             html_path = self._render_deferred_html(result)
-            self._render_deferred_notebook(result)
         except Exception as exc:
             render_message = str(exc)
             self._append_processing_log_lines(
@@ -1056,6 +1056,26 @@ class BatchProcessor:
                 status=FileStatus.FAILED,
                 message=render_message,
                 failure_step="Render",
+                elapsed_seconds=elapsed_seconds,
+            )
+        try:
+            self._render_deferred_notebook(result)
+        except Exception as exc:
+            notebook_message = str(exc)
+            self._append_processing_log_lines(
+                result.output_dir,
+                [
+                    f"Notebook   ERROR: {notebook_message}",
+                    "Notebook export failed for this lecture. The batch continued and JSON output was preserved.",
+                ],
+            )
+            return _file_result_from_artifact(
+                source=result.source,
+                output_dir=result.output_dir,
+                artifact=artifact,
+                status=FileStatus.FAILED,
+                message=notebook_message,
+                failure_step="Notebook",
                 elapsed_seconds=elapsed_seconds,
             )
         return _file_result_from_artifact(
@@ -1095,14 +1115,7 @@ class BatchProcessor:
         return notebook_path
 
     def _append_processing_log_lines(self, output_dir: Path, lines: List[str]) -> None:
-        log_path = output_dir / "processing_log.txt"
-        existing = ""
-        if log_path.exists():
-            existing = log_path.read_text(encoding="utf-8").rstrip()
-        text = "\n".join(line for line in lines if line)
-        if not text:
-            return
-        write_text_atomic(log_path, f"{existing}\n{text}\n" if existing else f"{text}\n")
+        _append_processing_log_lines(output_dir, lines)
 
     def _time_steps_parallel(
         self,
@@ -1562,9 +1575,9 @@ def _complete_processed_enrichment_result(
     *,
     message: str,
 ) -> FileResult:
+    html_path = None
     try:
         html_path = _render_processed_html(item["source"], item["path"], config, progress_callback)
-        _render_processed_notebook(item["source"], item["path"], config, progress_callback)
     except Exception as exc:
         return _file_result_from_artifact(
             source=item["source"],
@@ -1573,6 +1586,18 @@ def _complete_processed_enrichment_result(
             status=FileStatus.FAILED,
             message=str(exc),
             failure_step="Render",
+            elapsed_seconds=time.monotonic() - item["started"],
+        )
+    try:
+        _render_processed_notebook(item["source"], item["path"], config, progress_callback)
+    except Exception as exc:
+        return _file_result_from_artifact(
+            source=item["source"],
+            output_dir=item["output_dir"],
+            artifact=artifact,
+            status=FileStatus.FAILED,
+            message=str(exc),
+            failure_step="Notebook",
             elapsed_seconds=time.monotonic() - item["started"],
         )
     return _file_result_from_artifact(
@@ -1608,6 +1633,17 @@ def _render_processed_html(
     return html_path
 
 
+def _append_processing_log_lines(output_dir: Path, lines: List[str]) -> None:
+    log_path = output_dir / "processing_log.txt"
+    existing = ""
+    if log_path.exists():
+        existing = log_path.read_text(encoding="utf-8").rstrip()
+    text = "\n".join(line for line in lines if line)
+    if not text:
+        return
+    write_text_atomic(log_path, f"{existing}\n{text}\n" if existing else f"{text}\n")
+
+
 def _render_processed_notebook(
     source: Path,
     lecture_json_path: Path,
@@ -1619,12 +1655,17 @@ def _render_processed_notebook(
     _emit(progress_callback, "step_started", source=source.name, step="Notebook")
     started = time.monotonic()
     notebook_path = export_notebook_markdown(lecture_json_path, course=config.notebook_course)
+    elapsed = time.monotonic() - started
+    if notebook_path:
+        _append_processing_log_lines(lecture_json_path.parent, [f"Notebook   OK  {elapsed:.1f}s"])
+    else:
+        _append_processing_log_lines(lecture_json_path.parent, ["Notebook   SKIP (failed lecture)"])
     _emit(
         progress_callback,
         "step_finished",
         source=source.name,
         step="Notebook",
-        elapsed_seconds=round(time.monotonic() - started, 1),
+        elapsed_seconds=round(elapsed, 1),
     )
     return notebook_path
 
